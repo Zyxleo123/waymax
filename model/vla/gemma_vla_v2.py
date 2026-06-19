@@ -30,9 +30,11 @@ class VecSceneGemmaVLA(nn.Module):
         lora_alpha: int = 32,
         lora_dropout: float = 0.05,
         lora_target_modules: tuple[str, ...] | None = None,
+        predict_subgoal: bool = False,
     ):
         super().__init__()
         self.num_scene_tokens = num_scene_tokens
+        self.predict_subgoal = predict_subgoal
 
         self.processor = AutoProcessor.from_pretrained(
             gemma_name,
@@ -67,7 +69,7 @@ class VecSceneGemmaVLA(nn.Module):
             tl_attr_dim=tl_dim,
             hidden_dim=hidden_dim,
             cond_dim=token_dim,
-            num_tokens=num_scene_tokens + 1,
+            num_tokens=num_scene_tokens + 1 if self.predict_subgoal else num_scene_tokens,
         )
         self.scene_token_self_attention = SelfAttentionLayers(
             dim=token_dim,
@@ -75,7 +77,11 @@ class VecSceneGemmaVLA(nn.Module):
             num_heads=4,
             num_layers=4,
         )
-        self.subgoal_prediction_head = MLP([token_dim, hidden_dim, 2])
+        if self.predict_subgoal:
+            print("VLA initialized with subgoal prediction")
+            self.subgoal_prediction_head = MLP([token_dim, hidden_dim, hidden_dim, 2])
+        else:
+            print("VLA initialized without subgoal prediction")
 
         self._scene_tokens_for_hook = None
         self._scene_start_for_hook = None
@@ -242,7 +248,10 @@ class VecSceneGemmaVLA(nn.Module):
         scene_tokens = self.scene_tokenizer(input_features, deterministic=True)
         scene_tokens = self.scene_token_self_attention(scene_tokens)
         scene_tokens = scene_tokens[:, : self.num_scene_tokens, :]
-        subgoal_token = scene_tokens[:, -1, :]
+        if self.predict_subgoal:
+            subgoal_token = scene_tokens[:, -1, :]
+        else:
+            subgoal_token = None
         return scene_tokens, subgoal_token
 
     def _replace_scene_embeddings_hook(self, module, inputs, output):
@@ -306,7 +315,6 @@ class VecSceneGemmaVLA(nn.Module):
         prompt_mask: torch.Tensor,
         answer_ids: torch.Tensor | None = None,
         answer_mask: torch.Tensor | None = None,
-        predict_subgoal: bool = True,
     ):
         scene_tokens, subgoal_token = self._tokenize_scene_features(input_features)
         device = scene_tokens.device
@@ -371,7 +379,7 @@ class VecSceneGemmaVLA(nn.Module):
             self._scene_start_for_hook = None
             self._scene_len_for_hook = None
 
-        if predict_subgoal:
+        if self.predict_subgoal:
             subgoal_pred = self.subgoal_prediction_head(subgoal_token)
             subgoal_xy = input_features["subgoal_xy"]
             subgoal_loss = nn.functional.mse_loss(subgoal_pred, subgoal_xy, reduction="mean")
@@ -382,7 +390,7 @@ class VecSceneGemmaVLA(nn.Module):
         return {
             "loss": loss,
             "language_loss": outputs.loss,
-            "subgoal_loss": subgoal_loss if predict_subgoal else 0,
+            "subgoal_loss": subgoal_loss if self.predict_subgoal else torch.tensor(0.0, device=loss.device),
         }
 
     def generate_predictions(
@@ -439,8 +447,29 @@ class VecSceneGemmaVLA(nn.Module):
         new_token_ids = generated_ids[:, input_len:]
         decoded = self.tokenizer.batch_decode(new_token_ids, skip_special_tokens=True)
 
-        subgoal_pred = self.subgoal_prediction_head(subgoal_token)
+        if self.predict_subgoal:
+            subgoal_pred = self.subgoal_prediction_head(subgoal_token)
         return {
             "answer": [text.strip() for text in decoded],
-            "subgoal_pred": subgoal_pred.detach().cpu().numpy(),
+            "subgoal_pred": subgoal_pred.detach().cpu().numpy() if self.predict_subgoal else None,
         }
+
+    def state_dict(self, only_trainable=True):
+        state = self.state_dict()
+        if only_trainable:
+            keep_prefixes = [
+                "scene_tokenizer.",
+                "scene_token_self_attention.",
+                "subgoal_prediction_head.",
+            ]
+            filtered = {
+                k: v.cpu()
+                for k, v in state.items()
+                if (
+                    any(k.startswith(p) for p in keep_prefixes)
+                    or "lora_" in k
+                )
+            }
+            return filtered
+        else:
+            return state

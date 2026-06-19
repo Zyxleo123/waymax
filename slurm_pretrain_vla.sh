@@ -10,4 +10,13 @@
 source ~/.bashrc
 conda activate waymax_rs
 
-python -m train_vla.pretrain_vla
+PREDICT_SUBGOAL="${PREDICT_SUBGOAL:-false}"
+TAG="${TAG:-None}"
+
+if [ "$PREDICT_SUBGOAL" = "true" ]; then
+    echo "Running VLA pretraining with subgoal prediction and tag: ${TAG}"
+    python -m train_vla.pretrain_vla --predict_subgoal --tag "${TAG}"
+else
+    echo "Running standard VLA pretraining with tag: ${TAG}"
+    python -m train_vla.pretrain_vla --tag "${TAG}"
+fi

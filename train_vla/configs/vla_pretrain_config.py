@@ -53,6 +53,7 @@ class VLAPretrainConfig:
 	scene_hidden_dim: int = 512
 
 	preprocess_cfg: PreprocessConfig = PreprocessConfig()
+	predict_subgoal: bool = False
 	tag: str | None = None
 
 def _parse_file_indices(raw_file_indices: list[str] | None) -> list[int] | None:
@@ -116,6 +117,7 @@ def parse_args() -> VLAPretrainConfig:
 	parser.add_argument("--tl_dim", type=int, default=11)
 	parser.add_argument("--scene_hidden_dim", type=int, default=512)
 	parser.add_argument("--tag", type=str, default=None, help="Optional tag to add to wandb run name for easier identification.")
+	parser.add_argument("--predict_subgoal", action="store_true", default=False, help="Whether to include a subgoal prediction head and loss during training.")
 	args = parser.parse_args()
 	if args.add_eos:
 		print("Adding EOS token to answers during training and evaluation.")
@@ -166,5 +168,6 @@ def parse_args() -> VLAPretrainConfig:
 		map_dim=args.map_dim,
 		tl_dim=args.tl_dim,
 		scene_hidden_dim=args.scene_hidden_dim,
-		tag=args.tag
+		tag=args.tag,
+		predict_subgoal=args.predict_subgoal,
 	)

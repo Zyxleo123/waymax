@@ -106,6 +106,7 @@ def _build_model_from_metadata(metadata: dict[str, Any], seed: int) -> Diffusion
         inst_attr_dim=int(metadata["inst_dim"]),
         predict_horizon=int(metadata["predict_horizon"]),
         predict_type=str(metadata["predict_type"]),
+        subgoal_conditioned=bool(metadata["subgoal_conditioned"]),
         rngs=nnx.Rngs(int(seed)),
     )
 

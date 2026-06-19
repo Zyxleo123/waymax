@@ -65,6 +65,8 @@ class DiffusionPretrainConfig:
     jax_compilation_cache_dir: str = "./.jax_compilation_cache"
 
     preprocess_cfg: PreprocessConfig = PreprocessConfig()
+    subgoal_conditioned: bool = False
+    tag: str | None = None
 
 
 def parse_args() -> DiffusionPretrainConfig:
@@ -84,7 +86,7 @@ def parse_args() -> DiffusionPretrainConfig:
     parser.add_argument("--epochs", type=int, default=500)
     parser.add_argument("--steps_per_epoch", type=int, default=1000)
     parser.add_argument("--save_every", type=int, default=50)
-    parser.add_argument("--save_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion")
+    parser.add_argument("--save_dir", type=str, default="/zfsauton2/home/mineuih/vla/pretrain_diffusion")
     parser.add_argument("--resume_path", type=str, default=None)
 
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -124,10 +126,14 @@ def parse_args() -> DiffusionPretrainConfig:
     parser.add_argument("--wandb_name", type=str, default="pretrain_diffusion")
     parser.add_argument("--wandb_entity", type=str, default=None)
     parser.add_argument("--wandb_mode", type=str, default="online", choices=["online", "offline", "disabled"])
+    parser.add_argument("--tag", type=str, default=None)
     parser.add_argument("--data_parallel", action="store_true")
-    parser.add_argument("--jax_compilation_cache_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/.jax_compilation_cache")
-
-    return DiffusionPretrainConfig(**vars(parser.parse_args()))
+    parser.add_argument("--subgoal_conditioned", action="store_true", default=False)
+    parser.add_argument("--jax_compilation_cache_dir", type=str, default="/zfsauton2/home/mineuih/vla/.jax_compilation_cache")
+    args = parser.parse_args()
+    if args.tag is not None:
+        args.wandb_name = f"{args.wandb_name}_{args.tag}"
+    return DiffusionPretrainConfig(**vars(args))
 
 
 def config_to_dict(config: DiffusionPretrainConfig) -> dict:

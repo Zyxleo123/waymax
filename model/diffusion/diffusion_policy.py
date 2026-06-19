@@ -82,11 +82,13 @@ class DiffusionPolicy(nnx.Module):
         other_dim: int = 15,
         predict_type: str = "v",
         predict_horizon: int = 25,
+        subgoal_conditioned: bool = False,
         **kwargs: Any,
     ) -> None:
         del kwargs
         self.target_dim = target_dim
         self.predict_horizon = predict_horizon
+        self.subgoal_conditioned = subgoal_conditioned
 
         self.scene_tokenizer = SceneTokenizer(
             ego_dim=ego_dim,
@@ -99,7 +101,8 @@ class DiffusionPolicy(nnx.Module):
             rngs=rngs,
         )
         self.instruction_encoder = MLP([inst_attr_dim, hidden_dim, hidden_dim, cond_dim], rngs=rngs)
-        self.subgoal_encoder = MLP([2, hidden_dim, hidden_dim, cond_dim], rngs=rngs)
+        if self.subgoal_conditioned:
+            self.subgoal_encoder = MLP([2, hidden_dim, hidden_dim, cond_dim], rngs=rngs)
 
         denoise_fn = UNet1DConditioned(
             in_ch=target_dim,
@@ -163,8 +166,11 @@ class DiffusionPolicy(nnx.Module):
     
     def _instruction_condition_impl(self, features: PolicyFeatures) -> jnp.ndarray:
         x_inst = self.instruction_encoder(features.inst_features, deterministic=True)
-        x_subgoal = self.subgoal_encoder(features.subgoal_xy, deterministic=True)
-        x_subgoal = x_subgoal * features.subgoal_valid[..., None]
+        if self.subgoal_conditioned:
+            x_subgoal = self.subgoal_encoder(features.subgoal_xy, deterministic=True)
+            x_subgoal = x_subgoal * features.subgoal_valid[..., None]
+        else:
+            x_subgoal = 0
         return x_inst + x_subgoal
 
 

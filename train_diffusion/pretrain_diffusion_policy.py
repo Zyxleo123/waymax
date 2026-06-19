@@ -62,6 +62,7 @@ def build_training_components(args: DiffusionPretrainConfig):
         inst_attr_dim=args.inst_dim,
         predict_horizon=args.predict_horizon,
         predict_type=args.predict_type,
+        subgoal_conditioned=args.subgoal_conditioned,
     )
     total_steps = max(1, args.epochs * args.steps_per_epoch)
     lr_schedule = optax.warmup_cosine_decay_schedule(

@@ -492,7 +492,8 @@ def _preprocess_single_cached_scenario(
 	origin_xy = ego_resampled_world[:, 0, :2]
 	anchor_yaw = ego_resampled_world[:, 0, 4]
 	goal_xy = _rotate_xy(np.asarray(goal_xy_world) - origin_xy, anchor_yaw) / float(cfg.ego_range)
-	subgoal_xy = np.where(goal_step_b > anchor_step_b + horizon_world_steps_b, ego_traj_norm[:, -1, :2], goal_xy)
+	# subgoal_xy = np.where(goal_step_b > anchor_step_b + horizon_world_steps_b, ego_traj_norm[:, -1, :2], goal_xy)
+	subgoal_xy = ego_traj_norm[:, 15, :2]
 	subgoal_valid = np.ones_like(subgoal_xy[..., 0], dtype=bool)
 	remaining_timesteps = (goal_step_b - anchor_step_b) / 100.0
 
@@ -612,7 +613,8 @@ def _preprocess_single_cached_scenario_with_history(
 	origin_xy = ego_resampled_world[:, 0, :2]
 	anchor_yaw = ego_resampled_world[:, 0, 4]
 	goal_xy = _rotate_xy(np.asarray(goal_xy_world) - origin_xy, anchor_yaw) / float(cfg.ego_range)
-	subgoal_xy = np.where(goal_step_b > anchor_step_b + horizon_world_steps_b, ego_traj_norm[:, -1, :2], goal_xy)
+	# subgoal_xy = np.where(goal_step_b > anchor_step_b + horizon_world_steps_b, ego_traj_norm[:, -1, :2], goal_xy)
+	subgoal_xy = ego_traj_norm[:, 15, :2]
 	subgoal_valid = np.ones_like(subgoal_xy[..., 0], dtype=bool)
 	remaining_timesteps = (goal_step_b - anchor_step_b) / 100.0
 

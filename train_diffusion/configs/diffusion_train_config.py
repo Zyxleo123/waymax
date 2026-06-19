@@ -44,6 +44,7 @@ class DiffusionTrainConfig:
 	wandb_name: str = "train_diffusion"
 	wandb_entity: str | None = None
 	wandb_mode: str = "online"
+	tag: str | None = None
 
 
 def parse_args() -> DiffusionTrainConfig:
@@ -80,9 +81,12 @@ def parse_args() -> DiffusionTrainConfig:
 
 	parser.add_argument("--wandb_project", type=str, default="train_diffusion")
 	parser.add_argument("--wandb_name", type=str, default="train_diffusion")
+	parser.add_argument("--tag", type=str, default=None)
 	parser.add_argument("--wandb_entity", type=str, default=None)
 	parser.add_argument("--wandb_mode", type=str, default="online", choices=["online", "offline", "disabled"])
 	args = parser.parse_args()
+	if args.tag is not None:
+		args.wandb_name += f"_{args.tag}"
 	return DiffusionTrainConfig(**vars(args))
 
 

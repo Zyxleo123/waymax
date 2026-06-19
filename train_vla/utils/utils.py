@@ -210,6 +210,7 @@ def build_vla_model(cfg: VLAPretrainConfig | Mapping[str, Any]) -> Any:
 			lora_alpha=config.get("lora_alpha", 32),
 			lora_dropout=config.get("lora_dropout", 0.05),
 			lora_target_modules=lora_target_modules,
+			predict_subgoal=config.get("predict_subgoal", False),
 		)
 	else:
 		raise ValueError(f"Unknown model_type: {model_type}")

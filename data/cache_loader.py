@@ -83,7 +83,9 @@ class CacheDataset(IterableDataset[CacheBatch]):
             for cache_path in cache_paths:
                 cache_file = Path(cache_path)
                 preprocessed = preprocess_cached_npz(
-                    cache_file, cfg=self.cfg.preprocess_cfg, anchor_step_override=anchor_step,
+                    cache_file, cfg=self.cfg.preprocess_cfg,
+                    anchor_step_override=anchor_step,
+                    goal_step_override=90,
                     include_inst_features=self.cfg.include_inst_features
                 )
                 feature_keys = sorted(preprocessed["features"].keys())
