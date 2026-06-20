@@ -108,7 +108,25 @@ def coerce_tree_like(template, raw):
             ordered_raw = raw
         return type(template)(coerce_tree_like(t, r) for t, r in zip(template, ordered_raw, strict=True))
     if isinstance(template, dict):
-        return {k: coerce_tree_like(template[k], raw[k]) for k in template}
+        if not isinstance(raw, dict):
+            return raw
+
+        coerced = {}
+        for key, template_value in template.items():
+            if key in raw:
+                raw_value = raw[key]
+            else:
+                str_key = str(key)
+                if str_key in raw:
+                    raw_value = raw[str_key]
+                elif isinstance(key, str) and key.isdigit() and int(key) in raw:
+                    raw_value = raw[int(key)]
+                else:
+                    raise KeyError(
+                        f"Missing key {key!r} in raw pytree; available keys: {list(raw.keys())[:10]}"
+                    )
+            coerced[key] = coerce_tree_like(template_value, raw_value)
+        return coerced
     return raw
 
 

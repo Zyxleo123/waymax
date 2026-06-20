@@ -90,9 +90,17 @@ def restore_checkpoint(
 
     loaded_params_state = restored["params_state"]
     loaded_nonparam_state = restored.get("nonparam_state", nonparam_state)
+
+    if coerce_tree_like_fn is not None:
+        loaded_params_state = coerce_tree_like_fn(params_state, loaded_params_state)
+        if nonparam_state is not None and loaded_nonparam_state is not None:
+            loaded_nonparam_state = coerce_tree_like_fn(nonparam_state, loaded_nonparam_state)
+
+    opt_state = restored["opt_state"]
+    
     opt_template = tx.init(loaded_params_state)
     loaded_opt_state = (
-        coerce_tree_like_fn(opt_template, restored["opt_state"])
+        coerce_tree_like_fn(opt_template, opt_state)
         if coerce_tree_like_fn is not None
         else restored["opt_state"]
     )

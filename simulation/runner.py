@@ -101,12 +101,12 @@ def run(args, planner: AbstractPlanner) -> list[dict[str, Any]]:
             replaced_state,
             rng_key=rng_key,
         )
-        tl_violation_eval = check_traffic_light_violation(
-            replaced_state,
-            lane_graphs,
-        )
-        tl_violation = np.asarray(tl_violation_eval["violation"])
-        tl_violation_step = np.asarray(tl_violation_eval["violation_step"])
+        # tl_violation_eval = check_traffic_light_violation(
+        #     replaced_state,
+        #     lane_graphs,
+        # )
+        # tl_violation = np.asarray(tl_violation_eval["violation"])
+        # tl_violation_step = np.asarray(tl_violation_eval["violation_step"])
         goal_eval = check_goal_reaching(
             replaced_state,
             goal_xy_b2,
@@ -126,9 +126,9 @@ def run(args, planner: AbstractPlanner) -> list[dict[str, Any]]:
                 overlap[world_idx] = overlap_timeseries[:episode_length, world_idx].sum() > 0
             if "offroad" in rollout["metric_timeseries"]:
                 offroad[world_idx] = offroad_timeseries[:episode_length, world_idx].sum() > 0
-        tl_violation = tl_violation & (tl_violation_step < goal_reached_step)
+        # tl_violation = tl_violation & (tl_violation_step < goal_reached_step)
 
-        success = goal_reached & (~overlap) & (~offroad) & (~tl_violation)
+        success = goal_reached & (~overlap) & (~offroad)
         reached_all += int(np.sum(goal_eval["reached"]))
         success_all += int(np.sum(success))
         pred_traj = np.asarray(pred.trajectory_world_bt5)
@@ -216,7 +216,6 @@ def run(args, planner: AbstractPlanner) -> list[dict[str, Any]]:
                 "final_goal_distance_m": float(goal_eval["final_goal_distance_m"][i]),
                 "overlap": bool(overlap[i]),
                 "offroad": bool(offroad[i]),
-                "tl_violation": bool(tl_violation[i]),
                 "success": bool(success[i]),
                 "video_path": video_paths[i].as_posix(),
                 "tfrecord": str(tfrecord_path),

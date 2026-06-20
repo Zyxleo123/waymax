@@ -237,6 +237,8 @@ def run_training(cfg: VLAPretrainConfig) -> None:
 							"train/step": global_step,
 							"overall_acc/train_accuracy": train_metrics["accuracy"],
 							"overall_acc/val_accuracy": val_metrics["accuracy"],
+							"overall_acc/train_subgoal_mae": train_metrics["subgoal_mae"],
+							"overall_acc/val_subgoal_mae": val_metrics["subgoal_mae"]
 						}
 						# Add per-question metrics
 						for q_key, q_metrics in train_per_q_metrics.items():

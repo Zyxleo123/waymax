@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+import numpy as np
 import torch
 from torch.nn.utils import clip_grad_norm_
 from tqdm import tqdm
@@ -273,6 +274,7 @@ def evaluate_answer_accuracy(
 
 	total = 0
 	correct = 0
+	subgoal_mae = 0
 	per_question_stats: dict[str, dict[str, int]] = {}  # {q_key: {"correct": int, "total": int}}
 
 	was_training = model.training
@@ -329,6 +331,9 @@ def evaluate_answer_accuracy(
 				per_question_stats[q_key]["total"] += 1
 				if is_correct:
 					per_question_stats[q_key]["correct"] += 1
+			if 'subgoal_pred' in predictions and predictions['subgoal_pred'] is not None:
+				subgoal_xy = 100.0 * features['subgoal_xy'].cpu().float().detach().numpy()
+				subgoal_mae += np.sum(np.abs(subgoal_xy - predictions['subgoal_pred'])) / 2.0
 
 			total += len(answers)
 			if total >= max_samples:
@@ -339,7 +344,7 @@ def evaluate_answer_accuracy(
 
 	# Calculate overall accuracy
 	overall_accuracy = float(correct / total) if total > 0 else 0.0
-	overall_metrics = {"accuracy": overall_accuracy, "num_samples": float(total)}
+	overall_metrics = {"accuracy": overall_accuracy, "num_samples": float(total), "subgoal_mae": float(subgoal_mae / total)}
 
 	# Calculate per-question accuracy
 	per_question_metrics: dict[str, dict[str, float]] = {}

@@ -236,7 +236,6 @@ def _make_train_step(
 
 	return jax.jit(train_step)
 
-
 def main() -> None:
 	args = parse_args()
 	if args.resume_path is None and args.pretrained_ckpt is None:
@@ -250,7 +249,6 @@ def main() -> None:
 	graphdef, params_state, nonparam_state = nnx.split(model, nnx.Param, ...)
 	params_state = _state_to_pure_dict(params_state)
 	nonparam_state = _state_to_pure_dict(nonparam_state)
-
 
 	if args.resume_path:
 		tx, lr_schedule, trainable_mask = _make_optimizer(args, params_state)

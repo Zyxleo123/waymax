@@ -79,7 +79,7 @@ class VecSceneGemmaVLA(nn.Module):
         )
         if self.predict_subgoal:
             print("VLA initialized with subgoal prediction")
-            self.subgoal_prediction_head = MLP([token_dim, hidden_dim, hidden_dim, 2])
+            self.subgoal_prediction_head = MLP([token_dim, hidden_dim, hidden_dim, 2], end_layer_activation=False)
         else:
             print("VLA initialized without subgoal prediction")
 
@@ -380,9 +380,10 @@ class VecSceneGemmaVLA(nn.Module):
             self._scene_len_for_hook = None
 
         if self.predict_subgoal:
-            subgoal_pred = self.subgoal_prediction_head(subgoal_token)
-            subgoal_xy = input_features["subgoal_xy"]
-            subgoal_loss = nn.functional.mse_loss(subgoal_pred, subgoal_xy, reduction="mean")
+            subgoal_pred = 100.0 * self.subgoal_prediction_head(subgoal_token)
+            subgoal_xy = 100.0 * input_features["subgoal_xy"]
+            # subgoal_loss = nn.functional.mse_loss(subgoal_pred, subgoal_xy, reduction="mean")
+            subgoal_loss = nn.functional.huber_loss(subgoal_pred, subgoal_xy, reduction="mean")
             loss = outputs.loss + subgoal_loss
         else:
             loss = outputs.loss
@@ -448,14 +449,24 @@ class VecSceneGemmaVLA(nn.Module):
         decoded = self.tokenizer.batch_decode(new_token_ids, skip_special_tokens=True)
 
         if self.predict_subgoal:
-            subgoal_pred = self.subgoal_prediction_head(subgoal_token)
+            subgoal_pred = 100.0 * self.subgoal_prediction_head(subgoal_token)
         return {
             "answer": [text.strip() for text in decoded],
-            "subgoal_pred": subgoal_pred.detach().cpu().numpy() if self.predict_subgoal else None,
+            "subgoal_pred": subgoal_pred.detach().float().cpu().numpy() if self.predict_subgoal else None,
         }
 
-    def state_dict(self, only_trainable=True):
-        state = self.state_dict()
+    def state_dict(
+        self,
+        destination=None,
+        prefix="",
+        keep_vars=False,
+        only_trainable=True,
+    ):
+        state = super().state_dict(
+            destination=destination,
+            prefix=prefix,
+            keep_vars=keep_vars
+        )
         if only_trainable:
             keep_prefixes = [
                 "scene_tokenizer.",
