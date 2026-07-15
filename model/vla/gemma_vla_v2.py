@@ -185,6 +185,7 @@ class VecSceneGemmaVLA(nn.Module):
             "lora_alpha": int(pick("lora_alpha", 32)),
             "lora_dropout": float(pick("lora_dropout", 0.05)),
             "lora_target_modules": lora_target_modules,
+            "predict_subgoal": bool(pick("predict_subgoal", False)),
         }
 
     @staticmethod

@@ -2,6 +2,8 @@
 set -euo pipefail
 
 SCENE_TOKENIZER_CKPT_PATH="${1:-}"
+PREDICT_SUBGOAL="${2:-false}"
+TAG="${3:-}"
 
 RUN_NAME="finetune_vla"
 
@@ -16,5 +18,5 @@ sbatch \
   --job-name="${RUN_NAME}" \
   --output="logs/${RUN_NAME}_%j.out" \
   --error="logs/${RUN_NAME}_%j.err" \
-  --export=SCENE_TOKENIZER_CKPT_PATH="${SCENE_TOKENIZER_CKPT_PATH}" \
+  --export=SCENE_TOKENIZER_CKPT_PATH="${SCENE_TOKENIZER_CKPT_PATH}",PREDICT_SUBGOAL="${PREDICT_SUBGOAL}",TAG="${TAG}" \
   slurm_finetune_vla.sh

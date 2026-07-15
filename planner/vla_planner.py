@@ -22,6 +22,7 @@ from planner.abstract_planner import AbstractPlanner, PlannerResult
 @dataclass
 class VLAPlannerResult(PlannerResult):
     instruction_texts: Sequence[str]
+    subgoal_preds: Sequence[Any] | None = None
 
 
 
@@ -87,6 +88,7 @@ class VLAPlanner(AbstractPlanner):
         timestep: int = 0,
         mask_goal: bool = False,
         instruction_texts: list[str] | None = None,
+        use_subgoal: bool = False,
         **kwargs: Any,
     ) -> VLAPlannerResult:
         rng, key_pre, key_sample = jax.random.split(rng, 3)
@@ -110,13 +112,14 @@ class VLAPlanner(AbstractPlanner):
             with torch.inference_mode():
                 amp_enabled = self.torch_device.type == "cuda"
                 with torch.autocast(device_type=self.torch_device.type, dtype=torch.bfloat16, enabled=amp_enabled):
-                    instruction_texts, subgoal_texts = self.gemma_vla.generate_inst_subgoal_predictions(
+                    predictions = self.gemma_vla.generate_predictions(
                         input_features=torch_features,
                         prompt_ids=prompt_ids,
                         prompt_mask=prompt_mask,
                         max_new_tokens=self.max_new_tokens,
                     )
-
+        instruction_texts = predictions["answer"]
+        subgoal_preds = predictions.get("subgoal_pred", None)
         instruction_features, instruction_mask = self.encode_instructions(
             instruction_texts=instruction_texts
         )
@@ -127,8 +130,12 @@ class VLAPlanner(AbstractPlanner):
         if mask_goal:
             features["goal_xy"] = jnp.zeros_like(features["goal_xy"])
             features["remaining_timesteps"] = jnp.zeros_like(features["remaining_timesteps"])
-        features["subgoal_xy"] = jnp.zeros((self.num_worlds, 2), dtype=jnp.float32)
-        features["subgoal_valid"] = jnp.zeros((self.num_worlds,), dtype=jnp.float32)
+        if use_subgoal and subgoal_preds is not None:
+            features["subgoal_xy"] = jnp.asarray(subgoal_preds, dtype=jnp.float32) / 100.0
+            features["subgoal_valid"] = jnp.ones((self.num_worlds,), dtype=jnp.float32)
+        else:
+            features["subgoal_xy"] = jnp.zeros((self.num_worlds, 2), dtype=jnp.float32)
+            features["subgoal_valid"] = jnp.zeros((self.num_worlds,), dtype=jnp.float32)
 
         with jax.default_device(self.jax_device):
             cond_bf, inst_cond_bf = self._compute_condition_jit(features)
@@ -155,6 +162,7 @@ class VLAPlanner(AbstractPlanner):
             world_t_valid_bt=world_t_valid_bt,
             aux=pre_batch.aux,
             instruction_texts=instruction_texts,
+            subgoal_preds=subgoal_preds.tolist() if subgoal_preds is not None else None,
         )
 
     def _build_prompt_batch(

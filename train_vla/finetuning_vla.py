@@ -4,6 +4,7 @@ import dataclasses
 from pathlib import Path
 from datetime import datetime
 
+import numpy as np
 import torch
 from torch.nn.utils import clip_grad_norm_
 from tqdm import tqdm
@@ -71,7 +72,7 @@ def compare_subgoal(preds: list[str], labels: list[str]) -> tuple[list[float], l
 def evaluate_accuracy(
 	model, loader, *, device, dtype, max_samples, max_prompt_length, max_answer_length, add_eos
 ):
-	keyword_accuracies, match_accuracies, subgoal_l2_distances, subgoal_format_accuracies = [], [], [], []
+	keyword_accuracies, match_accuracies, subgoal_maes = [], [], []
 	was_training = model.training
 	model.eval()
 	with torch.inference_mode():
@@ -98,31 +99,30 @@ def evaluate_accuracy(
 
 			amp_enabled = device.type == "cuda"
 			with torch.autocast(device_type=device.type, dtype=dtype, enabled=amp_enabled):
-				inst_preds, subgoal_preds = model.generate_inst_subgoal_predictions(
+				predictions = model.generate_predictions(
                     input_features=features,
                     prompt_ids=prompt_ids,
 					prompt_mask=prompt_mask,
                     max_new_tokens=max_answer_length,
                 )
-			inst_answers = [model.split_instruction_subgoal_text(a)[0] for a in answers]
-			subgoal_answers = [model.split_instruction_subgoal_text(a)[1] for a in answers]
-			keyword_accuracies.extend(compare_keyword(inst_preds, inst_answers))
-			match_accuracies.extend(compare_match(inst_preds, inst_answers))
-			l2_distances, format_accuracies = compare_subgoal(subgoal_preds, subgoal_answers)
-			subgoal_l2_distances.extend(l2_distances)
-			subgoal_format_accuracies.extend(format_accuracies)
+			keyword_accuracies.extend(compare_keyword(predictions["answer"], answers))
+			match_accuracies.extend(compare_match(predictions["answer"], answers))
+			subgoal_xy = 100.0 * features["subgoal_xy"].cpu().float().numpy()
+			if predictions["subgoal_pred"] is not None:
+				subgoal_mae_ = np.abs(predictions["subgoal_pred"] - subgoal_xy).mean(-1).tolist()
+				subgoal_maes.extend(subgoal_mae_)
+			else:
+				subgoal_maes.extend([0] * len(predictions["answer"]))
 	keyword_accuracy = sum(keyword_accuracies) / len(keyword_accuracies) if keyword_accuracies else 0.0
 	match_accuracy = sum(match_accuracies) / len(match_accuracies) if match_accuracies else 0.0
-	subgoal_l2_distance = sum(subgoal_l2_distances) / len(subgoal_l2_distances) if subgoal_l2_distances else 0.0
-	subgoal_format_accuracy = sum(subgoal_format_accuracies) / len(subgoal_format_accuracies) if subgoal_format_accuracies else 0.0
-
+	subgoal_mae = sum(subgoal_maes) / len(subgoal_maes) if subgoal_maes else 0.0
+	
 	if was_training:
 		model.train()
 	return {
 		"keyword_accuracy": keyword_accuracy,
 		"match_accuracy": match_accuracy,
-        "subgoal_l2_distance": subgoal_l2_distance,
-		"subgoal_format_accuracy": subgoal_format_accuracy,
+		"subgoal_mae": subgoal_mae,
     }
 			
 
@@ -308,6 +308,8 @@ def run_training(cfg: VLAFinetuningConfig) -> None:
 						{
 							"train/step": global_step,
 							"train/loss": train_loss,
+							"train/subgoal_loss": outputs.get("subgoal_loss", torch.tensor(0.0)).detach().cpu().item(),
+							"train/language_loss": outputs.get("language_loss", torch.tensor(0.0)).detach().cpu().item(),
 							"train/lr": current_lr,
 							"train/batch_size": len(prompts),
 						},
@@ -343,12 +345,10 @@ def run_training(cfg: VLAFinetuningConfig) -> None:
 					wandb_log_dict = {
 						"val_accuracy/match_accuracy": val_metrics["match_accuracy"],
 						"val_accuracy/keyword_accuracy": val_metrics["keyword_accuracy"],
-                        "val_accuracy/subgoal_l2_distance": val_metrics["subgoal_l2_distance"],
-						"val_accuracy/subgoal_format_accuracy": val_metrics["subgoal_format_accuracy"],
+                        "val_accuracy/subgoal_mae": val_metrics["subgoal_mae"],
 						"train_accuracy/match_accuracy": train_metrics["match_accuracy"],
 						"train_accuracy/keyword_accuracy": train_metrics["keyword_accuracy"],
-                        "train_accuracy/subgoal_l2_distance": train_metrics["subgoal_l2_distance"],
-                        "train_accuracy/subgoal_format_accuracy": train_metrics["subgoal_format_accuracy"],
+                        "train_accuracy/subgoal_mae": train_metrics["subgoal_mae"],
                     }
 					wandb_run.log(wandb_log_dict, step=global_step)
 

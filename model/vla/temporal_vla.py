@@ -3,13 +3,12 @@ from __future__ import annotations
 import json
 import importlib
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping
 
 import torch
 import torch.nn as nn
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoProcessor
+from transformers import AutoModelForCausalLM, AutoProcessor
 from model.vla.modules.mlp import MLP
-from model.vla.modules.point_net import PointNet
 from model.vla.modules.attention import CrossAttentionLayers, SelfAttentionLayers
 from model.vla.modules.scene_tokenizer import SceneTokenizer
 
@@ -85,7 +84,7 @@ class TemporalGemmaVLA(nn.Module):
         )
         self.timestep_embedding = nn.Embedding(
             num_history_steps,
-            hidden_dim,
+            token_dim,
         )
         self.temporal_cross_attn = CrossAttentionLayers(
             query_dim=token_dim,
@@ -95,7 +94,7 @@ class TemporalGemmaVLA(nn.Module):
             num_layers=num_attn_layers,
         )
         self.temporal_self_attn = SelfAttentionLayers(
-            query_dim=token_dim,
+            dim=token_dim,
             hidden_dim=hidden_dim,
             num_heads=num_heads,
             num_layers=num_attn_layers,
@@ -268,7 +267,32 @@ class TemporalGemmaVLA(nn.Module):
         self.llm = get_peft_model(self.llm, lora_config)
         self._has_lora = True
 
-    def _tokenize_scene_features(self, input_features: Mapping[str, torch.Tensor]) -> torch.Tensor:
+    def _build_history_valid_mask(
+        self,
+        input_features: Mapping[str, torch.Tensor],
+        *,
+        batch_size: int,
+        num_history_steps: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        history_valid = input_features.get("history_valid")
+        if history_valid is None:
+            return torch.ones((batch_size, num_history_steps), dtype=torch.bool, device=device)
+        history_valid = history_valid.to(device=device)
+        if history_valid.dtype != torch.bool:
+            history_valid = history_valid > 0
+        if history_valid.ndim != 2:
+            raise ValueError(
+                f"history_valid must have shape [B, T], got {tuple(history_valid.shape)}"
+            )
+        if history_valid.shape[0] != batch_size or history_valid.shape[1] != num_history_steps:
+            raise ValueError(
+                f"history_valid shape mismatch: expected [{batch_size}, {num_history_steps}], "
+                f"got {tuple(history_valid.shape)}"
+            )
+        return history_valid
+
+    def _tokenize_scene_features(self, input_features: Mapping[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         """
         ego_state = input_features["ego_state"]: [B, T, ego_dim]
         goal_xy = input_features["goal_xy"]: [B, T, goal_dim]
@@ -292,18 +316,128 @@ class TemporalGemmaVLA(nn.Module):
             "traffic_light_features": input_features["traffic_light_features"].reshape(batch_size * num_history_steps, *input_features["traffic_light_features"].shape[2:]),
             "traffic_light_valid": input_features["traffic_light_valid"].reshape(batch_size * num_history_steps, *input_features["traffic_light_valid"].shape[2:]),
         }
-        scene_tokens = self.scene_tokenizer(flatten_features, deterministic=True).reshape(batch_size, num_history_steps, -1, self.scene_tokenizer.token_dim)
-        timestep_emb = self.timestep_embedding(torch.arange(num_history_steps, device=scene_tokens.device)).unsqueeze(0).unsqueeze(2)
-        scene_tokens = scene_tokens + timestep_emb
-        scene_tokens = self.temporal_cross_attn(
-            query=self.scene_token_queries.expand(batch_size, -1, -1),
-            context=scene_tokens.reshape(batch_size, num_history_steps * self.num_scene_tokens_per_step, -1),
-            context_mask=input_features["history_valid"]
+        per_step_tokens = self.scene_tokenizer(flatten_features, deterministic=True).reshape(
+            batch_size,
+            num_history_steps,
+            -1,
+            self.scene_tokenizer.token_dim,
         )
-        scene_tokens = self.temporal_self_attn(scene_tokens)
-        scene_tokens = scene_tokens[:, :self.num_scene_tokens, :]
-        subgoal_tokens = scene_tokens[:, -1:, :].squeeze(1)
+        timestep_emb = self.timestep_embedding(
+            torch.arange(num_history_steps, device=per_step_tokens.device)
+        ).unsqueeze(0).unsqueeze(2)
+        per_step_tokens = per_step_tokens + timestep_emb
+
+        history_valid = self._build_history_valid_mask(
+            input_features,
+            batch_size=batch_size,
+            num_history_steps=num_history_steps,
+            device=per_step_tokens.device,
+        )
+        context_tokens = per_step_tokens.reshape(batch_size, num_history_steps * self.num_scene_tokens_per_step, -1)
+        context_valid = history_valid.repeat_interleave(self.num_scene_tokens_per_step, dim=1)
+
+        timestep_scene_tokens: list[torch.Tensor] = []
+        timestep_subgoal_tokens: list[torch.Tensor] = []
+        for step_idx in range(num_history_steps):
+            end_token_idx = (step_idx + 1) * self.num_scene_tokens_per_step
+            step_scene_tokens = self.temporal_cross_attn(
+                query_btc=self.scene_token_queries.expand(batch_size, -1, -1),
+                context_bnc=context_tokens[:, :end_token_idx, :],
+                context_mask_bn=context_valid[:, :end_token_idx],
+            )
+            step_scene_tokens = self.temporal_self_attn(step_scene_tokens)
+            timestep_subgoal_tokens.append(step_scene_tokens[:, -1, :])
+            timestep_scene_tokens.append(step_scene_tokens[:, :self.num_scene_tokens, :])
+
+        scene_tokens = torch.stack(timestep_scene_tokens, dim=1)
+        subgoal_tokens = torch.stack(timestep_subgoal_tokens, dim=1)
         return scene_tokens, subgoal_tokens
+
+    def _reshape_temporal_text_inputs(
+        self,
+        *,
+        scene_tokens: torch.Tensor,
+        subgoal_tokens: torch.Tensor,
+        prompt_ids: torch.Tensor,
+        prompt_mask: torch.Tensor,
+        answer_ids: torch.Tensor | None,
+        answer_mask: torch.Tensor | None,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        bool,
+    ]:
+        if prompt_ids.ndim not in (2, 3):
+            raise ValueError(f"prompt_ids must have rank 2 or 3, got {prompt_ids.ndim}")
+        if prompt_mask.ndim != prompt_ids.ndim:
+            raise ValueError("prompt_mask must have the same rank as prompt_ids")
+        if answer_ids is not None and answer_ids.ndim != prompt_ids.ndim:
+            raise ValueError("answer_ids must have the same rank as prompt_ids")
+        if answer_mask is not None and answer_mask.ndim != prompt_ids.ndim:
+            raise ValueError("answer_mask must have the same rank as prompt_ids")
+
+        batch_size, num_history_steps, num_scene_tokens = scene_tokens.shape[:3]
+
+        if prompt_ids.ndim == 3:
+            if prompt_ids.shape[:2] != (batch_size, num_history_steps):
+                raise ValueError(
+                    "When prompt_ids is [B, T, P], its [B, T] shape must match scene tokens: "
+                    f"expected [{batch_size}, {num_history_steps}], got {tuple(prompt_ids.shape[:2])}"
+                )
+
+            flat_scene_tokens = scene_tokens.reshape(batch_size * num_history_steps, num_scene_tokens, -1)
+            flat_subgoal_tokens = subgoal_tokens.reshape(batch_size * num_history_steps, -1)
+            flat_prompt_ids = prompt_ids.reshape(batch_size * num_history_steps, prompt_ids.shape[-1])
+            flat_prompt_mask = prompt_mask.reshape(batch_size * num_history_steps, prompt_mask.shape[-1])
+            flat_answer_ids = None
+            flat_answer_mask = None
+            if answer_ids is not None:
+                flat_answer_ids = answer_ids.reshape(batch_size * num_history_steps, answer_ids.shape[-1])
+            if answer_mask is not None:
+                flat_answer_mask = answer_mask.reshape(batch_size * num_history_steps, answer_mask.shape[-1])
+            return (
+                flat_scene_tokens,
+                flat_subgoal_tokens,
+                flat_prompt_ids,
+                flat_prompt_mask,
+                flat_answer_ids,
+                flat_answer_mask,
+                True,
+            )
+
+        text_batch = prompt_ids.shape[0]
+        if text_batch == batch_size * num_history_steps:
+            flat_scene_tokens = scene_tokens.reshape(batch_size * num_history_steps, num_scene_tokens, -1)
+            flat_subgoal_tokens = subgoal_tokens.reshape(batch_size * num_history_steps, -1)
+            return (
+                flat_scene_tokens,
+                flat_subgoal_tokens,
+                prompt_ids,
+                prompt_mask,
+                answer_ids,
+                answer_mask,
+                True,
+            )
+
+        if text_batch == batch_size:
+            return (
+                scene_tokens[:, -1, :, :],
+                subgoal_tokens[:, -1, :],
+                prompt_ids,
+                prompt_mask,
+                answer_ids,
+                answer_mask,
+                False,
+            )
+
+        raise ValueError(
+            "prompt_ids first dimension must be B, B*T, or [B, T, P]. "
+            f"Got prompt batch={text_batch}, B={batch_size}, T={num_history_steps}."
+        )
 
     def _replace_scene_embeddings_hook(self, module, inputs, output):
         """
@@ -366,55 +500,68 @@ class TemporalGemmaVLA(nn.Module):
         prompt_mask: torch.Tensor,
         answer_ids: torch.Tensor | None = None,
         answer_mask: torch.Tensor | None = None,
-        compute_subgoal_loss: bool = True,
+        compute_subgoal_loss: bool = False,
     ):
         scene_tokens, subgoal_tokens = self._tokenize_scene_features(input_features)
-        device = scene_tokens.device
+        (
+            flat_scene_tokens,
+            flat_subgoal_tokens,
+            flat_prompt_ids,
+            flat_prompt_mask,
+            flat_answer_ids,
+            flat_answer_mask,
+            used_temporal_batch,
+        ) = self._reshape_temporal_text_inputs(
+            scene_tokens=scene_tokens,
+            subgoal_tokens=subgoal_tokens,
+            prompt_ids=prompt_ids,
+            prompt_mask=prompt_mask,
+            answer_ids=answer_ids,
+            answer_mask=answer_mask,
+        )
 
-        batch_size = prompt_ids.shape[0]
-        num_history, num_scene_tokens = scene_tokens.shape[1], scene_tokens.shape[2]
+        device = flat_scene_tokens.device
+        batch_size = flat_prompt_ids.shape[0]
+        num_scene_tokens = flat_scene_tokens.shape[1]
 
         scene_dummy_ids = torch.full(
             (batch_size, num_scene_tokens),
             fill_value=self.tokenizer.pad_token_id,
-            dtype=prompt_ids.dtype,
+            dtype=flat_prompt_ids.dtype,
             device=device,
         )
         scene_mask = torch.ones(
             (batch_size, num_scene_tokens),
-            dtype=prompt_mask.dtype,
+            dtype=flat_prompt_mask.dtype,
             device=device,
         )
-        if answer_ids is None:
-            input_ids = torch.cat([scene_dummy_ids, prompt_ids], dim=1)
-            attention_mask = torch.cat([scene_mask, prompt_mask], dim=1)
+        if flat_answer_ids is None:
+            input_ids = torch.cat([scene_dummy_ids, flat_prompt_ids], dim=1)
+            attention_mask = torch.cat([scene_mask, flat_prompt_mask], dim=1)
             labels = None
         else:
             input_ids = torch.cat(
-                [scene_dummy_ids, prompt_ids, answer_ids],
+                [scene_dummy_ids, flat_prompt_ids, flat_answer_ids],
                 dim=1,
             )
+            if flat_answer_mask is None:
+                flat_answer_mask = (flat_answer_ids != self.tokenizer.pad_token_id).to(flat_prompt_mask.dtype)
             attention_mask = torch.cat(
-                [scene_mask, prompt_mask, answer_mask],
+                [scene_mask, flat_prompt_mask, flat_answer_mask],
                 dim=1,
             )
-            if answer_mask is not None:
-                answer_labels = answer_ids.masked_fill(answer_mask == 0, -100)
-            else:
-                answer_labels = answer_ids.masked_fill(
-                    answer_ids == self.tokenizer.pad_token_id,
-                    -100,
-                )
+
+            answer_labels = flat_answer_ids.masked_fill(flat_answer_mask == 0, -100)
 
             labels = torch.cat(
                 [
-                    torch.full(scene_dummy_ids.shape, -100, dtype=answer_ids.dtype, device=device),
-                    torch.full(prompt_ids.shape, -100, dtype=answer_ids.dtype, device=device),
+                    torch.full(scene_dummy_ids.shape, -100, dtype=flat_answer_ids.dtype, device=device),
+                    torch.full(flat_prompt_ids.shape, -100, dtype=flat_answer_ids.dtype, device=device),
                     answer_labels,
                 ],
                 dim=1,
             )
-        self._scene_tokens_for_hook = scene_tokens
+        self._scene_tokens_for_hook = flat_scene_tokens
         self._scene_start_for_hook = 0
         self._scene_len_for_hook = num_scene_tokens
 
@@ -433,8 +580,13 @@ class TemporalGemmaVLA(nn.Module):
 
         language_loss = outputs.loss
         if compute_subgoal_loss:
-            subgoal_xy = input_features["subgoal_xy"][:, 0, :] if input_features["subgoal_xy"].ndim == 3 else input_features["subgoal_xy"]
-            subgoal_preds = self.subgoal_prediction(subgoal_tokens)
+            subgoal_xy = input_features["subgoal_xy"]
+            if subgoal_xy.ndim == 3:
+                if used_temporal_batch:
+                    subgoal_xy = subgoal_xy.reshape(-1, subgoal_xy.shape[-1])
+                else:
+                    subgoal_xy = subgoal_xy[:, -1, :]
+            subgoal_preds = self.subgoal_prediction(flat_subgoal_tokens)
             subgoal_loss = nn.functional.mse_loss(subgoal_preds, subgoal_xy, reduction="mean")
             loss = language_loss + subgoal_loss
         else:
@@ -443,43 +595,59 @@ class TemporalGemmaVLA(nn.Module):
 
         return {
             "loss": loss,
-            "subgoal_loss": subgoal_loss,
-            "language_loss": language_loss,
+            "subgoal_loss": subgoal_loss.detach().cpu() if isinstance(subgoal_loss, torch.Tensor) else subgoal_loss,
+            "language_loss": language_loss.detach().cpu() if isinstance(language_loss, torch.Tensor) else language_loss,
         }
 
     def generate_predictions(
         self,
         input_features: Mapping[str, torch.Tensor],
-        prompt_ids: torch.Tensor,  # [B, P]
-        prompt_mask: torch.Tensor,  # [B, P]
+        prompt_ids: torch.Tensor,
+        prompt_mask: torch.Tensor,
         max_new_tokens: int = 8,
-    ) -> torch.Tensor:
-        device = prompt_ids.device
+    ) -> tuple[list[str] | list[list[str]], Any]:
         scene_tokens, subgoal_tokens = self._tokenize_scene_features(input_features)
-        
-        batch_size = prompt_ids.shape[0]
-        num_scene_tokens = scene_tokens.shape[1]
+        (
+            flat_scene_tokens,
+            flat_subgoal_tokens,
+            flat_prompt_ids,
+            flat_prompt_mask,
+            _,
+            _,
+            used_temporal_batch,
+        ) = self._reshape_temporal_text_inputs(
+            scene_tokens=scene_tokens,
+            subgoal_tokens=subgoal_tokens,
+            prompt_ids=prompt_ids,
+            prompt_mask=prompt_mask,
+            answer_ids=None,
+            answer_mask=None,
+        )
+        device = flat_prompt_ids.device
+
+        batch_size = flat_prompt_ids.shape[0]
+        num_scene_tokens = flat_scene_tokens.shape[1]
 
         scene_dummy_ids = torch.full(
             (batch_size, num_scene_tokens),
             fill_value=self.tokenizer.pad_token_id,
-            dtype=prompt_ids.dtype,
+            dtype=flat_prompt_ids.dtype,
             device=device,
         )
         scene_mask = torch.ones(
             (batch_size, num_scene_tokens),
-            dtype=prompt_mask.dtype,
+            dtype=flat_prompt_mask.dtype,
             device=device,
         )
         input_ids = torch.cat(
-            [scene_dummy_ids, prompt_ids],
+            [scene_dummy_ids, flat_prompt_ids],
             dim=1,
         )
         attention_mask = torch.cat(
-            [scene_mask, prompt_mask],
+            [scene_mask, flat_prompt_mask],
             dim=1,
         )
-        self._scene_tokens_for_hook = scene_tokens
+        self._scene_tokens_for_hook = flat_scene_tokens
         self._scene_start_for_hook = 0
         self._scene_len_for_hook = num_scene_tokens
 
@@ -502,5 +670,14 @@ class TemporalGemmaVLA(nn.Module):
         decoded = self.tokenizer.batch_decode(new_token_ids, skip_special_tokens=True)
         output_texts = [text.strip() for text in decoded]
 
-        subgoal_preds = self.subgoal_prediction(subgoal_tokens)
+        subgoal_preds = self.subgoal_prediction(flat_subgoal_tokens)
+
+        if prompt_ids.ndim == 3:
+            batch_size, num_history_steps = scene_tokens.shape[:2]
+            output_texts = [
+                output_texts[i * num_history_steps : (i + 1) * num_history_steps]
+                for i in range(batch_size)
+            ]
+            subgoal_preds = subgoal_preds.reshape(batch_size, num_history_steps, -1)
+
         return output_texts, subgoal_preds.detach().cpu().numpy()

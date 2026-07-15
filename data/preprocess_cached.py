@@ -446,7 +446,14 @@ def _preprocess_single_cached_scenario(
 	ts_bt = _gather_ego(np.asarray(state["log_trajectory_timestamp_micros"]), ego_idx).astype(np.float32) * 1e-6
 
 	if goal_step_override is not None:
-		goal_step_b = np.full((bsz,), int(np.asarray(goal_step_override)), dtype=np.int32)
+		if isinstance(goal_step_override, (int, np.integer)):
+			goal_step_b = np.full((bsz,), int(np.asarray(goal_step_override)), dtype=np.int32)
+		elif isinstance(goal_step_override, (list, np.ndarray)):
+			goal_step_b = np.asarray(goal_step_override, dtype=np.int32)
+			if goal_step_b.ndim == 1 and goal_step_b.shape[0] == bsz:
+				goal_step_b = goal_step_b.astype(np.int32)
+			else:
+				raise ValueError(f"goal_step_override must be a scalar or a 1D array of length {bsz}, got {goal_step_b.shape}")
 	else:
 		goal_step_b, _ = sample_future_goal_step(ego_valid_bt, anchor_step_b, rng)
 
@@ -534,6 +541,7 @@ def _preprocess_single_cached_scenario(
 		"ego_index": ego_idx.astype(np.int32),
 		"anchor_step": anchor_step_b.astype(np.int32),
 		"anchor_world_state": anchor_world_state.astype(np.float32),
+		"goal_step": goal_step_b.astype(np.int32),
 	}
 
 	return features, aux

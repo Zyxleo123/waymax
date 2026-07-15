@@ -91,12 +91,14 @@ def predict_planner_trajectories_with_periodic_replan(
     replan_interval_steps: int,
     instruction_interval_steps: int,
     start_timestep: int,
+    use_subgoal: bool,
     rng_key: jax.Array,
 ):
     num_worlds = int(sim_state.log_trajectory.x.shape[0])
     episode_num_steps = int(sim_state.log_trajectory.x.shape[-1])
     start_t_b1 = np.full([num_worlds], start_timestep, dtype=np.int32)
     instructions = [dict() for _ in range(num_worlds)]
+    subgoals = [dict() for _ in range(num_worlds)]
 
     replaced_state = sim_state  
     prev_instruction_texts = None
@@ -110,11 +112,14 @@ def predict_planner_trajectories_with_periodic_replan(
             timestep=step_offset,
             mask_goal=cfg.mask_goal,
             instruction_texts=instruction_texts,
+            use_subgoal=cfg.use_subgoal,
         )
         instruction_t = getattr(plan_result, "instruction_texts", None)
+        subgoal_t = getattr(plan_result, "subgoal_preds", None)
         prev_instruction_texts = instruction_t
         for b in range(num_worlds):
             instructions[b][f"t{step_offset}"] = instruction_t[b] if instruction_t is not None else ""
+            subgoals[b][f"t{step_offset}"] = subgoal_t[b] if subgoal_t is not None else None
         plan_traj_bt5 = np.asarray(plan_result.trajectory_world_bt5, dtype=np.float32)
         replaced_state = apply_ego_replacements_to_expanded_state(
             replaced_state,
@@ -135,7 +140,7 @@ def predict_planner_trajectories_with_periodic_replan(
         aux=plan_result.aux,
     )
 
-    return pred, replaced_state, instructions
+    return pred, replaced_state, instructions, subgoals
 
 def sim_state_to_ego_trajectory(sim_state):
     sdc_indices = get_sdc_indices_for_batched_state(sim_state)

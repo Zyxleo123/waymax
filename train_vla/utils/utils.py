@@ -56,25 +56,29 @@ def load_scene_tokenizer_from_checkpoint(model: Any, scene_tokenizer_ckpt: str |
 	checkpoint_path = _resolve_scene_tokenizer_checkpoint(scene_tokenizer_ckpt)
 	checkpoint = torch.load(checkpoint_path, map_location="cpu")
 	state_dict = checkpoint.get("model_state_dict", checkpoint)
-	prefix = "scene_tokenizer."
-	scene_tokenizer_state = {
-		key[len(prefix):]: value
-		for key, value in state_dict.items()
-		if key.startswith(prefix)
-	}
-	if not scene_tokenizer_state:
+	model_state = model.state_dict()
+	loadable_state: dict[str, torch.Tensor] = {}
+	for key, value in state_dict.items():
+		if key not in model_state:
+			continue
+		if model_state[key].shape != value.shape:
+			continue
+		loadable_state[key] = value
+	if not loadable_state:
 		raise KeyError(
-			f"No scene_tokenizer weights found in checkpoint: {checkpoint_path}"
+			f"No compatible weights found in checkpoint: {checkpoint_path}"
 		)
-	missing, unexpected = model.scene_tokenizer.load_state_dict(scene_tokenizer_state, strict=False)
-	if missing:
-		raise RuntimeError(
-			f"Missing scene_tokenizer keys when loading {checkpoint_path}: {sorted(missing)}"
-		)
+	missing, unexpected = model.load_state_dict(loadable_state, strict=False)
 	if unexpected:
 		raise RuntimeError(
-			f"Unexpected scene_tokenizer keys when loading {checkpoint_path}: {sorted(unexpected)}"
+			f"Unexpected keys when loading {checkpoint_path}: {sorted(unexpected)}"
 		)
+	if not any(
+		key.startswith(("scene_tokenizer.", "scene_token_self_attention.", "subgoal_prediction_head.", "llm."))
+		for key in loadable_state
+	):
+		raise RuntimeError(f"Checkpoint did not contain any VLA component weights: {checkpoint_path}")
+	# Missing keys are expected for the frozen base LLM when loading a finetuning checkpoint.
 
 
 def qa_to_text(qa_item: Mapping[str, Any]) -> tuple[str, str]:
@@ -360,26 +364,33 @@ def evaluate_answer_accuracy(
 
 def save_checkpoint(
 	output_dir: str,
-	step: int,
+	tag: str,
 	model: Any,
 	optimizer: torch.optim.Optimizer,
 	scheduler: Any,
+	step: int = None,
 	*,
 	cfg: VLAPretrainConfig | None = None,
+	save_trainable_only: bool = True,
 ) -> None:
-	ckpt_dir = Path(output_dir) / "checkpoints"
+	ckpt_dir = Path(output_dir)
 	ckpt_dir.mkdir(parents=True, exist_ok=True)
-	ckpt_path = ckpt_dir / f"step_{step:08d}.pt"
+	ckpt_path = ckpt_dir / f"{tag}.pt"
+	state_dict = model.state_dict()
+	if save_trainable_only:
+		trainable_names = {name for name, param in model.named_parameters() if param.requires_grad}
+		state_dict = {name: tensor for name, tensor in state_dict.items() if name in trainable_names}
 	payload: dict[str, Any] = {
 		"step": step,
-		"model_state_dict": model.state_dict(),
+		"model_state_dict": state_dict,
 		"optimizer_state_dict": optimizer.state_dict(),
 		"scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
 	}
 	if cfg is not None:
-		payload["model_type"] = cfg.model_type
-		payload["qwen_name"] = cfg.qwen_name
-		payload["gemma_name"] = cfg.gemma_name
-		payload["max_prompt_length"] = cfg.max_prompt_length
-		payload["max_answer_length"] = cfg.max_answer_length
+		payload["cfg"] = dataclasses.asdict(cfg)
+	# 	payload["model_type"] = cfg.model_type
+	# # 	payload["qwen_name"] = cfg.qwen_name
+	# 	payload["gemma_name"] = cfg.gemma_name
+	# 	payload["max_prompt_length"] = cfg.max_prompt_length
+	# 	payload["max_answer_length"] = cfg.max_answer_length
 	torch.save(payload, ckpt_path)

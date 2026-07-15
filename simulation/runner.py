@@ -27,7 +27,11 @@ from simulation.evaluation_utils import (
     check_goal_reaching, 
     check_traffic_light_violation
 )
-from simulation.planning_utils import predict_planner_trajectories_with_periodic_replan, get_sdc_indices_for_batched_state
+from simulation.planning_utils import (
+    predict_planner_trajectories_with_periodic_replan,
+    get_sdc_indices_for_batched_state,
+    sim_state_to_ego_trajectory,
+)
 from planner.abstract_planner import AbstractPlanner, PlannerResult
 
 from simulation.utils import _save_json  # noqa: E402
@@ -36,7 +40,7 @@ from waymax import config as waymax_config
 from tqdm import tqdm
 
 
-def run(args, planner: AbstractPlanner) -> list[dict[str, Any]]:
+def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]]:
     output_dir = Path(args.output_dir) / time.strftime("%Y%m%d_%H%M%S")
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -86,16 +90,26 @@ def run(args, planner: AbstractPlanner) -> list[dict[str, Any]]:
         rng_key = jax.random.PRNGKey(int(args.seed))
         goal_xy_b2, goal_t_b, ego_idx_b = infer_goals_from_sim_state(sim_state)
 
-        pred, replaced_state, instructions = predict_planner_trajectories_with_periodic_replan(
-            args,
-            sim_state,
-            goal_xy_b2,
-            planner,
-            start_timestep=int(args.start_timestep),
-            replan_interval_steps=int(args.replan_interval_steps),
-            instruction_interval_steps=int(args.instruction_interval_steps),
-            rng_key=rng_key,
-        )
+        if log_replay:
+            replaced_state = sim_state
+            pred_traj = np.asarray(sim_state_to_ego_trajectory(sim_state))
+            start_t = np.full((len(scenario_indices),), int(args.start_timestep), dtype=np.int32)
+            instructions = [dict() for _ in range(len(scenario_indices))]
+            subgoals = [dict() for _ in range(len(scenario_indices))]
+        else:
+            pred, replaced_state, instructions, subgoals = predict_planner_trajectories_with_periodic_replan(
+                args,
+                sim_state,
+                goal_xy_b2,
+                planner,
+                start_timestep=int(args.start_timestep),
+                replan_interval_steps=int(args.replan_interval_steps),
+                instruction_interval_steps=int(args.instruction_interval_steps),
+                use_subgoal=args.use_subgoal,
+                rng_key=rng_key,
+            )
+            pred_traj = np.asarray(pred.trajectory_world_bt5)
+            start_t = np.asarray(pred.start_t_b, dtype=np.int32)
 
         rollout = rollout_predicted_trajectories_with_metrics(
             replaced_state,
@@ -131,8 +145,6 @@ def run(args, planner: AbstractPlanner) -> list[dict[str, Any]]:
         success = goal_reached & (~overlap) & (~offroad)
         reached_all += int(np.sum(goal_eval["reached"]))
         success_all += int(np.sum(success))
-        pred_traj = np.asarray(pred.trajectory_world_bt5)
-        start_t = np.asarray(pred.start_t_b, dtype=np.int32)
 
         if args.save_trajectory:
             for i, scenario_idx in enumerate(scenario_indices):
@@ -151,6 +163,7 @@ def run(args, planner: AbstractPlanner) -> list[dict[str, Any]]:
                     "scenario_idx": int(scenario_idx),
                     "ego_idx": int(ego_idx_b[i]),
                     "instructions": instructions[i],
+                    "subgoals": subgoals[i] if args.use_subgoal else None,
                 }
                 instruction_path = output_dir / f"{os.path.basename(tfrecord_path)}.scenario_{scenario_idx:03d}.instructions.json"
                 _save_json(instruction_path, instruction_data)
@@ -217,7 +230,7 @@ def run(args, planner: AbstractPlanner) -> list[dict[str, Any]]:
                 "overlap": bool(overlap[i]),
                 "offroad": bool(offroad[i]),
                 "success": bool(success[i]),
-                "video_path": video_paths[i].as_posix(),
+                "video_path": video_paths[i].as_posix() if video_requests else None,
                 "tfrecord": str(tfrecord_path),
             }
             result_path = output_dir / f"{os.path.basename(tfrecord_path)}.scenario_{scenario_idx:03d}.json"

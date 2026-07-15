@@ -63,7 +63,7 @@ def parse_args() -> DiffusionTrainConfig:
 	parser.add_argument("--use_ema", action="store_true", default=True)
 	parser.add_argument("--no_use_ema", action="store_false", dest="use_ema")
 
-	parser.add_argument("--save_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/vla/train_diffusion")
+	parser.add_argument("--save_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/checkpoints/train_diffusion")
 	parser.add_argument("--epochs", type=int, default=500)
 	parser.add_argument("--steps_per_epoch", type=int, default=1000)
 	parser.add_argument("--save_every", type=int, default=10)

@@ -12,4 +12,4 @@ PRETRAINED_CKPT="${PRETRAINED_CKPT:-}"
 source ~/.bashrc
 conda activate waymax_rs
 
-python -m train_diffusion.train_diffusion_policy --pretrained_ckpt "${PRETRAINED_CKPT}"
+python -m train_diffusion.train_diffusion_policy --pretrained_ckpt "${PRETRAINED_CKPT}" --tag "without_subgoal"

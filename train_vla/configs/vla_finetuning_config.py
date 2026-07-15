@@ -78,6 +78,7 @@ class VLAFinetuningConfig:
 
 	preprocess_cfg: PreprocessConfig = PreprocessConfig()
 	tag: str | None = None
+	predict_subgoal: bool = False
 
 
 def _parse_file_indices(raw_file_indices: list[str] | None) -> list[int] | None:
@@ -199,6 +200,7 @@ def parse_args() -> VLAFinetuningConfig:
 		default=None,
 		help="Comma-separated LoRA target modules, e.g. q_proj,k_proj,v_proj,o_proj.",
 	)
+	parser.add_argument("--predict_subgoal", action="store_true", default=False)
 	parser.add_argument("--tag", type=str, default=None, help="Optional tag to add to wandb run name.")
 
 	args = parser.parse_args()
@@ -250,6 +252,7 @@ def parse_args() -> VLAFinetuningConfig:
 		pretrained_model_path=args.pretrained_model_path,
 		scene_tokenizer_ckpt=args.scene_tokenizer_ckpt,
 		use_lora=args.use_lora,
+		predict_subgoal=args.predict_subgoal,
 		lora_r=args.lora_r,
 		lora_alpha=args.lora_alpha,
 		lora_dropout=args.lora_dropout,
