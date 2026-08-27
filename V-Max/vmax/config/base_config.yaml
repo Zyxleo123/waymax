@@ -85,6 +85,20 @@ bank_chunk_size: null
 # ungated meanwhile. Truncation at the goal always applies and is not gated by this.
 bank_max_yaw_rate: null
 
+# Hardness-balanced scenario sampling. Set hardness_risk_table to a risk.npz
+# (from train_diffusion.hardness.risk_model, refit on THIS policy's failures) to
+# replace the uniform WOMD training stream with one that draws scenes in
+# proportion to (risk/mean_risk)**hardness_alpha, clipped to
+# [1/hardness_weight_clip, hardness_weight_clip]; dirty scenes are dropped when
+# hardness_exclude_dirty. hardness_alpha=0 reproduces uniform sampling. Needs the
+# WOMD byte-offset indexes (hardness_index_dir). null disables it entirely. Eval
+# stays uniform. SAC only. See rl/vmax_hardness/.
+hardness_risk_table: null
+hardness_alpha: 1.0
+hardness_weight_clip: 10.0
+hardness_exclude_dirty: true
+hardness_index_dir: null
+
 # Reward config
 reward_type: linear
 reward_config:

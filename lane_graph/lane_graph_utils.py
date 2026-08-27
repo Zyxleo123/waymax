@@ -33,6 +33,27 @@ def _lane_graph_zip_path_for_tfrecord(tfrecord_path: str, lane_graph_dir: str) -
     return Path(lane_graph_dir) / f"{base}.lanegraph.zip"
 
 
+def _load_lane_graph_map(tfrecord_path: str, lane_graph_dir: str) -> Optional[list]:
+    """Redirect table for a tfrecord that has no lane graph shard of its own.
+
+    A derived tfrecord (failures.tfrecord is a byte-copy of scenes drawn from
+    the WOMD shards) has no ``*.lanegraph.zip``, but the scenes it copied do.
+    A sidecar ``<tfrecord>.lanegraph_map.json`` -- ``entries[i] = [shard, idx]``
+    -- points position ``i`` at the shard entry that already exists. Written by
+    ``rl/build_failure_lanegraph_map.py``. Absent for ordinary tfrecords, which
+    resolve directly and never look for it twice.
+    """
+    name = f"{os.path.basename(tfrecord_path)}.lanegraph_map.json"
+    candidates = [Path(tfrecord_path).parent / name]
+    if lane_graph_dir is not None:
+        candidates.append(Path(lane_graph_dir) / name)
+    for path in candidates:
+        if path.is_file():
+            with open(path) as handle:
+                return json.load(handle)["entries"]
+    return None
+
+
 class LaneGraphZipStore:
     """Small helper that loads lane graph NPZ entries from shard zip files.
 
@@ -173,17 +194,41 @@ class LaneGraphLoader:
 
     def __init__(self, lane_graph_dir: Optional[str] = None):
         self.lane_graph_dir = lane_graph_dir
-        self._zip_stores = None
+        # Keyed by zip path, not a single slot: one batch of the failure set
+        # spans several source shards, and a one-entry cache would reopen and
+        # re-index a zip for nearly every scenario.
+        self._zip_stores: Dict[str, LaneGraphShardStore] = {}
+        self._maps: Dict[str, Optional[list]] = {}
+
+    def _resolve(self, tfrecord_path: str, scenario_id: int) -> Tuple[str, int]:
+        """(tfrecord whose shard holds this scene, index within that shard)."""
+        key = os.path.basename(tfrecord_path)
+        if key not in self._maps:
+            self._maps[key] = _load_lane_graph_map(tfrecord_path, self.lane_graph_dir)
+        entries = self._maps[key]
+        if entries is None:
+            return tfrecord_path, int(scenario_id)
+        idx = int(scenario_id)
+        if not 0 <= idx < len(entries):
+            raise IndexError(
+                f"scenario {idx} is outside the {len(entries)}-entry lane graph map "
+                f"for {key}"
+            )
+        shard, source_idx = entries[idx]
+        return shard, int(source_idx)
 
     def get_lane_graph_for_scenario(self, tfrecord_path: str, scenario_id: int) -> Optional[LaneGraphData]:
         if self.lane_graph_dir is None or tfrecord_path is None:
             return None
 
-        zip_path = _lane_graph_zip_path_for_tfrecord(tfrecord_path, self.lane_graph_dir)
-        if self._zip_stores is None or self._zip_stores[0] != zip_path.as_posix():
-            self._zip_stores = (zip_path.as_posix(), LaneGraphShardStore(zip_path.as_posix()))
-        
-        return self._zip_stores[1].get_by_record_index(int(scenario_id))
+        source_path, source_idx = self._resolve(tfrecord_path, scenario_id)
+        zip_path = _lane_graph_zip_path_for_tfrecord(source_path, self.lane_graph_dir).as_posix()
+        store = self._zip_stores.get(zip_path)
+        if store is None:
+            store = LaneGraphShardStore(zip_path)
+            self._zip_stores[zip_path] = store
+
+        return store.get_by_record_index(source_idx)
 
     def get_lane_graph_for_scenarios(self, tfrecord_path: str, scenario_indices: list[int]) -> list[Optional[LaneGraphData]]:
         return [self.get_lane_graph_for_scenario(tfrecord_path, idx) for idx in scenario_indices]

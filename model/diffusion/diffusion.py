@@ -408,6 +408,39 @@ class GaussianDiffusion(nnx.Module):
         _, _, x0_pred = self.p_mean_variance(x_t, t, cond1, cond2, cond2_mask, denoise_fn=denoise_fn)
         return self._ddim_update(x_t, t, x0_pred, noise, eta=eta, sampling_temp=sampling_temp)
 
+    def _ddim_step_strided(self, x_t: jnp.ndarray, from_t: jnp.ndarray, to_t: jnp.ndarray,
+                           cond1: jnp.ndarray, cond2: jnp.ndarray, cond2_mask: jnp.ndarray,
+                           noise: jnp.ndarray, eta: float = 1.0, sampling_temp: float = 1.0,
+                           denoise_fn=None) -> jnp.ndarray:
+        """A single eta-DDIM reverse step between *non-adjacent* timesteps ``from_t
+        -> to_t`` (both ``>= 0``, ``to_t < from_t``).
+
+        This is the general strided DDIM update. For a unit step ``to_t = from_t-1``
+        and ``eta=1`` it is algebraically identical to :meth:`_ddim_update`: the DDIM
+        sigma ``eta*sqrt((1-abar_to)/(1-abar_from) * (1 - abar_from/abar_to))`` reduces
+        to ``sqrt(posterior_variance[from_t])`` because ``abar_from/abar_to = alpha``
+        and ``1-alpha = beta``. Used only for the *frozen* early portion when the
+        sampler is asked to subsample the reverse chain; the trainable late steps
+        keep the unit-step math untouched, so the PPO likelihood is unaffected.
+        """
+        _, _, x0_pred = self.p_mean_variance(x_t, from_t, cond1, cond2, cond2_mask, denoise_fn=denoise_fn)
+        sqrt_ab = self._extract(self.sqrt_alphas_cumprod.value, from_t, x_t.shape)
+        sqrt_1mab = self._extract(self.sqrt_one_minus_alphas_cumprod.value, from_t, x_t.shape)
+        eps_pred = (x_t - sqrt_ab * x0_pred) / sqrt_1mab
+        # Match _ddim_update's temperature handling: scale the noise direction, then
+        # re-derive x0 so the two coefficients stay consistent.
+        eps_pred = eps_pred * sampling_temp
+        x0_pred = (x_t - sqrt_1mab * eps_pred) / sqrt_ab
+
+        abar_from = self._extract(self.alphas_cumprod.value, from_t, x_t.shape)
+        abar_to = self._extract(self.alphas_cumprod.value, to_t, x_t.shape)
+        sigma2 = (eta ** 2) * (1.0 - abar_to) / (1.0 - abar_from) * (1.0 - abar_from / abar_to)
+        sigma = jnp.sqrt(jnp.maximum(sigma2, 0.0))
+        dir_coeff = jnp.sqrt(jnp.maximum(1.0 - abar_to - sigma ** 2, 0.0))
+        # Callers only use this for the frozen prefix, where every ``to_t >= 1`` (the
+        # late/unit region owns ``t=0``), so noise is always injected here.
+        return jnp.sqrt(abar_to) * x0_pred + dir_coeff * eps_pred + sigma * noise
+
     def _sample_impl(self, shape: Tuple[int, int, int], cond1: jnp.ndarray, cond2: jnp.ndarray, cond2_mask: jnp.ndarray, 
                      rng: jax.Array, eta: float = 1.0, sampling_temp: float = 1.0, temp_mode: str = "uniform") -> jnp.ndarray:
         batch_size = shape[0]
@@ -612,6 +645,8 @@ class GaussianDiffusion(nnx.Module):
         eta: float = 1.0,
         sampling_temp: float = 1.0,
         temp_mode: str = "uniform",
+        num_sample_steps: int | None = None,
+        scan_late: bool = True,
     ):
         """Sample and record the last ``k_trainable`` denoising transitions.
 
@@ -621,11 +656,24 @@ class GaussianDiffusion(nnx.Module):
         unrolled so each transition is recorded, using ``trainable_denoise_fn`` if
         given (the DPPO-trainable copy) else ``self.denoise_fn``.
 
+        ``num_sample_steps`` optionally DDIM-subsamples the *frozen* early portion:
+        with ``num_sample_steps < timesteps`` the ``timesteps - k`` unit steps that
+        bring pure noise down to ``x_{k-1}`` are replaced by ``num_sample_steps - k``
+        strided DDIM steps over the same span (fewer denoiser evals -> cheaper
+        collection). The ``k`` trainable late steps are always the unit-step chain
+        ``k-1 .. 0``, so the recorded transitions and the PPO likelihood are
+        unchanged. ``None`` (default) keeps the full unit-step chain and is
+        bit-identical to the previous sampler.
+
         With ``rl_mode=False`` and default settings the produced trajectory is
         bit-identical to :meth:`sample` under the same rng (Gate 2). With
         ``rl_mode=True`` the late steps are stochastic Gaussian transitions with an
         exploration-std floor -- including at ``t=0``, where the default sampler
         suppresses noise -- matching DPPO's training sampler.
+
+        ``scan_late`` (default True) runs the ``rl_mode`` late chain as one compiled
+        ``lax.scan`` instead of ``k`` eager steps; set False to force the unrolled
+        path (tests use this to check the two are numerically identical).
 
         Returns ``(trajectory, trace)`` where ``trace`` is a dict of arrays stacked
         over the ``k_trainable`` steps (leading axis K, ordered high-t -> t=0):
@@ -638,24 +686,95 @@ class GaussianDiffusion(nnx.Module):
             raise ValueError(f"k_trainable must be in [0, {num_steps}], got {k}.")
         n_early = num_steps - k
 
+        S = num_steps if num_sample_steps is None else int(num_sample_steps)
+        if not (k <= S <= num_steps):
+            raise ValueError(f"num_sample_steps must be in [{k}, {num_steps}], got {S}.")
+        stride_frozen = S != num_steps
+
         key_x, key_steps = jax.random.split(rng)
         x = jax.random.normal(key_x, shape, dtype=jnp.float32)
         temp_sched = self._temp_schedule(sampling_temp, temp_mode, num_steps)
 
         # --- early (frozen) steps: compact loop, no trace --------------------- #
-        def body(i, carry):
-            x_curr, key = carry
-            timestep = num_steps - 1 - i
-            t = jnp.full((batch_size,), timestep, dtype=jnp.int32)
-            key, step_key = jax.random.split(key)
-            noise = jax.random.normal(step_key, shape, dtype=jnp.float32)
-            x_next = self.p_sample(
-                x_curr, t, cond1, cond2, cond2_mask, noise,
-                eta=eta, sampling_temp=temp_sched[i],
-            )
-            return x_next, key
+        if not stride_frozen:
+            # Full unit-step chain (t = num_steps-1 .. k), bit-identical to before.
+            def body(i, carry):
+                x_curr, key = carry
+                timestep = num_steps - 1 - i
+                t = jnp.full((batch_size,), timestep, dtype=jnp.int32)
+                key, step_key = jax.random.split(key)
+                noise = jax.random.normal(step_key, shape, dtype=jnp.float32)
+                x_next = self.p_sample(
+                    x_curr, t, cond1, cond2, cond2_mask, noise,
+                    eta=eta, sampling_temp=temp_sched[i],
+                )
+                return x_next, key
 
-        x, key = jax.lax.fori_loop(0, n_early, body, (x, key_steps))
+            x, key = jax.lax.fori_loop(0, n_early, body, (x, key_steps))
+        else:
+            # DDIM-subsampled frozen prefix: n_frozen strided steps from the noisiest
+            # timestep down to x_{k-1} (the input the unit-step late region expects).
+            if temp_mode != "uniform":
+                raise ValueError("num_sample_steps striding requires temp_mode='uniform'.")
+            n_frozen = S - k
+            # `from_ts` descends from num_steps-1 to k; each step targets the next
+            # `from` (and the last targets k-1), so the prefix ends exactly at x_{k-1}.
+            hi, lo = num_steps - 1, k
+            denom = max(n_frozen - 1, 1)
+            from_ts = [int(round(hi - (hi - lo) * j / denom)) for j in range(n_frozen)]
+            if len(set(from_ts)) != n_frozen:
+                raise ValueError(
+                    f"num_sample_steps={S} (k={k}) yields duplicate strided timesteps; "
+                    f"pick a smaller value so the {n_frozen} frozen steps are distinct.")
+            to_ts = from_ts[1:] + [k - 1]
+            from_arr = jnp.asarray(from_ts, dtype=jnp.int32)
+            to_arr = jnp.asarray(to_ts, dtype=jnp.int32)
+
+            def fbody(i, carry):
+                x_curr, key = carry
+                from_t = jnp.full((batch_size,), from_arr[i], dtype=jnp.int32)
+                to_t = jnp.full((batch_size,), to_arr[i], dtype=jnp.int32)
+                key, step_key = jax.random.split(key)
+                noise = jax.random.normal(step_key, shape, dtype=jnp.float32)
+                x_next = self._ddim_step_strided(
+                    x_curr, from_t, to_t, cond1, cond2, cond2_mask, noise,
+                    eta=eta, sampling_temp=sampling_temp,
+                )
+                return x_next, key
+
+            x, key = jax.lax.fori_loop(0, n_frozen, fbody, (x, key_steps))
+
+        # --- late (trainable) steps: record transitions ---------------------- #
+        # Collection (rl_mode) runs the sequential late chain as a compiled
+        # lax.scan -- one fused program instead of k eager denoiser dispatches,
+        # which dominates collect time once the frozen prefix is subsampled. The
+        # scan captures `trainable_denoise_fn` the same way the frozen fori_loop
+        # captures `self.denoise_fn`. The deterministic (rl_mode=False) path keeps
+        # the unrolled math below so it stays bit-identical to sample() (Gate 2).
+        if rl_mode and k > 0 and scan_late:
+            ts = jnp.arange(k - 1, -1, -1, dtype=jnp.int32)  # timesteps k-1 .. 0
+
+            def late_body(carry, timestep):
+                x_in, key = carry
+                t = jnp.full((batch_size,), timestep, dtype=jnp.int32)
+                key, step_key = jax.random.split(key)
+                noise = jax.random.normal(step_key, shape, dtype=jnp.float32)
+                mean, _var, _x0 = self.p_mean_variance(
+                    x_in, t, cond1, cond2, cond2_mask, denoise_fn=trainable_denoise_fn)
+                std = jnp.sqrt(jnp.maximum(_var, 0.0))
+                # Exploration noise on every trainable step, including t=0.
+                std_s = jnp.maximum(std, sigma_sample_floor)
+                x_out = mean + std_s * noise
+                std_lp = jnp.maximum(std, sigma_logprob_floor)
+                lp = self._reduce_logdensity(
+                    self._gaussian_logdensity(x_out, mean, std_lp), prefix_len)
+                return (x_out, key), (x_in, x_out, t, mean, std_s, lp)
+
+            (x, _key), (xt_s, xprev_s, t_s, mean_s, std_s, lp_s) = jax.lax.scan(
+                late_body, (x, key), ts)
+            trace = {"x_t": xt_s, "x_prev": xprev_s, "timestep": t_s,
+                     "mean": mean_s, "std": std_s, "log_prob": lp_s}
+            return x, trace
 
         # --- late (trainable) steps: unrolled, record transitions ------------ #
         xt_l, xprev_l, t_l, mean_l, std_l, lp_l = [], [], [], [], [], []

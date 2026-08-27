@@ -125,6 +125,12 @@ class StepOutput:
     per_step_reward_bk: jax.Array           # [B, prefix] atomic world-step rewards
     components: dict[str, jax.Array]        # summed reward components, each [B]
     trajectory_world_bt5: jax.Array         # the executed candidate (world coords)
+    # Per-*world-step* reward components, each ``[B, n_exec]`` (flags as bool).
+    # `components` above ORs/sums these over the executed prefix, which is all the
+    # trainer needs; the diagnostic needs the un-collapsed version to say *which*
+    # 0.1 s of a 0.5 s prefix went offroad. Defaults to empty so existing
+    # constructions and consumers are unaffected.
+    per_step_components: dict[str, jax.Array] = dataclasses.field(default_factory=dict)
 
 
 class DiffusionWaymaxEnv:
@@ -141,10 +147,26 @@ class DiffusionWaymaxEnv:
         use_ema: bool = False,
         seed: int = 0,
         max_replans: int | None = None,
+        goal_shaping_coef: float = 0.0,
+        goal_shaping_discount: float = 0.99,
+        goal_shaping_normalize: bool = True,
     ):
         self._ckpt = ckpt
         self._cfg = ckpt.preprocess_cfg
         self._reward_cfg = reward_config or RewardConfig()
+        # Route-based reward (V-Max `progression` / `off_route`) needs the SDC's
+        # candidate paths and the two waymax route metrics; both are off unless the
+        # reward config asks for them, so existing (goal-distance) callers are
+        # unaffected and never require ``sdc_paths`` in the loaded state.
+        self._need_route = bool(self._reward_cfg.route_reward)
+        # Potential-based goal shaping (V-Max BraxWrapper). Applied at the OUTER
+        # replan step so it telescopes against the trainer's per-replan GAE
+        # discount. coef=0 (default) is a no-op, keeping every existing rollout
+        # -- and the Gate 3 sum-to-return invariant -- byte-identical.
+        self._goal_shaping_coef = float(goal_shaping_coef)
+        self._goal_shaping_discount = float(goal_shaping_discount)
+        self._goal_shaping_normalize = bool(goal_shaping_normalize)
+        self._init_goal_dist_b: jax.Array | None = None
         self._replan = int(replan_interval_steps)
         # Optional cap on the number of outer replan steps per episode (bounds
         # cost for CPU smoke tests). None == run to the scenario horizon.
@@ -154,11 +176,18 @@ class DiffusionWaymaxEnv:
 
         self._policy = ckpt.merge(use_ema=use_ema)
 
+        metrics_to_run: tuple[str, ...] = ("overlap", "offroad")
+        if self._need_route:
+            # ``sdc_progression`` is the on-route arclength (V-Max `progression`);
+            # ``sdc_off_route`` is 0 on-route else the lateral distance to it
+            # (V-Max `off_route`). Both are SDC-only metrics (not in the planning
+            # env's multi-agent one-hot list) so they come back shaped ``[B]``.
+            metrics_to_run = metrics_to_run + ("sdc_progression", "sdc_off_route")
         env_cfg = waymax_config.EnvironmentConfig(
             max_num_objects=self._max_num_objects,
             controlled_object=waymax_config.ObjectType.SDC,
             compute_reward=False,
-            metrics=waymax_config.MetricsConfig(metrics_to_run=("overlap", "offroad")),
+            metrics=waymax_config.MetricsConfig(metrics_to_run=metrics_to_run),
         )
         self._env = waymax_env.PlanningAgentEnvironment(
             dynamics_model=waymax_dynamics.StateDynamics(),
@@ -171,8 +200,13 @@ class DiffusionWaymaxEnv:
 
         env_obj = self._env
 
+        need_route = self._need_route
+
         def _metric_values(state):
             m = env_obj.metrics(state)
+            if need_route:
+                return (m["overlap"].value, m["offroad"].value,
+                        m["sdc_progression"].value, m["sdc_off_route"].value)
             return m["overlap"].value, m["offroad"].value
 
         self._jit_reset = jax.jit(self._env.reset)
@@ -225,10 +259,22 @@ class DiffusionWaymaxEnv:
         init_goal_dist_b = jnp.linalg.norm(
             _ego_pose_now_b(self._state) - self._goal_xy_b2, axis=-1
         )
-        # Route reward is off by default; init_s is 0 and unused unless enabled.
+        # Clamp away from 0 so potential-based shaping's normalization (Phi =
+        # -dist / dist0) never divides by zero on a scene that starts at the goal.
+        self._init_goal_dist_b = jnp.maximum(init_goal_dist_b, 1e-6)
+        if self._need_route:
+            # Seed prev_s with the actual initial arclength so the first step's
+            # progression indicator (s > prev_s) is measured against the start,
+            # not a spurious 0 that would always fire on step 1.
+            metric_out = self._jit_metrics(self._state)
+            init_s_b = jnp.reshape(
+                jnp.asarray(metric_out[2], dtype=jnp.float32), (self._batch_size,)
+            )
+        else:
+            init_s_b = jnp.zeros_like(init_goal_dist_b)
         self._reward_state = reward_mod.init_reward_state(
             init_goal_dist_b=init_goal_dist_b,
-            init_s_b=jnp.zeros_like(init_goal_dist_b),
+            init_s_b=init_s_b,
         )
         return self._build_features()
 
@@ -322,7 +368,13 @@ class DiffusionWaymaxEnv:
 
         per_step = []
         comp_accum: dict[str, jax.Array] = {}
+        comp_steps: dict[str, list[jax.Array]] = {}
         term_any_b = jnp.zeros((bsz,), dtype=bool)
+        # Snapshot for the outer-step potential-based shaping (below): which worlds
+        # were already absorbed before this prefix, and the goal distance at the
+        # prefix anchor (``prev_dist`` is updated every world step by reward_step).
+        done_before_b = self._reward_state.done
+        phi_anchor_dist_b = self._reward_state.prev_dist
 
         for k in range(1, n_exec + 1):
             pose_b5 = traj[:, k, :]  # target [x, y, yaw, vel_x, vel_y]
@@ -336,10 +388,16 @@ class DiffusionWaymaxEnv:
             )
             self._state = self._jit_step(self._state, action)
 
-            overlap_b, offroad_b = self._jit_metrics(self._state)
             # Single-agent current-step metrics are per world; normalize any
             # trailing singleton (``[B,1]``) to ``[B]`` so they broadcast cleanly
             # against goal_dist_b in the reward.
+            s_b = lateral_b = None
+            if self._need_route:
+                overlap_b, offroad_b, s_b, lateral_b = self._jit_metrics(self._state)
+                s_b = jnp.reshape(s_b, (bsz,))          # on-route arclength
+                lateral_b = jnp.reshape(lateral_b, (bsz,))  # 0 on-route else dist
+            else:
+                overlap_b, offroad_b = self._jit_metrics(self._state)
             overlap_b = jnp.reshape(overlap_b, (bsz,))
             offroad_b = jnp.reshape(offroad_b, (bsz,))
             goal_dist_b = jnp.linalg.norm(
@@ -351,6 +409,8 @@ class DiffusionWaymaxEnv:
                 goal_dist_b=goal_dist_b,
                 overlap_b=overlap_b,
                 offroad_b=offroad_b,
+                s_b=s_b,
+                lateral_b=lateral_b,
             )
             per_step.append(reward_b)
             term_any_b = term_any_b | term_b
@@ -359,6 +419,7 @@ class DiffusionWaymaxEnv:
                     comp_accum[key] = comp_accum.get(key, jnp.zeros((bsz,), bool)) | val
                 else:
                     comp_accum[key] = comp_accum.get(key, jnp.zeros((bsz,))) + val
+                comp_steps.setdefault(key, []).append(val)
 
         if per_step:
             per_step_bk = jnp.stack(per_step, axis=-1)  # [B, n_exec]
@@ -366,6 +427,34 @@ class DiffusionWaymaxEnv:
         else:
             per_step_bk = jnp.zeros((bsz, 0), dtype=jnp.float32)
             reward_sum_b = jnp.zeros((bsz,), dtype=jnp.float32)
+
+        # --- potential-based goal shaping (V-Max BraxWrapper parity) --------- #
+        # F = coef * (gamma * Phi(s') * flag - Phi(s)),  Phi(s) = -dist / dist0.
+        # Added ONCE per outer replan step (not per world step) so it telescopes
+        # against the trainer's per-replan GAE discount. `flag` zeroes Phi(s') at
+        # an absorbing terminal (collision/offroad/goal reached this prefix) and
+        # keeps it at a horizon truncation -- V-Max's exact convention. Worlds
+        # already absorbed before this prefix get no shaping. It lives in
+        # `reward_sum_b` only, deliberately NOT in `per_step_reward_bk`: with
+        # coef=0 (default) it is a no-op and the Gate 3 sum-to-return invariant
+        # (outer == sum(per_step) == return) is preserved exactly.
+        shaping_b = jnp.zeros((bsz,), dtype=jnp.float32)
+        if self._goal_shaping_coef != 0.0 and n_exec > 0:
+            denom = (
+                self._init_goal_dist_b if self._goal_shaping_normalize
+                else jnp.ones((bsz,), dtype=jnp.float32)
+            )
+            phi_before = -phi_anchor_dist_b / denom
+            phi_after = -self._reward_state.prev_dist / denom
+            flag = (~term_any_b).astype(jnp.float32)       # 0 at absorbing terminal
+            alive_prefix = (~done_before_b).astype(jnp.float32)
+            shaping_b = (
+                self._goal_shaping_coef
+                * (self._goal_shaping_discount * phi_after * flag - phi_before)
+                * alive_prefix
+            )
+            reward_sum_b = reward_sum_b + shaping_b
+        comp_accum["shaping"] = shaping_b
 
         # Truncate any world that ran out of horizon (or hit the prefix cap at
         # the scenario end) without terminating.
@@ -381,6 +470,7 @@ class DiffusionWaymaxEnv:
             per_step_reward_bk=per_step_bk,
             components=comp_accum,
             trajectory_world_bt5=traj,
+            per_step_components={k: jnp.stack(v, axis=-1) for k, v in comp_steps.items()},
         )
 
     # ------------------------------------------------------------------ #
@@ -438,10 +528,17 @@ class DiffusionWaymaxEnv:
         bsz = self._batch_size
 
         per_step_chunks: list[jax.Array] = []
+        # Per-world-step flag chunks, so a caller can ask *when* inside a prefix
+        # the expert first trips a terminating condition -- the control for
+        # "does the human log itself absorb in the first replan?".
+        flag_chunks: dict[str, list[jax.Array]] = {
+            "offroad_flag": [], "collision_flag": [], "reached_flag": []}
         outer_reward_b = jnp.zeros((bsz,), dtype=jnp.float32)
         overlap_any_b = jnp.zeros((bsz,), dtype=bool)
         offroad_any_b = jnp.zeros((bsz,), dtype=bool)
         reached_any_b = jnp.zeros((bsz,), dtype=bool)
+        # 1-based replan index at which each world absorbed; 0 == never absorbed.
+        absorb_replan_b = jnp.zeros((bsz,), dtype=jnp.int32)
 
         n_replans = 0
         while True:
@@ -456,6 +553,12 @@ class DiffusionWaymaxEnv:
                 break
             out = self._execute_prefix(window)
             per_step_chunks.append(out.per_step_reward_bk)
+            for key, chunks in flag_chunks.items():
+                got = out.per_step_components.get(key)
+                if got is not None:
+                    chunks.append(got)
+            newly_b = (absorb_replan_b == 0) & (out.terminated_b | out.truncated_b)
+            absorb_replan_b = jnp.where(newly_b, n_replans, absorb_replan_b)
             outer_reward_b = outer_reward_b + out.reward_b
             overlap_any_b = overlap_any_b | out.components.get(
                 "collision_flag", jnp.zeros((bsz,), bool)
@@ -474,6 +577,11 @@ class DiffusionWaymaxEnv:
             if per_step_chunks
             else jnp.zeros((bsz, 0), dtype=jnp.float32)
         )
+        def _cat(key):
+            chunks = flag_chunks[key]
+            return (jnp.concatenate(chunks, axis=-1) if chunks
+                    else jnp.zeros((bsz, 0), dtype=bool))
+
         return {
             "per_step_reward_bk": per_step_bk,
             "episode_return_b": jnp.sum(per_step_bk, axis=-1),
@@ -481,6 +589,11 @@ class DiffusionWaymaxEnv:
             "overlap_any_b": overlap_any_b,
             "offroad_any_b": offroad_any_b,
             "reached_any_b": reached_any_b,
+            "n_replans": n_replans,
+            "absorb_replan_b": absorb_replan_b,
+            "per_step_offroad_bk": _cat("offroad_flag"),
+            "per_step_collision_bk": _cat("collision_flag"),
+            "per_step_reached_bk": _cat("reached_flag"),
         }
 
     # ------------------------------------------------------------------ #

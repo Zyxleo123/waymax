@@ -19,7 +19,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from data.scenario_loader import load_scenario_state_batch_fast
+from data.scenario_loader import (
+    ScenarioIndexOutOfRange,
+    infer_route_dims,
+    load_scenario_state_batch_fast,
+)
 from lane_graph.lane_graph_utils import LaneGraphLoader
 from simulation.evaluation_utils import (
     rollout_predicted_trajectories_with_metrics,
@@ -36,22 +40,56 @@ from waymax import config as waymax_config
 from tqdm import tqdm
 
 
+# Sidecar files that live next to the records in some eval dirs (e.g. the
+# failure set ships excluded_overpass.json). A bare glob("*") hands these to the
+# TFRecord reader, which fails with "corrupted record at 0".
+_NON_TFRECORD_SUFFIXES = frozenset({
+    ".json", ".jsonl", ".txt", ".md", ".yaml", ".yml", ".csv",
+    ".npz", ".npy", ".pkl", ".png", ".jpg", ".mp4", ".log",
+})
+
+
+def _list_tfrecord_paths(tfrecord_dir: str) -> list[str]:
+    paths = [
+        p
+        for p in sorted(glob(str(Path(tfrecord_dir) / "*")))
+        if not os.path.isdir(p) and Path(p).suffix.lower() not in _NON_TFRECORD_SUFFIXES
+    ]
+    if not paths:
+        raise FileNotFoundError(f"no tfrecords under {tfrecord_dir}")
+    return paths
+
+
+def _dataset_config_for(tfrecord_path: str, args) -> waymax_config.DatasetConfig:
+    """Dataset config matched to *this* tfrecord's route budget.
+
+    The route dims are read off the file rather than inherited from
+    WOD_1_3_1_TRAINING's 45x800, so eval sets exported with a different budget
+    (failures.tfrecord is 10x300) parse instead of dying at ParseExampleV2.
+    """
+    num_paths, num_points_per_path = infer_route_dims(tfrecord_path)
+    return dataclasses.replace(
+        waymax_config.WOD_1_3_1_TRAINING,
+        path=str(tfrecord_path),
+        max_num_objects=int(args.max_num_objects),
+        batch_dims=(args.num_worlds,),
+        shuffle_seed=0,
+        num_paths=num_paths,
+        num_points_per_path=num_points_per_path,
+    )
+
+
 def run(args, planner: AbstractPlanner) -> list[dict[str, Any]]:
     output_dir = Path(args.output_dir) / time.strftime("%Y%m%d_%H%M%S")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     tested_scenarios, curr_scenario_index = 0, 0
     reached_all, success_all = 0, 0
-    tfrecord_paths = sorted(glob(str(Path(args.tfrecord_dir) / "*")))
+    results: list[dict[str, Any]] = []
+    tfrecord_paths = _list_tfrecord_paths(args.tfrecord_dir)
     tfrecord_path = tfrecord_paths.pop(0)
     lane_graph_loader = LaneGraphLoader(args.lane_graph_dir)
-    ds_cfg = dataclasses.replace(
-        waymax_config.WOD_1_3_1_TRAINING,
-        path=str(tfrecord_path),
-        max_num_objects=int(args.max_num_objects),
-        batch_dims=(args.num_worlds,),
-        shuffle_seed=0,
-    )
+    ds_cfg = _dataset_config_for(tfrecord_path, args)
     if args.scenario_indices is not None:
         target_scenario_indices = [int(idx) for idx in args.scenario_indices.split(",")]
     else:
@@ -66,18 +104,18 @@ def run(args, planner: AbstractPlanner) -> list[dict[str, Any]]:
             scenario_indices = curr_scenario_index + np.arange(int(args.num_worlds))
         try:
             sim_state, _ = load_scenario_state_batch_fast(ds_cfg, scenario_indices)
-        except Exception as e:
-            print(f"Error loading scenarios {scenario_indices} from {os.path.basename(tfrecord_path)}: {e}")
+        except ScenarioIndexOutOfRange:
+            # Only "ran off the end of this file" advances to the next tfrecord.
+            # Every other load error is a real fault (unreadable file, route-dim
+            # mismatch, truncated record) and must not be laundered into a quiet
+            # zero-scenario pass.
             print(f"Scenarios in {os.path.basename(tfrecord_path)} are all tested, moving to next tfrecord.")
+            if not tfrecord_paths:
+                print(f"No tfrecords left under {args.tfrecord_dir}; stopping after {tested_scenarios} scenarios.")
+                break
             tfrecord_path = tfrecord_paths.pop(0)
             curr_scenario_index = 0
-            ds_cfg = dataclasses.replace(
-                waymax_config.WOD_1_3_1_TRAINING,
-                path=str(tfrecord_path),
-                max_num_objects=int(args.max_num_objects),
-                batch_dims=(args.num_worlds,),
-                shuffle_seed=0,
-            )
+            ds_cfg = _dataset_config_for(tfrecord_path, args)
             continue
 
         print(f"Testing scenarios {scenario_indices} from {os.path.basename(tfrecord_path)}...")
@@ -221,6 +259,7 @@ def run(args, planner: AbstractPlanner) -> list[dict[str, Any]]:
             }
             result_path = output_dir / f"{os.path.basename(tfrecord_path)}.scenario_{scenario_idx:03d}.json"
             _save_json(result_path, result)
+            results.append(result)
         tested_scenarios += len(scenario_indices)
         curr_scenario_index += len(scenario_indices)
         print(f"Finished testing scenarios {scenario_indices} from {os.path.basename(tfrecord_path)}.")
@@ -237,3 +276,4 @@ def run(args, planner: AbstractPlanner) -> list[dict[str, Any]]:
     _save_json(output_dir / "summary.json", summary)
 
     print(json.dumps(summary, indent=2))
+    return results

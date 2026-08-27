@@ -44,4 +44,11 @@ export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-/zfsauton/scratch
 echo "host=${SLURMD_NODENAME:-unknown}  root=$ROOT"
 "$PYTHON" -c "import jax; print('jax devices:', jax.devices())"
 
+# Equivalence check for the jitted K-batched update path (log-probs, posterior
+# means/std, gate KL must match the reference Python loop within fp32 rounding).
+"$PYTHON" -m rl.diffusion_ft.tests.verify_jit_equiv
+
+# DDIM frozen-prefix subsampling: strided-step correctness + PPO-invariance.
+"$PYTHON" -m rl.diffusion_ft.tests.test_ddim_stride
+
 "$PYTHON" -m rl.diffusion_ft.tests.test_gate2b

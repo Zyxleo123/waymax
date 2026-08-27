@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 from typing import Any
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from flax import nnx
 
 from scores.scorer import Scorer
 from data.postprocess import postprocess_predictions
@@ -14,6 +16,40 @@ from data.types import PreprocessBatch, PreprocessConfig
 
 from model.diffusion.diffusion_policy import DiffusionPolicy
 from planner.abstract_planner import AbstractPlanner, PlannerResult
+
+
+# The policy's weights are passed to these as a *traced argument* (`state`), not
+# captured from `self`. Jitting a bound method (`jax.jit(self.policy.compute_condition)`)
+# bakes whatever arrays the module held at trace time into the executable as
+# constants, so a planner rebuilt around updated weights can silently keep
+# driving with the old ones -- which is exactly what happened to the in-training
+# closed-loop eval: epochs 5/10/15 of a run produced byte-identical rollouts.
+# `graphdef` is static (pure structure, no arrays), so the compilation cache is
+# still shared across planner instances instead of retracing per eval.
+@functools.partial(jax.jit, static_argnums=(0,))
+def _compute_condition_jit(graphdef, state, features):
+    return nnx.merge(graphdef, state).compute_condition(features)
+
+
+@functools.partial(jax.jit, static_argnums=(0, 1))
+def _sample_population_jit(
+    graphdef,
+    population_size: int,
+    state,
+    cond_bf: jax.Array,
+    inst_cond_bf: jax.Array,
+    inst_cond_mask_bf: jax.Array,
+    rng: jax.Array,
+) -> jax.Array:
+    policy = nnx.merge(graphdef, state)
+    batch_size = int(cond_bf.shape[0])
+    cond_bkf = jnp.repeat(cond_bf, repeats=population_size, axis=0)
+    inst_cond_bf = jnp.repeat(inst_cond_bf, repeats=population_size, axis=0)
+    inst_cond_mask_bf = jnp.repeat(inst_cond_mask_bf, repeats=population_size, axis=0)
+    samples_btd = policy.sample_from_condition(cond_bkf, inst_cond_bf, inst_cond_mask_bf, rng=rng)
+    horizon = int(samples_btd.shape[1])
+    target_dim = int(samples_btd.shape[2])
+    return samples_btd.reshape(batch_size, population_size, horizon, target_dim)
 
 
 class DiffusionPlanner(AbstractPlanner):
@@ -29,15 +65,10 @@ class DiffusionPlanner(AbstractPlanner):
         self.preprocess_cfg = preprocess_cfg
         self.num_worlds = int(num_worlds)
         self.population_size = int(population_size)
-        self._compute_condition_jit = jax.jit(self.policy.compute_condition)
-        self._sample_population_jit = jax.jit(
-            lambda *, cond_bf, inst_cond_bf, inst_cond_mask_bf, rng: self._sample_population(
-                cond_bf=cond_bf,
-                inst_cond_bf=inst_cond_bf,
-                inst_cond_mask_bf=inst_cond_mask_bf,
-                rng=rng,
-            ),
-        )
+        # Split once: `_policy_state` carries the arrays that the jitted helpers
+        # take as an argument, so this planner always drives with the weights it
+        # was handed rather than with whatever was traced first.
+        self._policy_graphdef, self._policy_state = nnx.split(policy)
 
     def plan_trajectory(
         self,
@@ -79,13 +110,20 @@ class DiffusionPlanner(AbstractPlanner):
             features["remaining_timesteps"] = jnp.zeros_like(features["remaining_timesteps"])
         features["subgoal_xy"] = jnp.zeros((self.num_worlds, 2), dtype=jnp.float32)
         features["subgoal_valid"] = jnp.zeros((self.num_worlds,), dtype=jnp.float32)
-        cond_bf, inst_cond_bf = self._compute_condition_jit(features)
+        cond_bf, inst_cond_bf = _compute_condition_jit(
+            self._policy_graphdef,
+            self._policy_state,
+            features,
+        )
 
-        current_norm_bktd = self._sample_population_jit(
-            cond_bf=cond_bf,
-            inst_cond_bf=inst_cond_bf,
-            inst_cond_mask_bf=instruction_mask,
-            rng=key_sample,
+        current_norm_bktd = _sample_population_jit(
+            self._policy_graphdef,
+            self.population_size,
+            self._policy_state,
+            cond_bf,
+            inst_cond_bf,
+            instruction_mask,
+            key_sample,
         )
         current_world_bkt5, world_t_seconds_bt, world_t_valid_bt = self._postprocess_population(
             current_norm_bktd,
@@ -103,23 +141,6 @@ class DiffusionPlanner(AbstractPlanner):
             world_t_valid_bt=world_t_valid_bt,
             aux=pre_batch.aux,
         )
-
-    def _sample_population(
-        self,
-        *,
-        cond_bf: jax.Array,
-        inst_cond_bf: jax.Array,
-        inst_cond_mask_bf: jax.Array,
-        rng: jax.Array,
-    ) -> jax.Array:
-        batch_size = int(cond_bf.shape[0])
-        cond_bkf = jnp.repeat(cond_bf, repeats=self.population_size, axis=0)
-        inst_cond_bf = jnp.repeat(inst_cond_bf, repeats=self.population_size, axis=0)
-        inst_cond_mask_bf = jnp.repeat(inst_cond_mask_bf, repeats=self.population_size, axis=0)
-        samples_btd = self.policy.sample_from_condition(cond_bkf, inst_cond_bf, inst_cond_mask_bf, rng=rng)
-        horizon = int(samples_btd.shape[1])
-        target_dim = int(samples_btd.shape[2])
-        return samples_btd.reshape(batch_size, self.population_size, horizon, target_dim)
 
     def _postprocess_population(
         self,

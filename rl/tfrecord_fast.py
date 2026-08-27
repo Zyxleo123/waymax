@@ -106,11 +106,19 @@ def read_tfrecord_bytes(
     record_index: int,
     *,
     offset_index: str | None = None,
+    offsets: np.ndarray | None = None,
 ) -> bytes:
-    """Read one serialized TFExample without ``TFRecordDataset.skip``."""
+    """Read one serialized TFExample without ``TFRecordDataset.skip``.
+
+    ``offsets`` lets a caller that reads many records from many shards (e.g. the
+    DPPO scene sampler drawing a fresh batch every iteration across 1000 WOMD
+    shards) pass an already-loaded index instead of re-opening the sidecar
+    ``.npy`` on every single record.
+    """
     if record_index < 0:
         raise ValueError(f"record_index must be >= 0, got {record_index}")
-    offsets = load_offset_index(tfrecord_path, offset_index)
+    if offsets is None:
+        offsets = load_offset_index(tfrecord_path, offset_index)
     if record_index >= len(offsets):
         raise IndexError(
             f"record_index {record_index} out of range for {tfrecord_path} "

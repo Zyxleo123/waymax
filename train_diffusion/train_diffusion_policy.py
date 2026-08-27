@@ -17,7 +17,7 @@ try:
 except ImportError:
 	from train_diffusion.configs.diffusion_train_config import DiffusionTrainConfig, config_to_dict, parse_args
 from train_diffusion.utils.checkpoints import restore_checkpoint, save_checkpoint
-from train_diffusion.utils.infer import _build_model_from_metadata, _load_checkpoint_metadata
+from train_diffusion.utils.infer import _build_model_from_metadata, _build_preprocess_cfg, _load_checkpoint_metadata
 from train_diffusion.utils.utils import (
 	clip_grads,
 	coerce_tree_like,
@@ -237,6 +237,155 @@ def _make_train_step(
 	return jax.jit(train_step)
 
 
+def _eval_sets_from_args(args: DiffusionTrainConfig) -> list[dict[str, Any]]:
+	"""The named closed-loop eval sets configured for this run.
+
+	Each set shares the rollout settings (start step, replan cadence, num_worlds,
+	EMA weights, ...) so the only thing that varies is *which* scenes are driven;
+	the success criterion is identical across sets.
+	"""
+	sets: list[dict[str, Any]] = []
+	if args.eval_tfrecord_dir:
+		sets.append({
+			"tag": str(args.eval_tag),
+			"tfrecord_dir": args.eval_tfrecord_dir,
+			"lane_graph_dir": args.eval_lane_graph_dir,
+			"scenario_indices": args.eval_scenario_indices,
+			"num_scenarios": int(args.eval_num_scenarios),
+		})
+	if args.eval2_tfrecord_dir:
+		sets.append({
+			"tag": str(args.eval2_tag),
+			"tfrecord_dir": args.eval2_tfrecord_dir,
+			"lane_graph_dir": args.eval2_lane_graph_dir,
+			"scenario_indices": args.eval2_scenario_indices,
+			"num_scenarios": int(args.eval2_num_scenarios),
+		})
+	return sets
+
+
+def _eval_one_set(
+	planner,
+	eval_set: dict[str, Any],
+	args: DiffusionTrainConfig,
+	run_dir: str,
+	epoch: int,
+	global_step_host: int,
+) -> dict[str, float] | None:
+	"""Run one closed-loop eval set and log its metrics to wandb.
+
+	Reuses ``simulation.runner.run`` -- the very code that produced the failure
+	set -- so the success criterion is identical:
+	``success = goal_reached & ~offroad & ~overlap & ~tl_violation``.
+	"""
+	import wandb
+	from types import SimpleNamespace
+	from simulation.runner import run as run_closed_loop_eval
+
+	tag = eval_set["tag"]
+	eval_args = SimpleNamespace(
+		output_dir=os.path.join(run_dir, "eval", tag, f"epoch_{epoch:04d}"),
+		tfrecord_dir=eval_set["tfrecord_dir"],
+		lane_graph_dir=eval_set["lane_graph_dir"],
+		scenario_indices=eval_set["scenario_indices"],
+		num_scenarios=int(eval_set["num_scenarios"]),
+		num_worlds=int(args.eval_num_worlds),
+		max_num_objects=int(args.eval_max_num_objects),
+		start_timestep=int(args.eval_start_timestep),
+		replan_interval_steps=int(args.eval_replan_interval_steps),
+		instruction_interval_steps=int(args.eval_instruction_interval_steps),
+		mask_goal=bool(args.eval_mask_goal),
+		visualize_mode=args.eval_visualize_mode,
+		save_trajectory=False,
+		save_instruction=False,
+		seed=int(args.eval_seed),
+	)
+
+	results = run_closed_loop_eval(eval_args, planner)
+	if not results:
+		return None
+
+	n = len(results)
+	def _rate(key: str) -> float:
+		return sum(1 for r in results if bool(r.get(key, False))) / n
+
+	safe = sum(1 for r in results if bool(r.get("success", False)))
+	reached = sum(1 for r in results if bool(r.get("goal_reached", False)))
+	reached_but_violated = sum(
+		1 for r in results if bool(r.get("goal_reached", False)) and not bool(r.get("success", False))
+	)
+	metrics = {
+		f"eval/{tag}/safe_goal_reach_rate": safe / n,
+		f"eval/{tag}/goal_reach_rate": reached / n,
+		f"eval/{tag}/offroad_rate": _rate("offroad"),
+		f"eval/{tag}/overlap_rate": _rate("overlap"),
+		f"eval/{tag}/tl_violation_rate": _rate("tl_violation"),
+		f"eval/{tag}/reached_but_violated_rate": reached_but_violated / n,
+		f"eval/{tag}/n_scenarios": float(n),
+		"epoch": int(epoch),
+		"step": int(global_step_host),
+	}
+	wandb.log(metrics, step=int(global_step_host))
+	log_jsonl(os.path.join(run_dir, "eval_logs.jsonl"), metrics)
+	print(
+		f"[eval:{tag}] epoch {epoch}: safe_goal_reach={metrics[f'eval/{tag}/safe_goal_reach_rate']:.4f} "
+		f"goal_reach={metrics[f'eval/{tag}/goal_reach_rate']:.4f} (n={n})"
+	)
+	return metrics
+
+
+def _params_fingerprint(params) -> str:
+	"""Cheap, stable digest of a parameter tree: 8 hex chars off the leaf sums."""
+	import hashlib
+
+	sums = [float(jnp.sum(jnp.asarray(leaf))) for leaf in jax.tree_util.tree_leaves(params)]
+	return hashlib.sha1(repr(sums).encode()).hexdigest()[:8]
+
+
+def _run_safe_goal_eval(
+	graphdef,
+	params_state,
+	ema_params,
+	nonparam_state,
+	eval_preprocess_cfg,
+	eval_sets: list[dict[str, Any]],
+	args: DiffusionTrainConfig,
+	run_dir: str,
+	epoch: int,
+	global_step_host: int,
+) -> None:
+	"""Build one planner from the live params and run every configured eval set."""
+	from flax import nnx
+	from planner.diffusion_planner import DiffusionPlanner
+
+	if not eval_sets:
+		return
+
+	# Evaluate the exact parameters closed-loop drives with. The failure-set sim
+	# ran on the EMA weights (use_ema defaults True), so mirror that by default.
+	eval_params = ema_params if bool(args.eval_use_ema) else params_state
+	policy = nnx.merge(
+		graphdef,
+		_pure_dict_to_state(eval_params),
+		_pure_dict_to_state(nonparam_state),
+	)
+	planner = DiffusionPlanner(
+		policy=policy,
+		preprocess_cfg=eval_preprocess_cfg,
+		num_worlds=int(args.eval_num_worlds),
+	)
+	# Print a fingerprint of the weights actually being evaluated. Two evals that
+	# report the same fingerprint at different epochs mean the eval is pinned to
+	# stale parameters, not that the policy stopped changing -- a failure mode
+	# that otherwise reads as a flat, plausible-looking metric.
+	print(f"[eval] epoch {epoch}: params_fingerprint={_params_fingerprint(eval_params)}")
+	for eval_set in eval_sets:
+		try:
+			_eval_one_set(planner, eval_set, args, run_dir, epoch, global_step_host)
+		except Exception as exc:  # one bad set must not sink the others or training
+			print(f"[eval:{eval_set.get('tag')}] epoch {epoch} skipped: {type(exc).__name__}: {exc}")
+
+
 def main() -> None:
 	args = parse_args()
 	if args.resume_path is None and args.pretrained_ckpt is None:
@@ -292,7 +441,11 @@ def main() -> None:
 		shuffle_seed=int(args.shuffle_seed),
 		num_workers=int(args.num_workers),
 		pin_memory=bool(args.pin_memory),
-		drop_last=True
+		drop_last=True,
+		risk_table_path=args.risk_table,
+		hardness_alpha=float(args.hardness_alpha),
+		weight_clip=float(args.weight_clip),
+		exclude_dirty=bool(args.exclude_dirty),
 	)
 	train_step = _make_train_step(
 		graphdef,
@@ -302,6 +455,18 @@ def main() -> None:
 		float(args.grad_clip_norm),
 		float(args.ema_decay),
 		float(args.goal_mask_prob),
+	)
+
+	# The failure set was produced by the closed-loop sim, which reads the
+	# preprocess config off the checkpoint metadata. Match it exactly so the eval
+	# and training-data pipelines cannot silently diverge.
+	eval_sets = _eval_sets_from_args(args) if int(args.eval_every) > 0 else []
+	if int(args.eval_every) > 0 and not eval_sets:
+		raise ValueError("eval_every>0 requires --eval_tfrecord_dir (and/or --eval2_tfrecord_dir)")
+	eval_preprocess_cfg = (
+		_build_preprocess_cfg(_load_checkpoint_metadata(checkpoint_path, None))
+		if eval_sets
+		else None
 	)
 
 	config_dict = config_to_dict(args)
@@ -342,6 +507,23 @@ def main() -> None:
 				log_jsonl(os.path.join(run_dir, "train_logs.jsonl"), payload)
 
 		pbar.close()
+
+		if eval_sets and (epoch % int(args.eval_every) == 0 or epoch == int(args.epochs)):
+			try:
+				_run_safe_goal_eval(
+					graphdef,
+					params_state,
+					ema_params,
+					nonparam_state,
+					eval_preprocess_cfg,
+					eval_sets,
+					args,
+					run_dir,
+					epoch,
+					global_step_host,
+				)
+			except Exception as exc:  # eval must never take training down
+				print(f"[eval] epoch {epoch} skipped: {type(exc).__name__}: {exc}")
 
 		if epoch % int(args.save_every) == 0 or epoch == int(args.epochs):
 			save_checkpoint(

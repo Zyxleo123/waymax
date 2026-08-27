@@ -47,10 +47,30 @@ class ValueCritic:
             optax.adam(float(lr)),
         )
         self._opt_state = self.tx.init(self._params)
+        # One compiled (params, opt_state, feat, target, w, w_sum) -> step, built
+        # once and reused every epoch/iteration. Re-tracing a fresh `loss_fn`
+        # closure per call (the old code) leaked ~0.6 GiB/iter of JAX cache
+        # (leak probes 32647/32673; jax.clear_caches flattened it, 33056). Args
+        # are passed positionally with constant shapes, so this compiles once.
+        self._jit_step = None
 
     def _apply(self, params, feat):
         model = nnx.merge(self._gdef, params, self._nonparam)
         return model(feat)
+
+    def _build_jit_step(self):
+        gdef, nonparam, tx = self._gdef, self._nonparam, self.tx
+
+        def step(params, opt_state, feat, target, w, w_sum):
+            def loss_fn(p):
+                pred = nnx.merge(gdef, p, nonparam)(feat)
+                return jnp.sum(w * (pred - target) ** 2) / w_sum
+            loss, grads = jax.value_and_grad(loss_fn)(params)
+            updates, opt_state = tx.update(grads, opt_state, params)
+            params = optax.apply_updates(params, updates)
+            return params, opt_state, loss
+
+        return jax.jit(step)
 
     def value(self, cond1: jnp.ndarray) -> jnp.ndarray:
         """Predict ``V(s)`` ``[B]`` from scene tokens (no gradient tracked)."""
@@ -73,16 +93,14 @@ class ValueCritic:
         w = jnp.ones_like(returns_b) if weights is None else weights.astype(returns_b.dtype)
         w_sum = jnp.maximum(jnp.sum(w), 1.0)
 
-        def loss_fn(params):
-            pred = self._apply(params, feat)
-            return jnp.sum(w * (pred - returns_b) ** 2) / w_sum
+        if self._jit_step is None:
+            self._jit_step = self._build_jit_step()
 
         first = None
         loss = jnp.asarray(0.0)
         for _ in range(max(1, int(epochs))):
-            loss, grads = jax.value_and_grad(loss_fn)(self._params)
-            updates, self._opt_state = self.tx.update(grads, self._opt_state, self._params)
-            self._params = optax.apply_updates(self._params, updates)
+            self._params, self._opt_state, loss = self._jit_step(
+                self._params, self._opt_state, feat, returns_b, w, w_sum)
             if first is None:
                 first = loss
         # `value_loss` stays the pre-update fit (comparable across iterations);

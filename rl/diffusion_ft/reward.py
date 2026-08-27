@@ -53,6 +53,8 @@ class RewardConfig:
     goal_threshold_m: float = 3.0
     terminate_on_collision: bool = True
     terminate_on_offroad: bool = False
+    offroad_per_step: bool = False
+    collision_per_step: bool = False
     route_reward: bool = False
     lateral_penalty: float = 0.5
     off_route_threshold_m: float | None = None
@@ -67,7 +69,10 @@ class RewardState:
     * ``prev_dist``          -- straight-line goal distance at the previous step.
     * ``prev_s``             -- route arclength at the previous step (route mode).
     * ``charged_collision``  -- whether the one-time collision penalty was paid.
+      Still tracked under ``collision_per_step`` (see ``charged_offroad``).
     * ``charged_offroad``    -- whether the one-time offroad penalty was paid.
+      Still tracked under ``offroad_per_step`` (the field keeps the pytree shape
+      constant so the JITted rollout does not retrace) but unused there.
     * ``done``               -- whether the episode has already terminated. Once
       set, subsequent steps contribute zero reward (an ended world is frozen),
       so per-step rewards still sum to the episode return.
@@ -164,8 +169,24 @@ def reward_step(
         action_pen_b = -cfg.action_penalty * jnp.asarray(action_sq_b, dtype=jnp.float32)
 
     # --- one-time event terms --------------------------------------------- #
-    pay_collision_b = collision_b & (~state.charged_collision)
-    pay_offroad_b = off_b & (~state.charged_offroad)
+    # Collision mirrors offroad below: charged once per episode by default, or on
+    # every colliding world step under `collision_per_step`. Pair the per-step
+    # form with `terminate_on_collision=False` -- otherwise the episode ends on
+    # the first contact and "per step" only ever bills one step.
+    if cfg.collision_per_step:
+        pay_collision_b = collision_b
+    else:
+        pay_collision_b = collision_b & (~state.charged_collision)
+    # Offroad is charged once per episode by default. Under `offroad_per_step`
+    # every off-road world step pays: the cost then scales with dwell time
+    # instead of being a flat toll, which is what makes a non-terminating
+    # offroad penalty still unprofitable to farm. Note the effective magnitude
+    # multiplies by the excursion length -- at `offroad`=-1.0 a 24-step
+    # excursion costs -24, so pair this flag with a smaller coefficient.
+    if cfg.offroad_per_step:
+        pay_offroad_b = off_b
+    else:
+        pay_offroad_b = off_b & (~state.charged_offroad)
     collision_term_b = cfg.collision * pay_collision_b.astype(jnp.float32)
     offroad_term_b = cfg.offroad * pay_offroad_b.astype(jnp.float32)
     goal_term_b = cfg.goal_bonus * reached_b.astype(jnp.float32)

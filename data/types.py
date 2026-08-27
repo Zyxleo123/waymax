@@ -47,6 +47,11 @@ class CacheLoaderConfig:
     backend: str = "torch" # (torch, jax)
     include_inst_features: bool = False
     drop_last: bool = False
+    # Hardness reweighting; risk_table_path=None reproduces the unweighted loader.
+    risk_table_path: str | None = None
+    hardness_alpha: float = 0.0
+    weight_clip: float = 10.0
+    exclude_dirty: bool = True
     
 
 @struct.dataclass

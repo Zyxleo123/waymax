@@ -1,0 +1,208 @@
+% ==================================================================
+% Aug 26 update. Frames only; preamble lives in main.tex.
+% Hardness prediction, its (flat) effect, and the shared reward.
+% ==================================================================
+
+% ##################################################################
+\section{Predicting where the policy fails}
+% ##################################################################
+
+% ------------------------------------------------------------------
+\begin{frame}{Idea: score every scene's failure risk \emph{before} training}
+  \small
+  \begin{itemize}
+    \item Labels only cover \textbf{154 of 1000} shards (73{,}920 closed-loop
+          diffusion evals). We cannot reweight 2.3M training examples from
+          3{,}135 failure labels directly.
+    \item So fit a cheap risk model on \textbf{a-priori descriptors of the
+          logged expert trajectory} --- computable for \emph{every} scene,
+          including the 846 shards never evaluated.
+  \end{itemize}
+  \begin{block}{Four descriptor families (one per failure hypothesis)}
+    \begin{tabular}{@{}lll@{}}
+      \toprule
+      family & measures & targets \\
+      \midrule
+      B clearance & bbox-corner signed dist.\ to road edge & the 89\% that reach goal then violate \\
+      C maneuver  & curvature, heading change, braking     & turns: where lateral error is largest \\
+      D ambiguity & lane-polyline count, heading spread    & valid-but-wrong branch at a fork \\
+      E exposure  & goal distance, path length, tortuosity & the 10.6\% that never reach goal \\
+      \bottomrule
+    \end{tabular}
+  \end{block}
+  Descriptors reproduce waymax's \emph{own} offroad test (signed corner-to-edge
+  distance), so they are the real margin, not a proxy.
+\end{frame}
+
+% ------------------------------------------------------------------
+\begin{frame}{The risk model and its accuracy}
+  \small
+  \begin{columns}[T]
+    \column{0.50\textwidth}
+    L2 logistic regression, fit on the \textbf{expert-clean} slice only
+    ($n=9{,}898$, 325 failures, \textbf{3.28\%} base rate). Shard-grouped
+    5-fold CV:
+    \begin{center}
+    \begin{tabular}{@{}lrr@{}}
+      \toprule
+      family & AUC & top-decile lift \\
+      \midrule
+      \textbf{ALL} & \textbf{0.860} & \textbf{5.05$\times$} \\
+      C maneuver   & 0.828 & 4.00$\times$ \\
+      B clearance  & 0.757 & 3.02$\times$ \\
+      E exposure   & 0.730 & 2.53$\times$ \\
+      D ambiguity  & 0.601 & 1.26$\times$ \\
+      \bottomrule
+    \end{tabular}
+    \end{center}
+    \textbf{The top risk decile holds $\sim$50\% of all failures} --- 10\% of
+    the data, half the failures.
+
+    \column{0.50\textwidth}
+    Largest coefficients:
+    \begin{itemize}\itemsep2pt
+      \item[$+$] heading\_change\_total (1.26)
+      \item[$-$] heading\_change\_net ($-0.83$)
+      \item[$+$] curvature\_max (0.83)
+      \item[$-$] stationary\_frac ($-0.60$)
+      \item[$+$] road\_frames\_below\_1m (0.46)
+    \end{itemize}
+    \vspace{0.4em}
+    \begin{itemize}\itemsep2pt
+      \item Scores \textbf{482{,}153} scenes $\rightarrow$ \texttt{risk.npz}.
+      \item Dirty gate: expert bbox already offroad
+            (\texttt{road\_clearance\_min}$<0$) $\Rightarrow$ excluded, 1.5\%.
+      \item Agent-proximity features useless (AUC $\approx$0.55) despite
+            collisions being 29\% of failures.
+    \end{itemize}
+  \end{columns}
+\end{frame}
+
+% ------------------------------------------------------------------
+\begin{frame}{Turning risk into a sampling weight}
+  \small
+  One knob $\alpha$ on the per-scene risk:
+  \[
+    w(x) \;=\; \mathrm{clip}\!\left(\left(\tfrac{\mathrm{risk}(x)}{\overline{\mathrm{risk}}}\right)^{\!\alpha},\;
+    \tfrac{1}{c},\; c\right), \qquad c=10 .
+  \]
+  \begin{itemize}
+    \item $\alpha=0$: a plain permutation --- \textbf{exactly} the unweighted
+          run (a true control, not an approximation).
+    \item $\alpha=1$: sample in proportion to predicted failure risk.
+    \item Dirty scenes get weight \textbf{0} (excluded, never upweighted).
+    \item Resampling, not loss weighting: shards are preprocessed in memory, so
+          drawing indices by weight is free.
+  \end{itemize}
+  \begin{alertblock}{Caveat carried from the ranking}
+    AUC 0.860 says the model finds \emph{where} the policy fails. It does
+    \textbf{not} say more behavior-cloning weight there \emph{fixes} it --- these
+    are compounding closed-loop errors. That is what the sweep had to measure.
+  \end{alertblock}
+\end{frame}
+
+% ------------------------------------------------------------------
+\begin{frame}{Current result: reweighting is flat}
+  \small
+  Re-evaluate each $\alpha$ arm closed-loop (retrained diffusion policy):
+  \begin{center}
+  \textbf{Failure set} (210 scenes)\\[2pt]
+  \begin{tabular}{@{}lrrrrr@{}}
+    \toprule
+    arm & safe & goal & offroad & overlap & reach\&viol \\
+    \midrule
+    $\alpha=0$ keep dirty (control) & 0.014 & 0.057 & 0.243 & 0.581 & 0.043 \\
+    $\alpha=0$ exclude dirty        & 0.014 & 0.057 & 0.243 & 0.581 & 0.043 \\
+    $\alpha=0.3$ exclude dirty      & 0.014 & 0.057 & 0.243 & 0.581 & 0.043 \\
+    $\alpha=0.5$ exclude dirty      & 0.014 & 0.057 & 0.243 & 0.581 & 0.043 \\
+    $\alpha=1.0$ exclude dirty      & 0.014 & 0.057 & 0.243 & 0.581 & 0.043 \\
+    \bottomrule
+  \end{tabular}
+
+  \vspace{0.6em}
+  \textbf{Held-out WOMD} (200 scenes)\\[2pt]
+  \begin{tabular}{@{}lrrrrr@{}}
+    \toprule
+    arm & safe & goal & offroad & overlap & reach\&viol \\
+    \midrule
+    $\alpha=0$ control      & 0.955 & 0.995 & 0.035 & 0.000 & 0.040 \\
+    $\alpha=1.0$ exclude dirty & 0.955 & 0.995 & 0.035 & 0.000 & 0.040 \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+  \textbf{Every arm is identical.} Down-weighting easy scenes / up-weighting hard
+  ones buys \bad{}\,nothing at eval resolution --- the failures are compounding
+  dynamics errors, not a training-mix imbalance. Reweighting the data does not
+  move them; changing the \emph{objective} (RL on the simulator) is the next lever.
+\end{frame}
+
+% ##################################################################
+\section{The shared simulator reward}
+% ##################################################################
+
+% ------------------------------------------------------------------
+\begin{frame}{How the reward is computed}
+  \small
+  One batched, JIT-able \texttt{reward\_step} that every fine-tuning method
+  consumes (single-scene $\equiv$ batched, provably). Per step, the return is the
+  sum of additive components:
+  \[
+    r_t \;=\; \underbrace{r^{\text{prog}}_t}_{\text{progress}}
+    \;-\; \underbrace{\lambda\,\|a_t\|^2}_{\text{action}}
+    \;+\; \underbrace{r^{\text{coll}}_t}_{\le 0}
+    \;+\; \underbrace{r^{\text{off}}_t}_{\le 0}
+    \;+\; \underbrace{r^{\text{goal}}_t}_{\text{bonus}}
+  \]
+  \begin{columns}[T]
+    \column{0.55\textwidth}
+    \textbf{Progress} --- two modes:
+    \begin{itemize}\itemsep1pt
+      \item goal mode: $\;p\,(d_{t-1}-d_t)$ \; (goal-distance closed)
+      \item route mode: $\;p\,(s_t-s_{t-1}) - \text{lateral pen.}$\\
+            (on-route arclength; a beeline offroad earns none)
+    \end{itemize}
+    \textbf{One-time events} (charged once/episode by default):
+    \begin{itemize}\itemsep1pt
+      \item collision, offroad --- or \emph{per-step} to charge dwell time.
+    \end{itemize}
+    A terminated world contributes 0 thereafter, so $\sum_t r_t$ = return.
+
+    \column{0.45\textwidth}
+    \begin{block}{Default weights}
+    \begin{tabular}{@{}lr@{}}
+      progress $p$      & $1.0$ \\
+      action penalty    & $0.01$ \\
+      collision         & $-10.0$ \\
+      offroad           & $-5.0$ \\
+      goal bonus        & $+10.0$ \\
+      goal threshold    & $3.0$ m \\
+      \midrule
+      terminate on coll.& yes \\
+      terminate on offrd& no \\
+    \end{tabular}
+    \end{block}
+  \end{columns}
+\end{frame}
+
+% ------------------------------------------------------------------
+\begin{frame}{Why the reward shape matters (V-Max parity)}
+  \small
+  The default goal-distance reward is \textbf{farmable}: unbounded progress plus
+  an offroad charge paid \emph{once} and non-terminating makes cutting the corner
+  across a median strictly pay.
+  \begin{center}
+  \begin{tabular}{@{}lrrr@{}}
+    \toprule
+    run & progress & offroad-step frac & solved \\
+    \midrule
+    default reward (\texttt{dppo500}) & $+15$ & 66\% & \textbf{0} \\
+    V-Max SAC parity (\texttt{lq})    & ---   & 0.85\% & \textbf{94.3\%} \\
+    \bottomrule
+  \end{tabular}
+  \end{center}
+  \textbf{Fix (parity recipe):} route-arclength progress (offroad beeline earns
+  nothing), offroad \emph{terminates} (real cost = forfeited progress, $\sim$16$\times$
+  the flat penalty), smaller magnitudes, plus potential-based goal shaping that
+  telescopes against per-replan GAE. Wired behind flags that default to the exact
+  old behavior.
+\end{frame}

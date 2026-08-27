@@ -29,6 +29,11 @@ cd "$ROOT"
 
 SIGMA_GRID="${DFT_SIGMA_GRID:-0.0025 0.005 0.01}"
 TARGET_KL_GRID="${DFT_TARGET_KL_GRID:-0.05 0.2}"
+# Expert-anchor weight (DPPO+BC). Default keeps the single-value behavior via
+# DFT_EXPERT_WEIGHT so existing invocations are unchanged; set a space-separated
+# DFT_EXPERT_WEIGHT_GRID to fan the anchor out as a third axis. Keep it small:
+# 0.1 swamps the PG term (~1000x) and the run becomes behavior cloning.
+EW_GRID="${DFT_EXPERT_WEIGHT_GRID:-${DFT_EXPERT_WEIGHT:-0.0}}"
 # Base out_dir; each arm gets a distinct subdir so checkpoints/logs never collide.
 BASE_OUT="${DFT_OUT_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/dppo}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
@@ -37,20 +42,24 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 tag() { echo "$1" | sed 's/\./p/g; s/+//g'; }
 
 n=0
-echo "Sweep sigma=[$SIGMA_GRID] x target_kl=[$TARGET_KL_GRID], base_out=$BASE_OUT/$STAMP"
+echo "Sweep sigma=[$SIGMA_GRID] x target_kl=[$TARGET_KL_GRID] x expert_weight=[$EW_GRID], base_out=$BASE_OUT/$STAMP"
 for sig in $SIGMA_GRID; do
   for kl in $TARGET_KL_GRID; do
-    st="$(tag "$sig")"; kt="$(tag "$kl")"
-    arm="s${st}_k${kt}"
-    # Per-arm overrides consumed by submit_train_dppo.sh via the environment.
-    # Everything else (indices, iters, ckpt, scheduling flags) is inherited.
-    DFT_SIGMA_FLOOR="$sig" \
-    DFT_TARGET_KL="$kl" \
-    DFT_JOBNAME="dppo_${arm}" \
-    DFT_OUT_DIR="$BASE_OUT/$STAMP/$arm" \
-      bash rl/diffusion_ft/slurm/submit_train_dppo.sh
-    n=$((n + 1))
-    echo "  [$n] submitted arm $arm (sigma=$sig target_kl=$kl)"
+    for ew in $EW_GRID; do
+      st="$(tag "$sig")"; kt="$(tag "$kl")"; et="$(tag "$ew")"
+      arm="s${st}_k${kt}_e${et}"
+      # Per-arm overrides consumed by submit_train_dppo.sh via the environment.
+      # Everything else (indices, iters, ckpt, scheduling flags) is inherited.
+      DFT_SIGMA_FLOOR="$sig" \
+      DFT_TARGET_KL="$kl" \
+      DFT_EXPERT_WEIGHT="$ew" \
+      DFT_JOBNAME="dppo_${arm}" \
+      DFT_OUT_DIR="$BASE_OUT/$STAMP/$arm" \
+      DFT_WANDB_GROUP="${DFT_WANDB_GROUP:-dppo_$STAMP}" \
+        bash rl/diffusion_ft/slurm/submit_train_dppo.sh
+      n=$((n + 1))
+      echo "  [$n] submitted arm $arm (sigma=$sig target_kl=$kl expert_weight=$ew)"
+    done
   done
 done
 echo "Submitted $n sibling arms."

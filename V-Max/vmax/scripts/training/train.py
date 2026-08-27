@@ -126,6 +126,38 @@ def run(cfg: DictConfig) -> None:
         num_points_per_path=env_config["num_points_per_sdc_path"],
     )
 
+    # Hardness-balanced fine-tuning: replace the uniform WOMD stream with one that
+    # draws scenes in proportion to a per-scenario failure risk. `rl` lives in the
+    # parent repo, not V-Max, so point sys.path at the repo root (same as the
+    # banker below). Eval generators are left uniform on purpose -- the eval curve
+    # must stay a fixed, distribution-independent number.
+    if config.get("hardness_risk_table"):
+        import jax
+
+        repo_root = str(pathlib.Path(__file__).resolve().parents[4])
+        if repo_root not in sys.path:
+            sys.path.insert(0, repo_root)
+        from rl.vmax_hardness.hardness import make_hardness_data_generator
+
+        data_generator = make_hardness_data_generator(
+            path_dataset=env_config["path_dataset"],
+            risk_table_path=config["hardness_risk_table"],
+            num_devices=jax.local_device_count(),
+            num_envs=env_config["num_envs"],
+            num_episode_per_epoch=env_config["num_episode_per_epoch"],
+            num_paths=env_config["num_sdc_paths"],
+            num_points_per_path=env_config["num_points_per_sdc_path"],
+            max_num_objects=env_config["max_num_objects"],
+            alpha=float(config.get("hardness_alpha", 1.0)),
+            weight_clip=float(config.get("hardness_weight_clip", 10.0)),
+            exclude_dirty=bool(config.get("hardness_exclude_dirty", True)),
+            seed=int(env_config.get("seed", 0)),
+            index_dir=config.get("hardness_index_dir"),
+        )
+        print(f"[hardness] {data_generator.describe()} "
+              f"(alpha={config.get('hardness_alpha', 1.0)}, "
+              f"exclude_dirty={config.get('hardness_exclude_dirty', True)})", flush=True)
+
     if config["eval_freq"] > 0:
         eval_data_generator = simulator.make_data_generator(
             path=env_config["path_dataset_eval"],
