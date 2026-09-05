@@ -5,12 +5,15 @@ import importlib
 from pathlib import Path
 from typing import Any, Mapping
 
+import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoProcessor
 from model.vla.modules.mlp import MLP
 from model.vla.modules.attention import CrossAttentionLayers, SelfAttentionLayers
 from model.vla.modules.scene_tokenizer import SceneTokenizer
+from model.vla.modules.point_net import PointNet
 
 
 class TemporalGemmaVLA(nn.Module):
@@ -24,10 +27,11 @@ class TemporalGemmaVLA(nn.Module):
         tl_dim: int = 11,
         num_scene_tokens_per_step: int = 8,
         num_scene_tokens: int = 32,
-        num_history_steps: int = 3,
+        num_history_steps: int = 5,
         hidden_dim: int = 512,
         num_heads: int = 4,
         num_attn_layers: int = 4,
+        predict_target_lane: bool = False,
         use_lora: bool = False,
         lora_r: int = 16,
         lora_alpha: int = 32,
@@ -44,6 +48,7 @@ class TemporalGemmaVLA(nn.Module):
         self.num_scene_tokens = int(num_scene_tokens)
         self.num_history_steps = int(num_history_steps)
         self.hidden_dim = int(hidden_dim)
+        self.predict_target_lane = bool(predict_target_lane)
 
         self.processor = AutoProcessor.from_pretrained(
             gemma_name,
@@ -101,15 +106,56 @@ class TemporalGemmaVLA(nn.Module):
         )
         self.scene_token_queries = nn.Parameter(torch.zeros(1, num_scene_tokens + 1, token_dim))
 
+        if self.predict_target_lane:
+            self.lane_tokenizer = PointNet(map_dim, token_dim)
+            self.target_lane_cross_attn = CrossAttentionLayers(
+                query_dim=token_dim,
+                context_dim=token_dim,
+                hidden_dim=hidden_dim,
+                num_heads=num_heads,
+                num_layers=num_attn_layers,
+            )
+            self.target_lane_head = nn.Linear(token_dim, 1)
+
         self.subgoal_prediction = MLP([token_dim, hidden_dim, 2])
 
         self._scene_tokens_for_hook = None
         self._scene_start_for_hook = None
         self._scene_len_for_hook = None
+        self._last_target_lane_pred_ids = None
 
         self._embedding_hook_handle = self.llm.get_input_embeddings().register_forward_hook(
             self._replace_scene_embeddings_hook
         )
+
+    def _module_device(self) -> torch.device:
+        return next(self.parameters()).device
+
+    def _to_torch(self, value: Any, *, device: torch.device | None = None) -> Any:
+        if device is None:
+            device = self._module_device()
+        if torch.is_tensor(value):
+            return value.to(device=device) if device is not None else value
+        if isinstance(value, (int, float, bool)):
+            return torch.as_tensor(value, device=device)
+        if isinstance(value, np.ndarray):
+            return torch.as_tensor(value, device=device)
+        if hasattr(value, "__array__"):
+            return torch.as_tensor(np.asarray(value), device=device)
+        return value
+
+    def _to_torch_feature_map(
+        self,
+        input_features: Mapping[str, Any],
+        *,
+        device: torch.device | None = None,
+    ) -> dict[str, Any]:
+        if device is None:
+            device = self._module_device()
+        return {
+            key: self._to_torch(value, device=device)
+            for key, value in input_features.items()
+        }
 
     @classmethod
     def from_pretrained(
@@ -208,6 +254,7 @@ class TemporalGemmaVLA(nn.Module):
             "lora_alpha": int(pick("lora_alpha", 32)),
             "lora_dropout": float(pick("lora_dropout", 0.05)),
             "lora_target_modules": lora_target_modules,
+            "predict_target_lane": bool(pick("predict_target_lane", False)),
         }
 
     @staticmethod
@@ -275,7 +322,7 @@ class TemporalGemmaVLA(nn.Module):
         num_history_steps: int,
         device: torch.device,
     ) -> torch.Tensor:
-        history_valid = input_features.get("history_valid")
+        history_valid = self._to_torch(input_features.get("history_valid"), device=device)
         if history_valid is None:
             return torch.ones((batch_size, num_history_steps), dtype=torch.bool, device=device)
         history_valid = history_valid.to(device=device)
@@ -292,6 +339,50 @@ class TemporalGemmaVLA(nn.Module):
             )
         return history_valid
 
+    def _flatten_target_lane_ids(
+        self,
+        target_lane_ids: Any,
+        *,
+        batch_size: int,
+        num_history_steps: int,
+        used_temporal_batch: bool,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        if target_lane_ids is None:
+            return None
+
+        if isinstance(target_lane_ids, torch.Tensor):
+            lane_ids = target_lane_ids.to(device=device)
+        else:
+            lane_ids = torch.as_tensor(target_lane_ids, device=device)
+
+        if lane_ids.numel() == 0:
+            return None
+
+        lane_ids = lane_ids.to(dtype=torch.long)
+        if used_temporal_batch:
+            if lane_ids.ndim == 2 and lane_ids.shape == (batch_size, num_history_steps):
+                return lane_ids.reshape(-1)
+            if lane_ids.ndim == 1 and lane_ids.shape[0] == batch_size * num_history_steps:
+                return lane_ids
+            if lane_ids.ndim == 1 and lane_ids.shape[0] == batch_size:
+                return lane_ids.repeat_interleave(num_history_steps)
+            raise ValueError(
+                "target_lane_ids must have shape [B, T], [B*T], or [B] when using temporal batching, "
+                f"got {tuple(lane_ids.shape)} with B={batch_size}, T={num_history_steps}."
+            )
+
+        if lane_ids.ndim == 2 and lane_ids.shape == (batch_size, num_history_steps):
+            return lane_ids[:, -1]
+        if lane_ids.ndim == 2 and lane_ids.shape[0] == batch_size and lane_ids.shape[1] == 1:
+            return lane_ids[:, 0]
+        if lane_ids.ndim == 1 and lane_ids.shape[0] == batch_size:
+            return lane_ids
+        raise ValueError(
+            "target_lane_ids must have shape [B, T], [B, 1], or [B] when not using temporal batching, "
+            f"got {tuple(lane_ids.shape)} with B={batch_size}, T={num_history_steps}."
+        )
+
     def _tokenize_scene_features(self, input_features: Mapping[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         """
         ego_state = input_features["ego_state"]: [B, T, ego_dim]
@@ -304,6 +395,7 @@ class TemporalGemmaVLA(nn.Module):
         traffic_light_features = input_features["traffic_light_features"]: [B, T, num_traffic_lights, traffic_light_dim]
         traffic_light_valid = input_features["traffic_light_valid"]: [B, T, num_traffic_lights]
         """
+        input_features = self._to_torch_feature_map(input_features)
         batch_size, num_history_steps = input_features["ego_state"].shape[:2]
         flatten_features = {
             "ego_state": input_features["ego_state"].reshape(batch_size * num_history_steps, input_features["ego_state"].shape[-1]),
@@ -500,9 +592,20 @@ class TemporalGemmaVLA(nn.Module):
         prompt_mask: torch.Tensor,
         answer_ids: torch.Tensor | None = None,
         answer_mask: torch.Tensor | None = None,
+        target_lane_ids: Any | None = None,
         compute_subgoal_loss: bool = False,
     ):
+        device = self._module_device()
+        input_features = self._to_torch_feature_map(input_features, device=device)
+        prompt_ids = self._to_torch(prompt_ids, device=device)
+        prompt_mask = self._to_torch(prompt_mask, device=device)
+        if answer_ids is not None:
+            answer_ids = self._to_torch(answer_ids, device=device)
+        if answer_mask is not None:
+            answer_mask = self._to_torch(answer_mask, device=device)
         scene_tokens, subgoal_tokens = self._tokenize_scene_features(input_features)
+        
+
         (
             flat_scene_tokens,
             flat_subgoal_tokens,
@@ -519,10 +622,68 @@ class TemporalGemmaVLA(nn.Module):
             answer_ids=answer_ids,
             answer_mask=answer_mask,
         )
-
+        
         device = flat_scene_tokens.device
         batch_size = flat_prompt_ids.shape[0]
         num_scene_tokens = flat_scene_tokens.shape[1]
+        lane_loss = torch.zeros((), dtype=flat_scene_tokens.dtype, device=device)
+        target_lane_accuracy = torch.zeros((), dtype=flat_scene_tokens.dtype, device=device)
+
+        if self.predict_target_lane:
+            B, H, N = input_features["lane_features"].shape[:3]
+            lane_features = input_features["lane_features"].reshape(
+                B * H * N, *input_features["lane_features"].shape[3:]
+            )
+            lane_valid = input_features["lane_valid"].reshape(
+                B * H * N, *input_features["lane_valid"].shape[3:]
+            )
+            lane_ids = input_features["lane_ids"].reshape(
+                B * H, *input_features["lane_ids"].shape[2:]
+            )
+
+            lane_tokens = self.lane_tokenizer(lane_features, lane_valid)  # [B*T*n_seg, token_dim]
+            lane_context = self.target_lane_cross_attn(
+                query_btc=lane_tokens.reshape(B * H, N, -1),
+                context_bnc=flat_scene_tokens,
+                context_mask_bn=torch.ones(
+                    (B * H, num_scene_tokens),
+                    dtype=torch.bool,
+                    device=device,
+                )
+            )
+            lane_logits = self.target_lane_head(lane_context).squeeze(-1)  # [B*T, n_seg]
+
+            target_lane_ids_flat = self._flatten_target_lane_ids(
+                target_lane_ids,
+                batch_size=B,
+                num_history_steps=H,
+                used_temporal_batch=used_temporal_batch,
+                device=device,
+            )
+            if target_lane_ids_flat is not None:
+                if target_lane_ids_flat.ndim != 1:
+                    target_lane_ids_flat = target_lane_ids_flat.reshape(-1)
+                if int(target_lane_ids_flat.shape[0]) != int(lane_ids.shape[0]):
+                    raise ValueError(
+                        f"target_lane_ids length mismatch: expected {lane_ids.shape[0]}, got {target_lane_ids_flat.shape[0]}"
+                    )
+
+                lane_valid_flat = lane_valid.reshape(B * H, N, -1).any(dim=-1)
+                target_match = lane_ids == target_lane_ids_flat[:, None]
+                has_match = target_match.any(dim=-1) & lane_valid_flat.any(dim=-1)
+                if bool(has_match.any()):
+                    lane_logits_masked = lane_logits.masked_fill(~lane_valid_flat, -1e9)
+                    lane_targets = target_match.long().argmax(dim=-1)
+                    lane_loss = F.cross_entropy(
+                        lane_logits_masked[has_match],
+                        lane_targets[has_match],
+                    )
+                    lane_pred = lane_logits_masked.argmax(dim=-1)
+                    target_lane_accuracy = (lane_pred[has_match] == lane_targets[has_match]).float().mean()
+                else:
+                    lane_loss = torch.zeros((), dtype=flat_scene_tokens.dtype, device=device)
+                    target_lane_accuracy = torch.zeros((), dtype=flat_scene_tokens.dtype, device=device)
+
 
         scene_dummy_ids = torch.full(
             (batch_size, num_scene_tokens),
@@ -580,7 +741,7 @@ class TemporalGemmaVLA(nn.Module):
 
         language_loss = outputs.loss
         if compute_subgoal_loss:
-            subgoal_xy = input_features["subgoal_xy"]
+            subgoal_xy = self._to_torch(input_features["subgoal_xy"], device=device)
             if subgoal_xy.ndim == 3:
                 if used_temporal_batch:
                     subgoal_xy = subgoal_xy.reshape(-1, subgoal_xy.shape[-1])
@@ -588,15 +749,17 @@ class TemporalGemmaVLA(nn.Module):
                     subgoal_xy = subgoal_xy[:, -1, :]
             subgoal_preds = self.subgoal_prediction(flat_subgoal_tokens)
             subgoal_loss = nn.functional.mse_loss(subgoal_preds, subgoal_xy, reduction="mean")
-            loss = language_loss + subgoal_loss
+            loss = language_loss + subgoal_loss + lane_loss
         else:
             subgoal_loss = 0
-            loss = language_loss
+            loss = language_loss + lane_loss
 
         return {
             "loss": loss,
             "subgoal_loss": subgoal_loss.detach().cpu() if isinstance(subgoal_loss, torch.Tensor) else subgoal_loss,
             "language_loss": language_loss.detach().cpu() if isinstance(language_loss, torch.Tensor) else language_loss,
+            "target_lane_loss": lane_loss.detach().cpu(),
+            "target_lane_accuracy": target_lane_accuracy.detach().cpu(),
         }
 
     def generate_predictions(
@@ -606,6 +769,10 @@ class TemporalGemmaVLA(nn.Module):
         prompt_mask: torch.Tensor,
         max_new_tokens: int = 8,
     ) -> tuple[list[str] | list[list[str]], Any]:
+        device = self._module_device()
+        input_features = self._to_torch_feature_map(input_features, device=device)
+        prompt_ids = self._to_torch(prompt_ids, device=device)
+        prompt_mask = self._to_torch(prompt_mask, device=device)
         scene_tokens, subgoal_tokens = self._tokenize_scene_features(input_features)
         (
             flat_scene_tokens,
@@ -680,4 +847,53 @@ class TemporalGemmaVLA(nn.Module):
             ]
             subgoal_preds = subgoal_preds.reshape(batch_size, num_history_steps, -1)
 
-        return output_texts, subgoal_preds.detach().cpu().numpy()
+        target_lane_pred_ids = None
+        if self.predict_target_lane:
+            B, H, N = input_features["lane_features"].shape[:3]
+            lane_features = input_features["lane_features"].reshape(
+                B * H * N, *input_features["lane_features"].shape[3:]
+            )
+            lane_valid = input_features["lane_valid"].reshape(
+                B * H * N, *input_features["lane_valid"].shape[3:]
+            )
+            lane_ids = input_features["lane_ids"].reshape(
+                B * H, *input_features["lane_ids"].shape[2:]
+            )
+
+            lane_tokens = self.lane_tokenizer(lane_features, lane_valid)
+            lane_context = self.target_lane_cross_attn(
+                query_btc=lane_tokens.reshape(B * H, N, -1),
+                context_bnc=flat_scene_tokens,
+                context_mask_bn=torch.ones(
+                    (B * H, num_scene_tokens),
+                    dtype=torch.bool,
+                    device=device,
+                ),
+            )
+            lane_logits = self.target_lane_head(lane_context).squeeze(-1)
+
+            lane_valid_flat = lane_valid.reshape(B * H, N, -1).any(dim=-1)
+            lane_logits_masked = lane_logits.masked_fill(~lane_valid_flat, -1e9)
+            lane_pred_idx = lane_logits_masked.argmax(dim=-1)
+
+            target_lane_pred_ids = torch.gather(
+                lane_ids,
+                dim=1,
+                index=lane_pred_idx.unsqueeze(-1),
+            ).squeeze(-1)
+
+            no_valid_lane = ~lane_valid_flat.any(dim=-1)
+            if bool(no_valid_lane.any()):
+                target_lane_pred_ids = target_lane_pred_ids.clone()
+                target_lane_pred_ids[no_valid_lane] = -1
+
+            if prompt_ids.ndim == 3:
+                target_lane_pred_ids = target_lane_pred_ids.reshape(B, H)
+            elif not used_temporal_batch:
+                target_lane_pred_ids = target_lane_pred_ids.reshape(B, H)[:, -1]
+
+        return {
+            'answer': output_texts,
+            'subgoal_preds': subgoal_preds.detach().cpu().numpy(),
+            'target_lane_ids': target_lane_pred_ids.detach().cpu().numpy() if target_lane_pred_ids is not None else None
+        }

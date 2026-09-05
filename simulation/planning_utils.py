@@ -99,6 +99,9 @@ def predict_planner_trajectories_with_periodic_replan(
     start_t_b1 = np.full([num_worlds], start_timestep, dtype=np.int32)
     instructions = [dict() for _ in range(num_worlds)]
     subgoals = [dict() for _ in range(num_worlds)]
+    reward_functions = [dict() for _ in range(num_worlds)]
+    target_lane_ids = [dict() for _ in range(num_worlds)]
+    target_lane_xys = [dict() for _ in range(num_worlds)]
 
     replaced_state = sim_state  
     prev_instruction_texts = None
@@ -116,10 +119,21 @@ def predict_planner_trajectories_with_periodic_replan(
         )
         instruction_t = getattr(plan_result, "instruction_texts", None)
         subgoal_t = getattr(plan_result, "subgoal_preds", None)
+        reward_functions_t = getattr(plan_result, "reward_texts", None)
+        target_lane_ids_t = getattr(plan_result, "target_lane_ids", None)
+        if getattr(planner, "scorers", None) is not None:
+            target_lane_xys_t = [np.asarray(planner.scorers[i].target_lane) for i in range(num_worlds)]
+        else:
+            target_lane_xys_t = None
+
         prev_instruction_texts = instruction_t
         for b in range(num_worlds):
             instructions[b][f"t{step_offset}"] = instruction_t[b] if instruction_t is not None else ""
             subgoals[b][f"t{step_offset}"] = subgoal_t[b] if subgoal_t is not None else None
+            reward_functions[b][f"t{step_offset}"] = reward_functions_t[b] if reward_functions_t is not None else None
+            target_lane_ids[b][f"t{step_offset}"] = target_lane_ids_t[b] if target_lane_ids_t is not None else None
+            target_lane_xys[b][f"t{step_offset}"] = target_lane_xys_t[b] if target_lane_xys_t is not None else None
+
         plan_traj_bt5 = np.asarray(plan_result.trajectory_world_bt5, dtype=np.float32)
         replaced_state = apply_ego_replacements_to_expanded_state(
             replaced_state,
@@ -139,8 +153,15 @@ def predict_planner_trajectories_with_periodic_replan(
         world_t_valid_bt=jnp.asarray(world_valid),
         aux=plan_result.aux,
     )
+    info = {
+        "instructions": instructions,
+        "subgoals": subgoals,
+        "reward_functions": reward_functions,
+        "target_lane_ids": target_lane_ids,
+        "target_lane_xys": target_lane_xys,
+    }
 
-    return pred, replaced_state, instructions, subgoals
+    return pred, replaced_state, info
 
 def sim_state_to_ego_trajectory(sim_state):
     sdc_indices = get_sdc_indices_for_batched_state(sim_state)

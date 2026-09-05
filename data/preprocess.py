@@ -6,10 +6,18 @@ from typing import TYPE_CHECKING
 import jax
 import jax.numpy as jnp
 
+from waymax.datatypes.roadgraph import MapElementIds
+
 from data.types import PreprocessBatch, PreprocessConfig
 
 if TYPE_CHECKING:
     from waymax import datatypes
+
+
+LANE_MAP_ELEMENT_TYPES = (
+    int(MapElementIds.LANE_FREEWAY.value),
+    int(MapElementIds.LANE_SURFACE_STREET.value),
+)
 
 
 def _wrap_to_pi(angle: jax.Array) -> jax.Array:
@@ -169,7 +177,10 @@ def _build_map_features(
     origin_xy_b2: jax.Array,
     heading_b: jax.Array,
     cfg: PreprocessConfig,
-) -> tuple[jax.Array, jax.Array]:
+    *,
+    allowed_types: tuple[int, ...] | None = None,
+    max_segments: int | None = None,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
     x_bm = state.roadgraph_points.x
     y_bm = state.roadgraph_points.y
     dir_x_bm = state.roadgraph_points.dir_x
@@ -178,7 +189,7 @@ def _build_map_features(
     valid_bm = state.roadgraph_points.valid
     ids_bm = state.roadgraph_points.ids.astype(jnp.int32)
 
-    max_segments = int(cfg.max_segments)
+    max_segments = int(cfg.max_segments) if max_segments is None else int(max_segments)
     max_points_per_segment = int(cfg.max_points_per_segment)
     feat_dim = 2 + 2 + cfg.num_map_type_classes
     sentinel_id = jnp.iinfo(jnp.int32).max
@@ -193,9 +204,12 @@ def _build_map_features(
         centered = xy - origin_xy_b2[batch_idx][None, :]
         dist = jnp.linalg.norm(centered, axis=-1)
         valid_and_range = valid & (dist < cfg.max_range)
+        if allowed_types is not None:
+            valid_and_range = valid_and_range & jnp.isin(types, jnp.asarray(allowed_types, dtype=jnp.int32))
 
         empty_feat = jnp.zeros((max_segments, max_points_per_segment, feat_dim), dtype=jnp.float32)
         empty_valid = jnp.zeros((max_segments, max_points_per_segment), dtype=jnp.bool_)
+        empty_ids = jnp.zeros((max_segments,), dtype=jnp.int32)
 
         def _build(_: None) -> tuple[jax.Array, jax.Array]:
             sort_ids = jnp.where(valid_and_range, ids, sentinel_id)
@@ -262,12 +276,18 @@ def _build_map_features(
                 )
 
             segment_feats, segment_valids = jax.vmap(_build_segment)(jnp.arange(max_segments, dtype=jnp.int32))
-            return segment_feats, segment_valids
+            segment_ids = jnp.where(unique_ids == sentinel_id, 0, unique_ids[:max_segments]).astype(jnp.int32)
+            return segment_feats, segment_valids, segment_ids
 
-        return jax.lax.cond(jnp.any(valid_and_range), _build, lambda _: (empty_feat, empty_valid), operand=None)
+        return jax.lax.cond(
+            jnp.any(valid_and_range),
+            _build,
+            lambda _: (empty_feat, empty_valid, empty_ids),
+            operand=None,
+        )
 
-    feats, valids = jax.vmap(_build_for_batch)(jnp.arange(x_bm.shape[0], dtype=jnp.int32))
-    return feats, valids
+    feats, valids, ids = jax.vmap(_build_for_batch)(jnp.arange(x_bm.shape[0], dtype=jnp.int32))
+    return feats, valids, ids
 
 
 def _build_tl_features(
@@ -408,7 +428,15 @@ def _preprocess_single_batch(
     goal_xy = _rotate_xy(goal_xy_world - origin_xy, anchor_yaw) / cfg.ego_range
     remaining_timesteps = (goal_step_b - anchor_step_b) / 100.0
 
-    map_features, map_valid = _build_map_features(state, origin_xy, anchor_yaw, cfg)
+    map_features, map_valid, map_ids = _build_map_features(state, origin_xy, anchor_yaw, cfg)
+    lane_features, lane_valid, lane_ids = _build_map_features(
+        state,
+        origin_xy,
+        anchor_yaw,
+        cfg,
+        allowed_types=LANE_MAP_ELEMENT_TYPES,
+        max_segments=64,
+    )
     tl_features, tl_valid = _build_tl_features(state, anchor_step_b, origin_xy, anchor_yaw, cfg)
 
     max_world_steps = int(math.ceil((cfg.predict_horizon * cfg.model_dt) / cfg.world_dt_fallback)) + 2
@@ -427,6 +455,10 @@ def _preprocess_single_batch(
         "other_valid": other_valid,
         "map_features": map_features.astype(jnp.float32),
         "map_valid": map_valid,
+        "map_ids": map_ids.astype(jnp.int32),
+        "lane_features": lane_features.astype(jnp.float32),
+        "lane_valid": lane_valid,
+        "lane_ids": lane_ids.astype(jnp.int32),
         "traffic_light_features": tl_features.astype(jnp.float32),
         "traffic_light_valid": tl_valid,
     }

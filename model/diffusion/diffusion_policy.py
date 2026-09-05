@@ -101,7 +101,7 @@ class DiffusionPolicy(nnx.Module):
             rngs=rngs,
         )
         self.instruction_encoder = MLP([inst_attr_dim, hidden_dim, hidden_dim, cond_dim], rngs=rngs)
-        if self.subgoal_conditioned:
+        if subgoal_conditioned:
             self.subgoal_encoder = MLP([2, hidden_dim, hidden_dim, cond_dim], rngs=rngs)
 
         denoise_fn = UNet1DConditioned(

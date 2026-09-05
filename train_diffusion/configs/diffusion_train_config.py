@@ -58,7 +58,7 @@ def parse_args() -> DiffusionTrainConfig:
 	parser.add_argument("--num_workers", type=int, default=0)
 	parser.add_argument("--pin_memory", action="store_true")
 
-	parser.add_argument("--pretrained_ckpt", type=str, required=True)
+	parser.add_argument("--pretrained_ckpt", type=str, default=None)
 	parser.add_argument("--resume_path", type=str, default=None)
 	parser.add_argument("--use_ema", action="store_true", default=True)
 	parser.add_argument("--no_use_ema", action="store_false", dest="use_ema")

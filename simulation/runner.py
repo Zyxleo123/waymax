@@ -5,6 +5,7 @@ import dataclasses
 import json
 import os
 import sys
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -20,7 +21,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from data.scenario_loader import load_scenario_state_batch_fast
-from lane_graph.lane_graph_utils import LaneGraphLoader
+from lane_graph.lane_graph_utils import LaneGraphLoader, lane_graph_zip_path_for_tfrecord
+from scores import helpers as scorer_helpers
+from scores.scorer_lane_graph import LaneGraphShardStore
 from simulation.evaluation_utils import (
     rollout_predicted_trajectories_with_metrics,
     infer_goals_from_sim_state, 
@@ -38,17 +41,54 @@ from simulation.utils import _save_json  # noqa: E402
 from viz.render import render_videos_batched
 from waymax import config as waymax_config
 from tqdm import tqdm
+try:
+    # reuse extraction logic from scripts/build_cache if available
+    from scripts import build_cache as _build_cache
+except Exception:
+    _build_cache = None
+
+
+_SCENARIO_RESULT_RE = re.compile(r"^(?P<tfrecord_name>.+)\.scenario_(?P<scenario_idx>\d+)\.json$")
+
+
+def _load_completed_scenarios(start_from: str | None) -> set[tuple[str, int]]:
+    if not start_from:
+        return set()
+
+    completed: set[tuple[str, int]] = set()
+    start_from_path = Path(start_from)
+    if not start_from_path.exists():
+        print(f"start_from path does not exist: {start_from_path}")
+        return completed
+
+    for result_path in start_from_path.rglob("*.json"):
+        match = _SCENARIO_RESULT_RE.match(result_path.name)
+        if match is None:
+            continue
+        completed.add((match.group("tfrecord_name"), int(match.group("scenario_idx"))))
+
+    if completed:
+        print(f"Resuming from {start_from_path}; found {len(completed)} completed scenario results.")
+    return completed
 
 
 def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]]:
-    output_dir = Path(args.output_dir) / time.strftime("%Y%m%d_%H%M%S")
+    output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    if args.target_scenario_path is not None:
+        with open(args.target_scenario_path, "r") as f:
+            target_scenarios = json.load(f)
+    else:
+        target_scenarios = None
+
+    completed_scenarios = _load_completed_scenarios(getattr(args, "start_from", None))
     tested_scenarios, curr_scenario_index = 0, 0
+    target_scenario_cursor = 0
     reached_all, success_all = 0, 0
     tfrecord_paths = sorted(glob(str(Path(args.tfrecord_dir) / "*")))
     tfrecord_path = tfrecord_paths.pop(0)
-    lane_graph_loader = LaneGraphLoader(args.lane_graph_dir)
+    # lane_graph_loader = LaneGraphLoader(args.lane_graph_dir)
     ds_cfg = dataclasses.replace(
         waymax_config.WOD_1_3_1_TRAINING,
         path=str(tfrecord_path),
@@ -61,13 +101,64 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
     else:
         target_scenario_indices = None
 
+    lane_graph_zip_path = None
     while tested_scenarios < int(args.num_scenarios):
-        if target_scenario_indices is not None:
-            scenario_indices = target_scenario_indices[tested_scenarios : tested_scenarios + int(args.num_worlds)]
+        if target_scenarios is not None:
+            scenario_indices = []
+            scenario_base_name = os.path.basename(tfrecord_path)
+            while len(scenario_indices) < int(args.num_worlds) and target_scenario_cursor < len(target_scenarios[scenario_base_name]):
+                if scenario_base_name not in target_scenarios:
+                    scenario_indices = []
+                scenario_idx = int(target_scenarios[scenario_base_name][target_scenario_cursor])
+                target_scenario_cursor += 1
+                scenario_indices.append(scenario_idx)
+            if len(scenario_indices) == 0 or target_scenario_cursor >= len(target_scenarios[scenario_base_name]):
+                if len(tfrecord_paths) == 0:
+                    break
+                tfrecord_path = tfrecord_paths.pop(0)
+                curr_scenario_index = 0
+                ds_cfg = dataclasses.replace(
+                    waymax_config.WOD_1_3_1_TRAINING,
+                    path=str(tfrecord_path),
+                    max_num_objects=int(args.max_num_objects),
+                    batch_dims=(args.num_worlds,),
+                    shuffle_seed=0,
+                )
+                target_scenario_cursor = 0
+                continue
+
+            if not scenario_indices:
+                tfrecord_path = tfrecord_paths.pop(0)
+                curr_scenario_index = 0
+                ds_cfg = dataclasses.replace(
+                    waymax_config.WOD_1_3_1_TRAINING,
+                    path=str(tfrecord_path),
+                    max_num_objects=int(args.max_num_objects),
+                    batch_dims=(args.num_worlds,),
+                    shuffle_seed=0,
+                )
+                target_scenario_cursor = 0
+                continue
+        elif target_scenario_indices is not None:
+            scenario_indices = []
+            while len(scenario_indices) < int(args.num_worlds) and target_scenario_cursor < len(target_scenario_indices):
+                scenario_idx = int(target_scenario_indices[target_scenario_cursor])
+                target_scenario_cursor += 1
+                if (os.path.basename(tfrecord_path), scenario_idx) in completed_scenarios:
+                    continue
+                scenario_indices.append(scenario_idx)
             if not scenario_indices:
                 break
         else:
-            scenario_indices = curr_scenario_index + np.arange(int(args.num_worlds))
+            scenario_indices = []
+            while len(scenario_indices) < int(args.num_worlds) and tested_scenarios + len(scenario_indices) < int(args.num_scenarios):
+                scenario_idx = int(curr_scenario_index)
+                curr_scenario_index += 1
+                if (os.path.basename(tfrecord_path), scenario_idx) in completed_scenarios:
+                    continue
+                scenario_indices.append(scenario_idx)
+            if not scenario_indices:
+                break
         try:
             sim_state, _ = load_scenario_state_batch_fast(ds_cfg, scenario_indices)
         except Exception as e:
@@ -82,11 +173,12 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                 batch_dims=(args.num_worlds,),
                 shuffle_seed=0,
             )
+            target_scenario_cursor = 0
             continue
 
         print(f"Testing scenarios {scenario_indices} from {os.path.basename(tfrecord_path)}...")
 
-        lane_graphs = lane_graph_loader.get_lane_graph_for_scenarios(tfrecord_path, scenario_indices)
+        # lane_graphs = lane_graph_loader.get_lane_graph_for_scenarios(tfrecord_path, scenario_indices)
         rng_key = jax.random.PRNGKey(int(args.seed))
         goal_xy_b2, goal_t_b, ego_idx_b = infer_goals_from_sim_state(sim_state)
 
@@ -96,8 +188,29 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
             start_t = np.full((len(scenario_indices),), int(args.start_timestep), dtype=np.int32)
             instructions = [dict() for _ in range(len(scenario_indices))]
             subgoals = [dict() for _ in range(len(scenario_indices))]
+            reward_functions = [dict() for _ in range(len(scenario_indices))]
+            target_lane_ids = [None for _ in range(len(scenario_indices))]
+            target_lane_xys = [None for _ in range(len(scenario_indices))]
         else:
-            pred, replaced_state, instructions, subgoals = predict_planner_trajectories_with_periodic_replan(
+            if args.planner == "es" or args.planner == "temporal-vla":
+                if args.lane_graph_dir:
+                    requested_zip_path = lane_graph_zip_path_for_tfrecord(str(tfrecord_path), args.lane_graph_dir)
+                    if lane_graph_zip_path != requested_zip_path:
+                        lane_graph_zip_path = requested_zip_path
+                        if lane_graph_zip_path.exists():
+                            lane_graph_store = LaneGraphShardStore(lane_graph_zip_path.as_posix())
+                        else:
+                            lane_graph_store = None
+                            raise FileNotFoundError(f"Lane graph zip file {lane_graph_zip_path} not found for tfrecord {tfrecord_path}.")
+                lane_graphs = []
+                for world_idx in range(len(scenario_indices)):
+                    graph = lane_graph_store.get_by_record_index(int(scenario_indices[world_idx]))
+                    planner.scorers[world_idx].set_lane_graph(graph)
+                    lane_graphs.append(graph)
+                    scorer_helpers.update_lane_points(
+                        planner.scorers[world_idx], sim_state, world_idx
+                    )
+            pred, replaced_state, info = predict_planner_trajectories_with_periodic_replan(
                 args,
                 sim_state,
                 goal_xy_b2,
@@ -110,6 +223,11 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
             )
             pred_traj = np.asarray(pred.trajectory_world_bt5)
             start_t = np.asarray(pred.start_t_b, dtype=np.int32)
+            instructions = info["instructions"]
+            subgoals = info["subgoals"]
+            reward_functions = info["reward_functions"]
+            target_lane_ids = info["target_lane_ids"]
+            
 
         rollout = rollout_predicted_trajectories_with_metrics(
             replaced_state,
@@ -157,6 +275,54 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                 }
                 traj_path = output_dir / f"{os.path.basename(tfrecord_path)}.scenario_{scenario_idx:03d}.trajectory.npz"
                 np.savez(traj_path, **traj_data)
+        # Save per-episode cache from the planner-updated episode state.
+        save_cache_mode = getattr(args, "save_cache", None)
+        if save_cache_mode is not None and save_cache_mode != "none":
+            for i, scenario_idx in enumerate(scenario_indices):
+                should_save = False
+                if save_cache_mode == "all":
+                    should_save = True
+                elif save_cache_mode == "success" and bool(success[i]):
+                    should_save = True
+                elif save_cache_mode == "failure" and not bool(success[i]):
+                    should_save = True
+
+                if not should_save:
+                    continue
+
+                try:
+                    if _build_cache is None:
+                        # fallback: replicate minimal extraction for common fields
+                        # We attempt to save a small set of useful arrays from the updated episode state.
+                        world_idx = int(i)
+                        packed = {
+                            "tfrecord_path": np.asarray(str(tfrecord_path), dtype=np.str_),
+                            "tfrecord_name": np.asarray(os.path.basename(tfrecord_path), dtype=np.str_),
+                            "scenario_idx": np.asarray(int(scenario_idx), dtype=np.int32),
+                            "world_idx": np.asarray(world_idx, dtype=np.int32),
+                            "log_trajectory_x": np.asarray(replaced_state.log_trajectory.x[world_idx]),
+                            "log_trajectory_y": np.asarray(replaced_state.log_trajectory.y[world_idx]),
+                            "log_trajectory_yaw": np.asarray(replaced_state.log_trajectory.yaw[world_idx]),
+                            "log_trajectory_valid": np.asarray(replaced_state.log_trajectory.valid[world_idx]),
+                        }
+                    else:
+                        # reuse build_cache extraction (returns dict[str, np.ndarray])
+                        world_idx = int(i)
+                        extracted = _build_cache._extract_used_sim_state_fields(replaced_state, world_idx)
+                        packed = {
+                            "tfrecord_path": np.asarray(str(tfrecord_path), dtype=np.str_),
+                            "tfrecord_name": np.asarray(os.path.basename(tfrecord_path), dtype=np.str_),
+                            "scenario_idx": np.asarray(int(scenario_idx), dtype=np.int32),
+                            "world_idx": np.asarray(world_idx, dtype=np.int32),
+                        }
+                        packed.update(extracted)
+
+                    cache_dir = output_dir / "sim_state_cache"
+                    cache_dir.mkdir(parents=True, exist_ok=True)
+                    cache_path = cache_dir / f"{os.path.basename(tfrecord_path)}.scenario_{int(scenario_idx):03d}.sim_state_cache.npz"
+                    np.savez_compressed(cache_path, **packed)
+                except Exception as e:
+                    print(f"Failed to save sim_state cache for scenario {scenario_idx} (world {i}): {e}")
         if args.save_instruction:
             for i, scenario_idx in enumerate(scenario_indices):
                 instruction_data = {
@@ -164,6 +330,8 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                     "ego_idx": int(ego_idx_b[i]),
                     "instructions": instructions[i],
                     "subgoals": subgoals[i] if args.use_subgoal else None,
+                    "reward_functions": reward_functions[i],
+                    "target_lane_ids": target_lane_ids[i]
                 }
                 instruction_path = output_dir / f"{os.path.basename(tfrecord_path)}.scenario_{scenario_idx:03d}.instructions.json"
                 _save_json(instruction_path, instruction_data)
@@ -230,13 +398,12 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                 "overlap": bool(overlap[i]),
                 "offroad": bool(offroad[i]),
                 "success": bool(success[i]),
-                "video_path": video_paths[i].as_posix() if video_requests else None,
                 "tfrecord": str(tfrecord_path),
             }
             result_path = output_dir / f"{os.path.basename(tfrecord_path)}.scenario_{scenario_idx:03d}.json"
             _save_json(result_path, result)
+            completed_scenarios.add((os.path.basename(tfrecord_path), int(scenario_idx)))
         tested_scenarios += len(scenario_indices)
-        curr_scenario_index += len(scenario_indices)
         print(f"Finished testing scenarios {scenario_indices} from {os.path.basename(tfrecord_path)}.")
         print(f"Current success rate: {success_all}/{tested_scenarios} = {success_all / tested_scenarios:.4f}")
         print("" + "-" * 50)

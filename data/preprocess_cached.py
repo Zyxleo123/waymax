@@ -16,7 +16,15 @@ from typing import Any
 
 import numpy as np
 
+from waymax.datatypes.roadgraph import MapElementIds
+
 from data.types import PreprocessConfig
+
+
+LANE_MAP_ELEMENT_TYPES = (
+	int(MapElementIds.LANE_FREEWAY),
+	int(MapElementIds.LANE_SURFACE_STREET),
+)
 
 
 _CACHE_FIELD_NAMES = (
@@ -44,8 +52,11 @@ _CACHE_FIELD_NAMES = (
 	"roadgraph_points_valid",
 	"roadgraph_points_dir_x",
 	"roadgraph_points_dir_y",
+)
+
+_OPTIONAL_CACHE_FIELD_NAMES = (
 	"inst_features",
-	"inst_valid"
+	"inst_valid",
 )
 
 
@@ -83,6 +94,23 @@ def _ensure_rng(seed_or_rng: int | np.random.Generator | None) -> np.random.Gene
 	return np.random.default_rng(0 if seed_or_rng is None else int(seed_or_rng))
 
 
+def _available_scenario_count(payload: Mapping[str, np.ndarray]) -> int:
+	if "num_scenarios" in payload:
+		num_scenarios = np.asarray(payload["num_scenarios"])
+		if num_scenarios.ndim == 0:
+			return int(num_scenarios)
+	if "scenario_indices" in payload:
+		scenario_indices = np.asarray(payload["scenario_indices"])
+		if scenario_indices.ndim >= 1:
+			return int(scenario_indices.shape[0])
+	for key in _CACHE_FIELD_NAMES:
+		if key in payload:
+			value = np.asarray(payload[key])
+			if value.ndim >= 1:
+				return int(value.shape[0])
+	return 1
+
+
 def _load_npz(cache_path: str | Path) -> dict[str, np.ndarray]:
 	path = Path(cache_path)
 	with np.load(path, allow_pickle=True) as data:
@@ -98,11 +126,16 @@ def _select_scenarios(
 	payload: Mapping[str, np.ndarray],
 	scenario_indices: Sequence[int] | int | None,
 ) -> list[int]:
+	count = _available_scenario_count(payload)
 	if scenario_indices is None:
-		return list(range(int(np.asarray(payload["object_metadata_is_sdc"]).shape[0])))
+		return list(range(count))
 	if isinstance(scenario_indices, (int, np.integer)):
-		return [int(scenario_indices)]
-	return [int(index) for index in scenario_indices]
+		indices = [int(scenario_indices)]
+	else:
+		indices = [int(index) for index in scenario_indices]
+	if count <= 0:
+		return []
+	return [index for index in indices if 0 <= index < count]
 
 
 def _subset_payload(
@@ -110,9 +143,22 @@ def _subset_payload(
 	scenario_indices: Sequence[int] | int | None,
 ) -> tuple[dict[str, np.ndarray], list[int]]:
 	selected_indices = _select_scenarios(payload, scenario_indices)
+	if scenario_indices is not None and not selected_indices:
+		raise IndexError(f"No valid scenario indices were available for the requested subset: {scenario_indices}")
+	has_explicit_scenario_axis = "num_scenarios" in payload or "scenario_indices" in payload
 	subset: dict[str, np.ndarray] = {}
+	if not has_explicit_scenario_axis:
+		for key in _CACHE_FIELD_NAMES:
+			subset[key] = np.asarray(payload[key])[None, ...]
+		for key in _OPTIONAL_CACHE_FIELD_NAMES:
+			if key in payload:
+				subset[key] = np.asarray(payload[key])[None, ...]
+		return subset, [0]
 	for key in _CACHE_FIELD_NAMES:
 		subset[key] = np.asarray(payload[key])[selected_indices]
+	for key in _OPTIONAL_CACHE_FIELD_NAMES:
+		if key in payload:
+			subset[key] = np.asarray(payload[key])[selected_indices]
 	return subset, selected_indices
 
 
@@ -247,6 +293,8 @@ def _build_map_features(
 	origin_xy_b2: np.ndarray,
 	heading_b: np.ndarray,
 	cfg: PreprocessConfig,
+	allowed_types: tuple[int, ...] | None = None,
+	max_segments: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
 	x_bm = np.asarray(state["roadgraph_points_x"])
 	y_bm = np.asarray(state["roadgraph_points_y"])
@@ -256,28 +304,31 @@ def _build_map_features(
 	valid_bm = np.asarray(state["roadgraph_points_valid"]).astype(bool)
 	ids_bm = np.asarray(state["roadgraph_points_ids"]).astype(np.int32)
 
-	max_segments = int(cfg.max_segments)
+	max_segments = int(cfg.max_segments) if max_segments is None else int(max_segments)
 	max_points_per_segment = int(cfg.max_points_per_segment)
 	feat_dim = 2 + 2 + int(cfg.num_map_type_classes)
 	sentinel_id = np.iinfo(np.int32).max
 
 	feats = np.zeros((x_bm.shape[0], max_segments, max_points_per_segment, feat_dim), dtype=np.float32)
 	valids = np.zeros((x_bm.shape[0], max_segments, max_points_per_segment), dtype=bool)
+	ids = np.zeros((x_bm.shape[0], max_segments), dtype=np.int32)
 
 	for batch_idx in range(x_bm.shape[0]):
 		xy = np.stack([x_bm[batch_idx], y_bm[batch_idx]], axis=-1)
 		dirs = np.stack([dir_x_bm[batch_idx], dir_y_bm[batch_idx]], axis=-1)
 		types = types_bm[batch_idx]
-		ids = ids_bm[batch_idx]
+		point_ids = ids_bm[batch_idx]
 		valid = valid_bm[batch_idx]
 
 		centered = xy - origin_xy_b2[batch_idx][None, :]
 		dist = np.linalg.norm(centered, axis=-1)
 		valid_and_range = valid & (dist < float(cfg.max_range))
+		if allowed_types is not None:
+			valid_and_range = valid_and_range & np.isin(types, np.asarray(allowed_types, dtype=np.int32))
 		if not np.any(valid_and_range):
 			continue
 
-		sort_ids = np.where(valid_and_range, ids, sentinel_id)
+		sort_ids = np.where(valid_and_range, point_ids, sentinel_id)
 		sort_dist = np.where(valid_and_range, dist, np.inf)
 		order = np.lexsort((sort_dist, sort_ids))
 
@@ -331,8 +382,9 @@ def _build_map_features(
 
 			feats[batch_idx, seg_idx] = seg_feat
 			valids[batch_idx, seg_idx] = seg_valid
+			ids[batch_idx, seg_idx] = seg_id
 
-	return feats, valids
+	return feats, valids, ids
 
 
 def _build_tl_features(
@@ -504,7 +556,15 @@ def _preprocess_single_cached_scenario(
 	subgoal_valid = np.ones_like(subgoal_xy[..., 0], dtype=bool)
 	remaining_timesteps = (goal_step_b - anchor_step_b) / 100.0
 
-	map_features, map_valid = _build_map_features(state, origin_xy, anchor_yaw, cfg)
+	map_features, map_valid, map_ids = _build_map_features(state, origin_xy, anchor_yaw, cfg)
+	lane_features, lane_valid, lane_ids = _build_map_features(
+		state,
+		origin_xy,
+		anchor_yaw,
+		cfg,
+		allowed_types=LANE_MAP_ELEMENT_TYPES,
+		max_segments=64
+	)
 	tl_features, tl_valid = _build_tl_features(state, anchor_step_b, origin_xy, anchor_yaw, cfg)
 
 	max_world_steps = int(math.ceil((cfg.predict_horizon * cfg.model_dt) / cfg.world_dt_fallback)) + 2
@@ -525,6 +585,10 @@ def _preprocess_single_cached_scenario(
 		"other_valid": other_valid.astype(bool),
 		"map_features": map_features.astype(np.float32),
 		"map_valid": map_valid.astype(bool),
+		"map_ids": map_ids.astype(np.int32),
+		"lane_features": lane_features.astype(np.float32),
+		"lane_valid": lane_valid.astype(bool),
+		"lane_ids": lane_ids.astype(np.int32),
 		"traffic_light_features": tl_features.astype(np.float32),
 		"traffic_light_valid": tl_valid.astype(bool),
 	}
@@ -626,7 +690,15 @@ def _preprocess_single_cached_scenario_with_history(
 	subgoal_valid = np.ones_like(subgoal_xy[..., 0], dtype=bool)
 	remaining_timesteps = (goal_step_b - anchor_step_b) / 100.0
 
-	map_features, map_valid = _build_map_features(state, origin_xy, anchor_yaw, cfg)
+	map_features, map_valid, map_ids = _build_map_features(state, origin_xy, anchor_yaw, cfg)
+	lane_features, lane_valid, lane_ids = _build_map_features(
+		state,
+		origin_xy,
+		anchor_yaw,
+		cfg,
+		allowed_types=LANE_MAP_ELEMENT_TYPES,
+		max_segments=64
+	)
 	tl_features, tl_valid = _build_tl_features(state, anchor_step_b, origin_xy, anchor_yaw, cfg)
 
 	max_world_steps = int(math.ceil((cfg.predict_horizon * cfg.model_dt) / cfg.world_dt_fallback)) + 2
@@ -647,6 +719,10 @@ def _preprocess_single_cached_scenario_with_history(
 		"other_valid": other_valid.astype(bool),
 		"map_features": map_features.astype(np.float32),
 		"map_valid": map_valid.astype(bool),
+		"map_ids": map_ids.astype(np.int32),
+		"lane_features": lane_features.astype(np.float32),
+		"lane_valid": lane_valid.astype(bool),
+		"lane_ids": lane_ids.astype(np.int32),
 		"traffic_light_features": tl_features.astype(np.float32),
 		"traffic_light_valid": tl_valid.astype(bool),
 	}
@@ -704,9 +780,10 @@ def preprocess_cached_npz(
 			goal_xy_override=_select_override_value(goal_xy_override, len(selected_indices), row_idx),
 		)
 		if include_inst_features:
-			assert anchor_step_override is not None, "anchor_step_override must be specified when include_inst_features is True"
-			features["inst_features"] = selected_payload["inst_features"][row_idx, anchor_step_override // 10][None, ...]
-			features["inst_valid"] = selected_payload["inst_valid"][row_idx, anchor_step_override // 10][None, ...]
+			if "inst_features" in selected_payload and "inst_valid" in selected_payload:
+				assert anchor_step_override is not None, "anchor_step_override must be specified when include_inst_features is True"
+				features["inst_features"] = selected_payload["inst_features"][row_idx, anchor_step_override // 10][None, ...]
+				features["inst_valid"] = selected_payload["inst_valid"][row_idx, anchor_step_override // 10][None, ...]
 		feature_rows.append(features)
 		aux_rows.append(aux)
 
@@ -729,6 +806,8 @@ def preprocess_cached_npz(
 		metadata["tfrecord_name"] = np.asarray(payload["tfrecord_name"], dtype=np.str_)
 	if "world_idx" in payload:
 		metadata["world_idx"] = np.asarray(payload["world_idx"], dtype=np.int32)
+	if "tfrecord_index" in payload:
+		metadata["tfrecord_index"] = np.asarray(payload["tfrecord_index"], dtype=np.int32)
 
 	return {
 		"features": _stack_tree(feature_rows),

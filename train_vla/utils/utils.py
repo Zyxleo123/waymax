@@ -15,6 +15,7 @@ from torch.nn.utils import clip_grad_norm_
 from tqdm import tqdm
 
 # from model.vla.gemma_vla import VecSceneGemmaVLA
+from model.vla.failure_detection_vla import FailureDetectionVLA
 from model.vla.gemma_vla_v2 import VecSceneGemmaVLA
 from model.vla.qwen_vla import VecSceneQwenVLA
 from train_vla.configs.vla_pretrain_config import VLAPretrainConfig, parse_args
@@ -216,6 +217,27 @@ def build_vla_model(cfg: VLAPretrainConfig | Mapping[str, Any]) -> Any:
 			lora_dropout=config.get("lora_dropout", 0.05),
 			lora_target_modules=lora_target_modules,
 			predict_subgoal=config.get("predict_subgoal", False),
+		)
+	elif model_type == "failure_detection":
+		lora_target_modules = config.get("lora_target_modules")
+		if isinstance(lora_target_modules, str) and lora_target_modules.strip():
+			lora_target_modules = tuple(part.strip() for part in lora_target_modules.split(",") if part.strip())
+		else:
+			lora_target_modules = None
+		model = FailureDetectionVLA(
+			gemma_name=config["gemma_name"],
+			num_scene_tokens=config["num_scene_tokens"],
+			ego_dim=config.get("ego_dim", 5),
+			goal_dim=config.get("goal_dim", 3),
+			other_dim=config.get("other_dim", 15),
+			map_dim=config.get("map_dim", 25),
+			tl_dim=config.get("tl_dim", 11),
+			hidden_dim=config.get("scene_hidden_dim", 512),
+			use_lora=config.get("use_lora", False),
+			lora_r=config.get("lora_r", 16),
+			lora_alpha=config.get("lora_alpha", 32),
+			lora_dropout=config.get("lora_dropout", 0.05),
+			lora_target_modules=lora_target_modules,
 		)
 	else:
 		raise ValueError(f"Unknown model_type: {model_type}")

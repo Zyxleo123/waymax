@@ -27,7 +27,7 @@ class LaneGraphData:
     lane_id_to_node_range: Dict[int, Tuple[int, int]]
 
 
-def _lane_graph_zip_path_for_tfrecord(tfrecord_path: str, lane_graph_dir: str) -> Path:
+def lane_graph_zip_path_for_tfrecord(tfrecord_path: str, lane_graph_dir: str) -> Path:
     """Maps scenario tfrecord filename to lanegraph shard zip filename."""
     base = os.path.basename(tfrecord_path)
     return Path(lane_graph_dir) / f"{base}.lanegraph.zip"

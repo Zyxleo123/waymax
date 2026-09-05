@@ -20,6 +20,11 @@ Given a driving scenario, propose a driving instruction that helps the ego vehic
 Only output the instruction without any additional text.
 For example, \"Go straight while slowing down\"
 """
+VLA_FUNCTION_PROMPT = """
+Given a driving scenario, propose a set of reward functions that helps the driving agent reach the goal.
+Only output the comma-separated reward function names without any additional text.
+For example, \"accelerate, change_lane_left\"
+"""
 
 def infer_subgoal_from_features(features: dict[str, torch.Tensor], ego_range=100.0) -> list[str]:
 	subgoal_xy = features['subgoal_xy'].cpu().detach().numpy() * ego_range

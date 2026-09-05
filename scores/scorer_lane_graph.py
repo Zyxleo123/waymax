@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Tuple
 import jax
 import jax.numpy as jnp
 import numpy as np
+from waymax import datatypes
 
 from . import helpers as scorer_helpers
 
@@ -83,6 +84,29 @@ class Scorer:
         elif name == "follow_lane" and target is not None:
             self._weighted_metrics[name] = float(weight)
             self.target_lane = target
+        elif name == "follow_lane_by_id" and target is not None:
+            if isinstance(target, int) and target >= 0:
+                lane_id = int(target)
+                if self._lane_graph is None and self._lane_graph_shard_store is not None and self._scenario_index is not None:
+                    scorer_helpers.load_lane_graph_by_index(self, int(self._scenario_index))
+
+                lane_polyline = scorer_helpers.lane_polyline_from_lane_id(
+                    self,
+                    lane_id=lane_id,
+                    n_hops=3,
+                    successor_branch="straight",
+                )
+                if lane_polyline is None or int(lane_polyline.shape[0]) == 0:
+                    raise ValueError(
+                        f"Failed to build lane polyline from lane_id={lane_id}. "
+                        "Ensure lane graph is loaded and the lane id exists."
+                    )
+
+                # Reuse the existing follow_lane scoring path by setting a lane pose target.
+                self._weighted_metrics["follow_lane"] = float(weight)
+                self.target_lane = lane_polyline
+                self._weighted_metrics.pop("follow_lane_by_id", None)
+            
         elif name == "set_speed" and target is not None:
             self._weighted_metrics[name] = float(weight)
             self.target_speed = float(target)
@@ -95,6 +119,9 @@ class Scorer:
     def remove_metric(self, name):
         if name in self._multiplicative_metrics:
             self._multiplicative_metrics.remove(name)
+        elif name == "follow_lane_by_id":
+            self._weighted_metrics.pop("follow_lane", None)
+            self.target_lane = None
         elif name in self._weighted_metrics:
             del self._weighted_metrics[name]
             if name == "follow_lane":
@@ -261,27 +288,122 @@ class Scorer:
         return jnp.where(collision_flags, 0.0, 1.0)
 
     def compute_offroad_score(self, ego_trajectories, threshold=3.5):
-        ego_trajectories = jnp.asarray(ego_trajectories)
+        # raise NotImplementedError("compute_offroad_score is deprecated. Use compute_offroad_score_v2 instead.")
+        # ego_trajectories = jnp.asarray(ego_trajectories)
+        # if ego_trajectories.ndim != 3 or ego_trajectories.shape[-1] != 5:
+        #     raise ValueError(
+        #         "ego_trajectories must have shape [num_ego_trajectories, num_time_steps, 5], "
+        #         f"got {ego_trajectories.shape}"
+        #     )
+        # if self.lane_points is None:
+        #     raise ValueError("lane_points is not initialized. Call update_lane_points first.")
+        # if int(self.lane_points.shape[0]) == 0:
+        #     return jnp.zeros((ego_trajectories.shape[0],), dtype=jnp.float32)
+
+        # ego_xy = ego_trajectories[..., :2]
+        # lane_xy = jnp.asarray(self.lane_points[:, :2], dtype=jnp.float32)
+
+        # squared_distances = jnp.sum(
+        #     (ego_xy[:, :, None, :] - lane_xy[None, None, :, :]) ** 2,
+        #     axis=-1,
+        # )
+        # min_squared_distance_per_t = jnp.min(squared_distances, axis=-1)
+        # offroad_flags = jnp.any(min_squared_distance_per_t >= (threshold ** 2), axis=1)
+        # return jnp.where(offroad_flags, 0.0, 1.0)
+        return jnp.ones((ego_trajectories.shape[0],), dtype=jnp.float32)
+
+    def compute_offroad_score_v2(self, ego_trajectories, sim_state, timestep, world_idx=0):
+        ego_trajectories = jnp.asarray(ego_trajectories, dtype=jnp.float32)
         if ego_trajectories.ndim != 3 or ego_trajectories.shape[-1] != 5:
             raise ValueError(
                 "ego_trajectories must have shape [num_ego_trajectories, num_time_steps, 5], "
                 f"got {ego_trajectories.shape}"
             )
-        if self.lane_points is None:
-            raise ValueError("lane_points is not initialized. Call update_lane_points first.")
-        if int(self.lane_points.shape[0]) == 0:
-            return jnp.zeros((ego_trajectories.shape[0],), dtype=jnp.float32)
 
-        ego_xy = ego_trajectories[..., :2]
-        lane_xy = jnp.asarray(self.lane_points[:, :2], dtype=jnp.float32)
+        roadgraph_points = getattr(sim_state, "roadgraph_points", None)
+        if roadgraph_points is None or not hasattr(roadgraph_points, "xyz"):
+            return self.compute_offroad_score(ego_trajectories)
 
-        squared_distances = jnp.sum(
-            (ego_xy[:, :, None, :] - lane_xy[None, None, :, :]) ** 2,
-            axis=-1,
+        roadgraph_xyz = jnp.asarray(roadgraph_points.xyz, dtype=jnp.float32)
+        roadgraph_dir_xyz = jnp.asarray(roadgraph_points.dir_xyz, dtype=jnp.float32)
+        roadgraph_types = jnp.asarray(roadgraph_points.types)
+        roadgraph_valid = jnp.asarray(roadgraph_points.valid).astype(bool)
+        roadgraph_ids = jnp.asarray(roadgraph_points.ids)
+
+        if roadgraph_xyz.ndim >= 3:
+            roadgraph_xyz = roadgraph_xyz[world_idx]
+        if roadgraph_dir_xyz.ndim >= 3:
+            roadgraph_dir_xyz = roadgraph_dir_xyz[world_idx]
+        if roadgraph_types.ndim >= 2:
+            roadgraph_types = roadgraph_types[world_idx]
+        if roadgraph_valid.ndim >= 2:
+            roadgraph_valid = roadgraph_valid[world_idx]
+        if roadgraph_ids.ndim >= 2:
+            roadgraph_ids = roadgraph_ids[world_idx]
+
+        if roadgraph_xyz.ndim != 2 or roadgraph_xyz.shape[-1] != 3:
+            return self.compute_offroad_score(ego_trajectories)
+        if roadgraph_dir_xyz.ndim != 2 or roadgraph_dir_xyz.shape[-1] != 3:
+            return self.compute_offroad_score(ego_trajectories)
+        if roadgraph_types.shape[0] != roadgraph_xyz.shape[0]:
+            return self.compute_offroad_score(ego_trajectories)
+        if roadgraph_valid.shape[0] != roadgraph_xyz.shape[0]:
+            return self.compute_offroad_score(ego_trajectories)
+        if roadgraph_ids.shape[0] != roadgraph_xyz.shape[0]:
+            return self.compute_offroad_score(ego_trajectories)
+
+        roadgraph_xyz = roadgraph_xyz[roadgraph_valid]
+        roadgraph_dir_xyz = roadgraph_dir_xyz[roadgraph_valid]
+        roadgraph_types = roadgraph_types[roadgraph_valid]
+        roadgraph_ids = roadgraph_ids[roadgraph_valid]
+
+        road_edge_mask = datatypes.is_road_edge(roadgraph_types)
+        if not bool(jnp.any(road_edge_mask)):
+            return self.compute_offroad_score(ego_trajectories)
+
+        roadgraph_xyz = roadgraph_xyz[road_edge_mask]
+        roadgraph_dir_xyz = roadgraph_dir_xyz[road_edge_mask]
+        roadgraph_ids = roadgraph_ids[road_edge_mask]
+
+        bbox_corners_xy = polygon_corners(ego_trajectories)
+        z = jnp.zeros_like(bbox_corners_xy[..., :1])
+        bbox_corners = jnp.concatenate([bbox_corners_xy, z], axis=-1)
+        shape_prefix = bbox_corners.shape[:-3]
+        num_agents, num_points, dim = bbox_corners.shape[-3:]
+        bbox_corners = jnp.reshape(bbox_corners, [*shape_prefix, num_agents * num_points, dim])
+
+        sampled_points = roadgraph_xyz
+        nearest_vector_xyz = roadgraph_dir_xyz
+
+        differences = sampled_points - jnp.expand_dims(bbox_corners, axis=-2)
+        z_stretched_differences = differences * jnp.asarray([1.0, 1.0, 2.0], dtype=jnp.float32)
+        square_distances = jnp.sum(z_stretched_differences**2, axis=-1)
+
+        if sampled_points.shape[0] == 0:
+            return self.compute_offroad_score(ego_trajectories)
+
+        nearest_indices = jnp.argmin(square_distances, axis=-1)
+        prior_indices = jnp.maximum(jnp.zeros_like(nearest_indices), nearest_indices - 1)
+
+        nearest_xys = sampled_points[nearest_indices, :2]
+        nearest_vector_xys = nearest_vector_xyz[nearest_indices, :2]
+        prior_vector_xys = nearest_vector_xyz[prior_indices, :2]
+        points_to_edge = bbox_corners[..., :2] - nearest_xys
+
+        cross_product = points_to_edge[..., 0] * nearest_vector_xys[..., 1] - points_to_edge[..., 1] * nearest_vector_xys[..., 0]
+        cross_product_prior = points_to_edge[..., 0] * prior_vector_xys[..., 1] - points_to_edge[..., 1] * prior_vector_xys[..., 0]
+        prior_point_in_same_curve = roadgraph_ids[nearest_indices] == roadgraph_ids[prior_indices]
+        offroad_sign = jnp.sign(
+            jnp.where(
+                jnp.logical_and(prior_point_in_same_curve, cross_product_prior < cross_product),
+                cross_product_prior,
+                cross_product,
+            )
         )
-        min_squared_distance_per_t = jnp.min(squared_distances, axis=-1)
-        offroad_flags = jnp.any(min_squared_distance_per_t >= (threshold ** 2), axis=1)
-        return jnp.where(offroad_flags, 0.0, 1.0)
+        distances = jnp.linalg.norm(nearest_xys - bbox_corners[..., :2], axis=-1) * offroad_sign
+        distances = jnp.reshape(distances, [*shape_prefix, num_agents, num_points])
+        offroad = jnp.any(distances > 0.0, axis=(-1, -2))
+        return jnp.where(offroad, 0.0, 1.0).astype(jnp.float32)
 
     def compute_direction_score(self, ego_trajectories):
         ego_trajectories = jnp.asarray(ego_trajectories)
@@ -621,7 +743,9 @@ class Scorer:
             )
             score = score * collision_score
         if "offroad" in self._multiplicative_metrics:
-            offroad_score = self.compute_offroad_score(ego_trajectories)
+            offroad_score = self.compute_offroad_score_v2(
+                ego_trajectories, sim_state=sim_state, timestep=timestep, world_idx=world_idx
+            )
             score = score * offroad_score
         if "direction" in self._multiplicative_metrics:
             direction_score = self.compute_direction_score(ego_trajectories)

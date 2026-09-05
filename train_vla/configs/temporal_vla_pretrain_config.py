@@ -63,6 +63,7 @@ class TemporalVLAPretrainConfig:
 	lora_alpha: int = 32
 	lora_dropout: float = 0.05
 	lora_target_modules: str | None = None
+	predict_target_lane: bool = False
 
 	preprocess_cfg: PreprocessConfig = PreprocessConfig()
 	tag: str | None = None
@@ -100,7 +101,7 @@ def parse_args() -> TemporalVLAPretrainConfig:
 	parser = argparse.ArgumentParser(description="Pretrain TemporalGemmaVLA on temporal QA data.")
 	parser.add_argument("--cache_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/")
 	parser.add_argument("--tfrecord_dir", type=str, default=None, help="Deprecated alias for --cache_dir.")
-	parser.add_argument("--annotation_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/annotations/")
+	parser.add_argument("--annotation_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/annotations/target_lane/")
 	parser.add_argument("--file_indices", type=str, nargs="*", default=None)
 	parser.add_argument("--output_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/checkpoints/pretrain_temporal_vla")
 
@@ -152,6 +153,7 @@ def parse_args() -> TemporalVLAPretrainConfig:
 	parser.add_argument("--lora_alpha", type=int, default=32)
 	parser.add_argument("--lora_dropout", type=float, default=0.05)
 	parser.add_argument("--lora_target_modules", type=str, default=None)
+	parser.add_argument("--predict_target_lane", action="store_true", default=False)
 
 	parser.add_argument("--tag", type=str, default=None)
 
@@ -206,5 +208,6 @@ def parse_args() -> TemporalVLAPretrainConfig:
 		lora_alpha=args.lora_alpha,
 		lora_dropout=args.lora_dropout,
 		lora_target_modules=args.lora_target_modules,
+		predict_target_lane=args.predict_target_lane,
 		tag=args.tag,
 	)

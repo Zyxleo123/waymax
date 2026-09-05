@@ -8,6 +8,7 @@ import torch.nn as nn
 from model.vla.modules.attention import CrossAttentionLayers
 from model.vla.modules.mlp import MLP
 from model.vla.modules.point_net import PointNet
+from model.vla.modules.trajectory_encoder import TrajectoryEncoder
 
 
 class SceneTokenizer(nn.Module):
@@ -18,16 +19,21 @@ class SceneTokenizer(nn.Module):
         other_dim: int = 15,
         map_attr_dim: int = 25,
         tl_attr_dim: int = 11,
+        use_ego_trajectory: bool = False,
+        trajectory_dim: int = 5,
         hidden_dim: int = 1024,
         cond_dim: int = 256,
         num_tokens: int = 32,
         num_heads: int = 4,
         num_attn_layers: int = 4,
+        trajectory_hidden_dim: int | None = None,
+        trajectory_max_steps: int = 64,
     ) -> None:
         super().__init__()
         self.token_dim = int(cond_dim)
         self.hidden_dim = int(hidden_dim)
         self.max_other_agents = 128
+        self.use_ego_trajectory = bool(use_ego_trajectory)
         self.other_pos_embedding = nn.Parameter(torch.zeros(1, self.max_other_agents, self.token_dim))
         self.ego_tokenizer = MLP([ego_dim, hidden_dim, hidden_dim, cond_dim])
         self.goal_tokenizer = MLP([goal_dim, hidden_dim, hidden_dim, cond_dim])
@@ -36,6 +42,17 @@ class SceneTokenizer(nn.Module):
         self.map_tokenizer = PointNet(map_attr_dim, cond_dim)
         self.cond_tokens = nn.Parameter(torch.zeros(1, num_tokens, cond_dim))
         self.attention = CrossAttentionLayers(cond_dim, cond_dim, num_heads=num_heads, num_layers=num_attn_layers)
+        self.ego_trajectory_encoder = None
+        if self.use_ego_trajectory:
+            trajectory_hidden_dim = hidden_dim if trajectory_hidden_dim is None else int(trajectory_hidden_dim)
+            self.ego_trajectory_encoder = TrajectoryEncoder(
+                trajectory_dim=trajectory_dim,
+                hidden_dim=trajectory_hidden_dim,
+                cond_dim=cond_dim,
+                num_heads=num_heads,
+                num_attn_layers=num_attn_layers,
+                max_steps=trajectory_max_steps,
+            )
 
     def _tokenize_scene_features(
         self,
@@ -52,6 +69,8 @@ class SceneTokenizer(nn.Module):
         map_valid = input_features["map_valid"]
         traffic_light_features = input_features["traffic_light_features"]
         traffic_light_valid = input_features["traffic_light_valid"]
+        ego_trajectory = input_features.get("ego_trajectory")
+        ego_trajectory_valid = input_features.get("ego_trajectory_valid")
 
         if remaining_timesteps.ndim == 1:
             remaining_timesteps = remaining_timesteps[:, None]
@@ -82,16 +101,31 @@ class SceneTokenizer(nn.Module):
             deterministic=deterministic,
         ).reshape(batch_size, num_tl, self.token_dim)
 
-        scene_tokens = torch.cat([ego_token, goal_token, other_token, map_token, tl_token], dim=1)
-        scene_valid = torch.cat(
-            [
-                torch.ones((batch_size, 2), dtype=torch.bool, device=scene_tokens.device),
-                other_valid,
-                map_valid.any(dim=2),
-                traffic_light_valid,
-            ],
-            dim=1,
-        )
+        traj_token = None
+        traj_valid = None
+        if self.ego_trajectory_encoder is not None and ego_trajectory is not None:
+            if ego_trajectory.ndim != 3:
+                raise ValueError(f"ego_trajectory must have shape [B, T, D], got {tuple(ego_trajectory.shape)}")
+            traj_token, traj_valid = self.ego_trajectory_encoder(
+                ego_trajectory,
+                valid=ego_trajectory_valid,
+                deterministic=deterministic,
+            )
+
+        token_parts = [ego_token, goal_token, other_token, map_token, tl_token]
+        valid_parts = [
+            torch.ones((batch_size, 2), dtype=torch.bool, device=ego_token.device),
+            other_valid,
+            map_valid.any(dim=2),
+            traffic_light_valid,
+        ]
+        if traj_token is not None and traj_valid is not None:
+            token_parts.append(traj_token)
+            valid_parts.append(traj_valid)
+
+        scene_device = ego_token.device
+        scene_tokens = torch.cat(token_parts, dim=1)
+        scene_valid = torch.cat(valid_parts, dim=1)
 
         return self.attention(
             query_btc=self.cond_tokens,

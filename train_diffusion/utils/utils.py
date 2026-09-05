@@ -5,6 +5,7 @@ import datetime
 import json
 import os
 from collections import deque
+from collections.abc import Mapping
 from typing import Any
 
 import jax
@@ -97,37 +98,56 @@ def replicate_to_mesh(value, mesh: Mesh):
 
 
 def coerce_tree_like(template, raw):
-    if hasattr(template, "_fields"):
-        return type(template)(**{k: coerce_tree_like(getattr(template, k), raw[k]) for k in template._fields})
-    if isinstance(template, tuple):
-        return type(template)(coerce_tree_like(t, r) for t, r in zip(template, raw, strict=True))
-    if isinstance(template, list):
-        if isinstance(raw, dict):
-            ordered_raw = [raw[str(i)] for i in range(len(template))]
-        else:
-            ordered_raw = raw
-        return type(template)(coerce_tree_like(t, r) for t, r in zip(template, ordered_raw, strict=True))
-    if isinstance(template, dict):
-        if not isinstance(raw, dict):
-            return raw
+    def lookup_raw(tree, path):
+        current = tree
 
-        coerced = {}
-        for key, template_value in template.items():
-            if key in raw:
-                raw_value = raw[key]
+        for key in path:
+            if key in current:
+                current = current[key]
+            elif str(key) in current:
+                current = current[str(key)]
+            elif (
+                isinstance(key, str)
+                and key.isdigit()
+                and int(key) in current
+            ):
+                current = current[int(key)]
             else:
-                str_key = str(key)
-                if str_key in raw:
-                    raw_value = raw[str_key]
-                elif isinstance(key, str) and key.isdigit() and int(key) in raw:
-                    raw_value = raw[int(key)]
-                else:
-                    raise KeyError(
-                        f"Missing key {key!r} in raw pytree; available keys: {list(raw.keys())[:10]}"
-                    )
-            coerced[key] = coerce_tree_like(template_value, raw_value)
-        return coerced
-    return raw
+                raise KeyError(
+                    f"Missing path {path}, failed at {key!r}"
+                )
+
+        return current
+
+    restored_flat = []
+
+    for path, template_leaf in nnx.to_flat_state(template):
+        raw_leaf = lookup_raw(
+            raw,
+            path,
+        )
+
+        if isinstance(raw_leaf, Mapping) and "value" in raw_leaf:
+            raw_value = raw_leaf["value"]
+        elif hasattr(raw_leaf, "value"):
+            raw_value = raw_leaf.value
+        else:
+            raw_value = raw_leaf
+
+        if isinstance(template_leaf, nnx.Param):
+            restored_leaf = template_leaf.replace(
+                raw_value
+            )
+        else:
+            restored_leaf = raw_value
+
+        restored_flat.append(
+            (path, restored_leaf)
+        )
+
+    return nnx.from_flat_state(
+        restored_flat
+    )
 
 
 def make_dataset_config(args, waymax_config, global_batch_size: int):

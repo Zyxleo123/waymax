@@ -88,6 +88,7 @@ def build_temporal_vla_model(cfg: TemporalVLAPretrainConfig) -> TemporalGemmaVLA
 		lora_alpha=cfg.lora_alpha,
 		lora_dropout=cfg.lora_dropout,
 		lora_target_modules=lora_target_modules,
+		predict_target_lane=cfg.predict_target_lane,
 	)
 
 	if model.tokenizer.pad_token is None:
@@ -107,11 +108,14 @@ def evaluate_temporal_answer_accuracy(
 	add_eos: bool = True,
 ) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
 	if max_samples <= 0:
-		return {"accuracy": 0.0, "num_samples": 0.0, "subgoal_mae": 0.0}, {}
+		return {"accuracy": 0.0, "num_samples": 0.0, "subgoal_mae": 0.0, "target_lane_loss": 0.0, "target_lane_accuracy": 0.0}, {}
 
 	total = 0
 	correct = 0
 	subgoal_mae_sum = 0.0
+	target_lane_loss_sum = 0.0
+	target_lane_accuracy_sum = 0.0
+	target_lane_batches = 0
 	per_question_stats: dict[str, dict[str, int]] = {}
 
 	was_training = model.training
@@ -144,8 +148,9 @@ def evaluate_temporal_answer_accuracy(
 				flat_keys = flat_keys[:remaining]
 				seq_to_keep = max(1, (remaining + len(batch.timestep_valid[0]) - 1) // len(batch.timestep_valid[0]))
 				expanded_features = {k: v[:seq_to_keep] for k, v in expanded_features.items()}
+				batch.target_lane_ids = batch.target_lane_ids[:seq_to_keep] if batch.target_lane_ids is not None else None
 
-			prompt_ids, prompt_mask, _, _ = tokenize_text_batch(
+			prompt_ids, prompt_mask, answer_ids, answer_mask = tokenize_text_batch(
 				model.tokenizer,
 				flat_prompts,
 				flat_answers,
@@ -163,6 +168,14 @@ def evaluate_temporal_answer_accuracy(
 					prompt_ids=prompt_ids,
 					prompt_mask=prompt_mask,
 					max_new_tokens=max_answer_length,
+				)
+				outputs = model(
+					expanded_features,
+					prompt_ids=prompt_ids,
+					prompt_mask=prompt_mask,
+					answer_ids=answer_ids,
+					answer_mask=answer_mask,
+					target_lane_ids=batch.target_lane_ids,
 				)
 
 			for pred, target, q_key in zip(pred_answers, flat_answers, flat_keys):
@@ -185,6 +198,10 @@ def evaluate_temporal_answer_accuracy(
 						np.sum(np.abs(subgoal_xy_np[:pair_count] - pred_subgoal_np[:pair_count])) / 2.0
 					)
 
+			target_lane_loss_sum += float(outputs.get("target_lane_loss", torch.tensor(0.0)).detach().cpu())
+			target_lane_accuracy_sum += float(outputs.get("target_lane_accuracy", torch.tensor(0.0)).detach().cpu())
+			target_lane_batches += 1
+
 			total += len(flat_answers)
 			if total >= max_samples:
 				break
@@ -197,6 +214,8 @@ def evaluate_temporal_answer_accuracy(
 		"accuracy": overall_accuracy,
 		"num_samples": float(total),
 		"subgoal_mae": float(subgoal_mae_sum / total) if total > 0 else 0.0,
+		"target_lane_loss": float(target_lane_loss_sum / target_lane_batches) if target_lane_batches > 0 else 0.0,
+		"target_lane_accuracy": float(target_lane_accuracy_sum / target_lane_batches) if target_lane_batches > 0 else 0.0,
 	}
 
 	per_question_metrics: dict[str, dict[str, float]] = {}
@@ -357,6 +376,7 @@ def run_training(cfg: TemporalVLAPretrainConfig) -> None:
 					prompt_mask=prompt_mask,
 					answer_ids=answer_ids,
 					answer_mask=answer_mask,
+					target_lane_ids=batch.target_lane_ids,
 				)
 				loss = outputs["loss"] / cfg.grad_accum_steps
 
@@ -385,6 +405,8 @@ def run_training(cfg: TemporalVLAPretrainConfig) -> None:
 			if global_step % cfg.log_every == 0:
 				current_lr = scheduler.get_last_lr()[0] if scheduler is not None else optimizer.param_groups[0]["lr"]
 				train_loss = float(outputs["loss"].detach().cpu())
+				train_target_lane_loss = float(outputs.get("target_lane_loss", torch.tensor(0.0)))
+				train_target_lane_accuracy = float(outputs.get("target_lane_accuracy", torch.tensor(0.0)))
 				pbar.set_postfix(loss=f"{train_loss:.4f}", lr=f"{current_lr:.3e}", batch=len(flat_prompts))
 				if wandb_run is not None:
 					wandb_run.log(
@@ -393,6 +415,8 @@ def run_training(cfg: TemporalVLAPretrainConfig) -> None:
 							"train/loss": train_loss,
 							"train/subgoal_loss": float(outputs.get("subgoal_loss", torch.tensor(0.0))),
 							"train/language_loss": float(outputs.get("language_loss", torch.tensor(0.0))),
+							"train/target_lane_loss": train_target_lane_loss,
+							"train/target_lane_accuracy": train_target_lane_accuracy,
 							"train/lr": current_lr,
 							"train/batch_size": len(flat_prompts),
 						},
@@ -422,6 +446,8 @@ def run_training(cfg: TemporalVLAPretrainConfig) -> None:
 					cfg=cfg,
 				)
 				val_metrics = {"accuracy": 0.0, "num_samples": 0.0, "subgoal_mae": 0.0}
+				val_metrics["target_lane_loss"] = 0.0
+				val_metrics["target_lane_accuracy"] = 0.0
 				val_per_q_metrics: dict[str, dict[str, float]] = {}
 				if val_loader is not None:
 					val_metrics, val_per_q_metrics = evaluate_temporal_answer_accuracy(
@@ -458,6 +484,10 @@ def run_training(cfg: TemporalVLAPretrainConfig) -> None:
 							"overall_acc/val_accuracy": val_metrics["accuracy"],
 							"overall_acc/train_subgoal_mae": train_metrics["subgoal_mae"],
 							"overall_acc/val_subgoal_mae": val_metrics["subgoal_mae"],
+							"overall_acc/train_target_lane_loss": train_metrics["target_lane_loss"],
+							"overall_acc/val_target_lane_loss": val_metrics["target_lane_loss"],
+							"overall_acc/train_target_lane_accuracy": train_metrics["target_lane_accuracy"],
+							"overall_acc/val_target_lane_accuracy": val_metrics["target_lane_accuracy"],
 						}
 						for q_key, q_metrics in train_per_q_metrics.items():
 							wandb_log_dict[f"train_acc/train_qa_{q_key}_accuracy"] = q_metrics["accuracy"]

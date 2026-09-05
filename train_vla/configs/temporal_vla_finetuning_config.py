@@ -76,6 +76,7 @@ class TemporalVLAFinetuningConfig:
 	scene_hidden_dim: int = 512
 	num_heads: int = 4
 	num_attn_layers: int = 4
+	resume_path: str | None = None
 	pretrained_model_path: str | None = None
 	use_lora: bool = True
 	lora_r: int = 16
@@ -83,6 +84,8 @@ class TemporalVLAFinetuningConfig:
 	lora_dropout: float = 0.05
 	lora_target_modules: str | None = None
 	predict_subgoal: bool = False
+	predict_target_lane: bool = False
+	language_label: str = "function"  # "instruction" or "function"
 	preprocess_cfg: PreprocessConfig = PreprocessConfig()
 	tag: str | None = None
 
@@ -167,7 +170,7 @@ def parse_args() -> TemporalVLAFinetuningConfig:
 	parser = argparse.ArgumentParser(description="Finetune TemporalGemmaVLA with LoRA.")
 	parser.add_argument("--cache_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/")
 	parser.add_argument("--tfrecord_dir", type=str, default=None, help="Deprecated alias for --cache_dir.")
-	parser.add_argument("--annotation_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/annotations/")
+	parser.add_argument("--annotation_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/annotations_with_functions/")
 	parser.add_argument("--file_indices", type=str, nargs="*", default=None)
 	parser.add_argument("--output_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/checkpoints/finetune_temporal_vla")
 	parser.add_argument("--wandb_project", type=str, default="finetune_temporal_vla")
@@ -187,6 +190,7 @@ def parse_args() -> TemporalVLAFinetuningConfig:
 	parser.add_argument("--scene_hidden_dim", type=int, default=512)
 	parser.add_argument("--num_heads", type=int, default=4)
 	parser.add_argument("--num_attn_layers", type=int, default=4)
+	parser.add_argument("--resume_path", type=str, default=None)
 	parser.add_argument("--batch_size", type=int, default=4)
 	parser.add_argument("--learning_rate", type=float, default=5e-5)
 	parser.add_argument("--weight_decay", type=float, default=0.01)
@@ -216,6 +220,8 @@ def parse_args() -> TemporalVLAFinetuningConfig:
 	parser.add_argument("--lora_dropout", type=float, default=0.05)
 	parser.add_argument("--lora_target_modules", type=str, default=None)
 	parser.add_argument("--predict_subgoal", action="store_true", default=False)
+	parser.add_argument("--predict_target_lane", action="store_true", default=False)
+	parser.add_argument("--language_label", type=str, default="function", choices=["instruction", "function"])
 	parser.add_argument("--tag", type=str, default=None)
 
 	args = parser.parse_args()
@@ -263,6 +269,7 @@ def parse_args() -> TemporalVLAFinetuningConfig:
 		scene_hidden_dim=args.scene_hidden_dim,
 		num_heads=args.num_heads,
 		num_attn_layers=args.num_attn_layers,
+		resume_path=args.resume_path,
 		pretrained_model_path=args.pretrained_model_path,
 		use_lora=args.use_lora,
 		lora_r=args.lora_r,
@@ -270,6 +277,8 @@ def parse_args() -> TemporalVLAFinetuningConfig:
 		lora_dropout=args.lora_dropout,
 		lora_target_modules=args.lora_target_modules,
 		predict_subgoal=args.predict_subgoal,
+		predict_target_lane=args.predict_target_lane,
+		language_label=args.language_label,
 		tag=args.tag,
 	)
 

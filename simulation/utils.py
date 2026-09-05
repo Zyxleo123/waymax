@@ -46,6 +46,23 @@ def _summarize_metric(value_bkt: np.ndarray, valid_bkt: np.ndarray) -> dict[str,
     return {"per_scenario_sample": per_entry}
 
 
+def _to_jsonable(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _to_jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_jsonable(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return _to_jsonable(value.tolist())
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, Path):
+        return value.as_posix()
+    return value
+
+
 def _save_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    path.write_text(
+        json.dumps(_to_jsonable(payload), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )

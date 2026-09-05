@@ -130,6 +130,10 @@ def _make_optimizer(args: DiffusionTrainConfig, params_tree) -> tuple[optax.Grad
 		lambda path, leaf: _is_trainable_path(path),
 		params_tree,
 	)
+	param_labels = jax.tree_util.tree_map(
+		lambda is_trainable: "train" if is_trainable else "freeze",
+		trainable_mask,
+	)
 
 	total_steps = max(1, int(args.epochs) * int(args.steps_per_epoch))
 	lr_schedule = optax.warmup_cosine_decay_schedule(
@@ -144,7 +148,13 @@ def _make_optimizer(args: DiffusionTrainConfig, params_tree) -> tuple[optax.Grad
 		learning_rate=lr_schedule,
 		weight_decay=float(args.weight_decay),
 	)
-	tx = optax.masked(train_tx, trainable_mask)
+	tx = optax.multi_transform(
+		{
+			"train": train_tx,
+			"freeze": optax.set_to_zero(),
+		},
+		param_labels,
+	)
 	return tx, lr_schedule, trainable_mask
 
 
@@ -224,11 +234,6 @@ def _make_train_step(
 		(loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(params_state)
 		clipped_grads, grad_norm = clip_grads(grads, grad_clip_norm)
 		updates, opt_state = tx.update(clipped_grads, opt_state, params_state)
-		updates = jax.tree_util.tree_map(
-			lambda update, mask: update if mask else jnp.zeros_like(update),
-			updates,
-			trainable_mask,
-		)
 		params_state = optax.apply_updates(params_state, updates)
 		ema_params = ema_update(ema_params, params_state, ema_decay)
 		metrics = {**metrics, "grad_norm": grad_norm}

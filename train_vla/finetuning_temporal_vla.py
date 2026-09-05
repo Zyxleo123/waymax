@@ -40,6 +40,18 @@ def compare_keyword(preds: list[str], labels: list[str]) -> list[float]:
 			accuracies.append(included_keywords / len(target_keywords))
 	return accuracies
 
+def compare_function(preds: list[str], labels: list[str]) -> list[float]:
+	accuracies = []
+	for pred, label in zip(preds, labels):
+		pred_lower = pred.lower()
+		label_lower = label.lower()
+		target_functions = [func for func in label_lower.split(",") if func.strip()]
+		included_functions = sum(1 for func in target_functions if func in pred_lower)
+		if len(target_functions) == 0:
+			accuracies.append(1.0 if included_functions == 0 else 0.0)
+		else:
+			accuracies.append(included_functions / len(target_functions))
+	return accuracies
 
 def compare_match(preds: list[str], labels: list[str]) -> list[float]:
 	return [1.0 if pred.strip().lower() == label.strip().lower() else 0.0 for pred, label in zip(preds, labels)]
@@ -93,6 +105,29 @@ def _resolve_pretrained_checkpoint_path(pretrained_model_path: str | Path) -> Pa
 	raise FileNotFoundError(f"Could not resolve pretrained checkpoint from: {pretrained_model_path}")
 
 
+def _resolve_resume_run_dir(resume_path: str | Path) -> Path:
+	path = Path(resume_path)
+	if path.is_file():
+		if path.parent.name == "checkpoints":
+			return path.parent.parent
+		return path.parent
+	if path.is_dir():
+		if (path / "training_config.json").exists():
+			return path
+		if path.name == "checkpoints":
+			return path.parent
+		if (path / "checkpoints").exists():
+			return path
+	raise FileNotFoundError(f"Could not resolve resume run directory from: {resume_path}")
+
+
+def _move_optimizer_state_to_device(optimizer: torch.optim.Optimizer, device: torch.device) -> None:
+	for state in optimizer.state.values():
+		for key, value in state.items():
+			if torch.is_tensor(value):
+				state[key] = value.to(device=device)
+
+
 def _build_temporal_vla_model(cfg: TemporalVLAFinetuningConfig) -> TemporalGemmaVLA:
 	lora_target_modules: tuple[str, ...] | None = None
 	if cfg.lora_target_modules is not None and cfg.lora_target_modules.strip():
@@ -116,6 +151,7 @@ def _build_temporal_vla_model(cfg: TemporalVLAFinetuningConfig) -> TemporalGemma
 		lora_alpha=cfg.lora_alpha,
 		lora_dropout=cfg.lora_dropout,
 		lora_target_modules=lora_target_modules,
+		predict_target_lane=cfg.predict_target_lane,
 	)
 
 	if cfg.pretrained_model_path:
@@ -154,6 +190,9 @@ def evaluate_accuracy(
 	compute_subgoal_loss: bool,
 ) -> dict[str, float]:
 	keyword_accuracies, match_accuracies, subgoal_maes = [], [], []
+	target_lane_loss_sum = 0.0
+	target_lane_accuracy_sum = 0.0
+	target_lane_batches = 0
 	was_training = model.training
 	model.eval()
 	with torch.inference_mode():
@@ -170,6 +209,7 @@ def evaluate_accuracy(
 				keep_scenarios = max(1, (remaining + steps_per_scenario - 1) // steps_per_scenario)
 				batch.prompts = batch.prompts[:keep_scenarios]
 				batch.answers = batch.answers[:keep_scenarios]
+				batch.target_lane_ids = batch.target_lane_ids[:keep_scenarios] if batch.target_lane_ids is not None else None
 				features = {key: value[:keep_scenarios] for key, value in features.items()}
 				features, prompts, answers = _flatten_temporal_instruction_batch(batch)
 
@@ -186,14 +226,27 @@ def evaluate_accuracy(
 
 			amp_enabled = device.type == "cuda"
 			with torch.autocast(device_type=device.type, dtype=dtype, enabled=amp_enabled):
-				pred_answers, pred_subgoals = model.generate_predictions(
+				predictions = model.generate_predictions(
 					input_features=features,
 					prompt_ids=prompt_ids,
 					prompt_mask=prompt_mask,
 					max_new_tokens=max_answer_length,
 				)
-
-			keyword_accuracies.extend(compare_keyword(pred_answers, answers))
+				pred_answers = predictions["answer"]
+				pred_subgoals = predictions.get("subgoal_preds", None)
+				outputs = model(
+					features,
+					prompt_ids=prompt_ids,
+					prompt_mask=prompt_mask,
+					answer_ids=answer_ids,
+					answer_mask=answer_mask,
+					target_lane_ids=batch.target_lane_ids,
+					compute_subgoal_loss=compute_subgoal_loss,
+				)
+			if loader.dataset.cfg.language_label == "function":
+				keyword_accuracies.extend(compare_function(pred_answers, answers))
+			else:
+				keyword_accuracies.extend(compare_keyword(pred_answers, answers))
 			match_accuracies.extend(compare_match(pred_answers, answers))
 
 			if pred_subgoals is not None and "subgoal_xy" in features:
@@ -209,6 +262,10 @@ def evaluate_accuracy(
 			else:
 				subgoal_maes.extend([0.0] * len(pred_answers))
 
+			target_lane_loss_sum += float(outputs.get("target_lane_loss", torch.tensor(0.0)).detach().cpu())
+			target_lane_accuracy_sum += float(outputs.get("target_lane_accuracy", torch.tensor(0.0)).detach().cpu())
+			target_lane_batches += 1
+
 			if len(keyword_accuracies) >= max_samples:
 				break
 
@@ -222,6 +279,8 @@ def evaluate_accuracy(
 		"keyword_accuracy": keyword_accuracy,
 		"match_accuracy": match_accuracy,
 		"subgoal_mae": subgoal_mae,
+		"target_lane_loss": float(target_lane_loss_sum / target_lane_batches) if target_lane_batches > 0 else 0.0,
+		"target_lane_accuracy": float(target_lane_accuracy_sum / target_lane_batches) if target_lane_batches > 0 else 0.0,
 	}
 
 
@@ -230,12 +289,16 @@ def run_training(cfg: TemporalVLAFinetuningConfig) -> None:
 	dtype = resolve_dtype(cfg.dtype)
 	torch.backends.cuda.matmul.allow_tf32 = True
 
-	run_name = cfg.wandb_run_name # + f"_{cfg.model_type}"
-	if cfg.tag:
-		run_name += f"_{cfg.tag}"
-	run_name += f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
-	output_dir = Path(cfg.output_dir) / run_name
+	resume_checkpoint_path = _resolve_pretrained_checkpoint_path(cfg.resume_path) if cfg.resume_path else None
+	if resume_checkpoint_path is not None:
+		output_dir = _resolve_resume_run_dir(cfg.resume_path)
+		run_name = output_dir.name
+	else:
+		run_name = cfg.wandb_run_name # + f"_{cfg.model_type}"
+		if cfg.tag:
+			run_name += f"_{cfg.tag}"
+		run_name += f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+		output_dir = Path(cfg.output_dir) / run_name
 	output_dir.mkdir(parents=True, exist_ok=True)
 	save_training_config(cfg, output_dir)
 
@@ -247,7 +310,7 @@ def run_training(cfg: TemporalVLAFinetuningConfig) -> None:
 		preprocess_cfg=cfg.preprocess_cfg,
 		annotation_dir=cfg.annotation_dir,
 		anchor_steps=cfg.anchor_steps,
-		language_label="instruction",
+		language_label=cfg.language_label,
 		backend="torch",
 		include_inst_features=False,
 		file_indices=None,
@@ -264,7 +327,7 @@ def run_training(cfg: TemporalVLAFinetuningConfig) -> None:
 			preprocess_cfg=cfg.preprocess_cfg,
 			annotation_dir=cfg.annotation_dir,
 			anchor_steps=cfg.anchor_steps,
-			language_label="instruction",
+			language_label=cfg.language_label,
 			backend="torch",
 			include_inst_features=False,
 			file_indices=None,
@@ -329,6 +392,33 @@ def run_training(cfg: TemporalVLAFinetuningConfig) -> None:
 	scaler = torch.cuda.amp.GradScaler() if cfg.dtype == "fp16" else None
 
 	global_step = 0
+	if resume_checkpoint_path is not None:
+		checkpoint = torch.load(resume_checkpoint_path, map_location="cpu")
+		state_dict = checkpoint.get("model_state_dict", checkpoint)
+		if any(key.startswith("module.") for key in state_dict):
+			state_dict = {
+				key[len("module."):] if key.startswith("module.") else key: value
+				for key, value in state_dict.items()
+			}
+		missing, unexpected = model.load_state_dict(state_dict, strict=False)
+		print(f"resuming from checkpoint: {resume_checkpoint_path}")
+		print(f"missing keys: {len(missing)}")
+		print(f"unexpected keys: {len(unexpected)}")
+		if missing:
+			print("  missing:", missing[:10])
+		if unexpected:
+			print("  unexpected:", unexpected[:10])
+		optimizer_state_dict = checkpoint.get("optimizer_state_dict")
+		if optimizer_state_dict is not None:
+			optimizer.load_state_dict(optimizer_state_dict)
+			_move_optimizer_state_to_device(optimizer, device)
+		scheduler_state_dict = checkpoint.get("scheduler_state_dict")
+		if scheduler is not None and scheduler_state_dict is not None:
+			scheduler.load_state_dict(scheduler_state_dict)
+		global_step = int(checkpoint.get("step", -1)) + 1
+		if global_step < 0:
+			global_step = 0
+
 	optimizer.zero_grad(set_to_none=True)
 	for epoch in range(cfg.num_epochs):
 		epoch_total = None
@@ -360,6 +450,7 @@ def run_training(cfg: TemporalVLAFinetuningConfig) -> None:
 					prompt_mask=prompt_mask,
 					answer_ids=answer_ids,
 					answer_mask=answer_mask,
+					target_lane_ids=batch.target_lane_ids,
 					compute_subgoal_loss=cfg.predict_subgoal,
 				)
 				loss = outputs["loss"] / cfg.grad_accum_steps
@@ -389,6 +480,8 @@ def run_training(cfg: TemporalVLAFinetuningConfig) -> None:
 			if global_step % cfg.log_every == 0:
 				current_lr = scheduler.get_last_lr()[0] if scheduler is not None else optimizer.param_groups[0]["lr"]
 				train_loss = float(outputs["loss"].detach().cpu())
+				train_target_lane_loss = float(outputs.get("target_lane_loss", torch.tensor(0.0)))
+				train_target_lane_accuracy = float(outputs.get("target_lane_accuracy", torch.tensor(0.0)))
 				pbar.set_postfix(loss=f"{train_loss:.4f}", lr=f"{current_lr:.3e}", batch=len(prompts))
 				if wandb_run is not None:
 					wandb_run.log(
@@ -397,6 +490,8 @@ def run_training(cfg: TemporalVLAFinetuningConfig) -> None:
 							"train/loss": train_loss,
 							"train/subgoal_loss": outputs.get("subgoal_loss", 0.0),
 							"train/language_loss": outputs.get("language_loss", 0.0),
+							"train/target_lane_loss": train_target_lane_loss,
+							"train/target_lane_accuracy": train_target_lane_accuracy,
 							"train/lr": current_lr,
 							"train/batch_size": len(prompts),
 						},
@@ -426,7 +521,7 @@ def run_training(cfg: TemporalVLAFinetuningConfig) -> None:
 					cfg=cfg,
 					save_trainable_only=True
 				)
-				val_metrics = {"keyword_accuracy": 0.0, "match_accuracy": 0.0, "subgoal_mae": 0.0}
+				val_metrics = {"keyword_accuracy": 0.0, "match_accuracy": 0.0, "subgoal_mae": 0.0, "target_lane_loss": 0.0, "target_lane_accuracy": 0.0}
 				if val_loader is not None:
 					val_metrics = evaluate_accuracy(
 						model,
@@ -455,9 +550,13 @@ def run_training(cfg: TemporalVLAFinetuningConfig) -> None:
 						"val_accuracy/match_accuracy": val_metrics["match_accuracy"],
 						"val_accuracy/keyword_accuracy": val_metrics["keyword_accuracy"],
 						"val_accuracy/subgoal_mae": val_metrics["subgoal_mae"],
+						"val_accuracy/target_lane_loss": val_metrics["target_lane_loss"],
+						"val_accuracy/target_lane_accuracy": val_metrics["target_lane_accuracy"],
 						"train_accuracy/match_accuracy": train_metrics["match_accuracy"],
 						"train_accuracy/keyword_accuracy": train_metrics["keyword_accuracy"],
 						"train_accuracy/subgoal_mae": train_metrics["subgoal_mae"],
+						"train_accuracy/target_lane_loss": train_metrics["target_lane_loss"],
+						"train_accuracy/target_lane_accuracy": train_metrics["target_lane_accuracy"],
 					}
 					wandb_run.log(wandb_log_dict, step=global_step)
 

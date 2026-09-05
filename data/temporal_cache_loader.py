@@ -15,6 +15,7 @@ from data.preprocess_cached import preprocess_cached_npz
 from data.types import CacheLoaderConfig, PreprocessConfig
 from data.utils import (
     VLA_PROMPT,
+    VLA_FUNCTION_PROMPT,
     build_question_bank,
     npz_to_jax,
     npz_to_torch,
@@ -38,6 +39,7 @@ class TemporalCacheBatch:
     keys: list[list[str]] | None = None
     scenario_id: list[str] | None = None
     tfrecord_index: list[int] | None = None
+    target_lane_ids: list[list[int]] | None = None
 
 
 class TemporalCacheDataset(IterableDataset[TemporalCacheBatch]):
@@ -83,6 +85,7 @@ class TemporalCacheDataset(IterableDataset[TemporalCacheBatch]):
         obj = json.loads(raw.decode("utf-8"))
         annotation = obj["annotation"]
         annotation["instruction"] = str(obj.get("instruction", "")).strip()
+        annotation['functions'] = str(obj.get("functions", "")).strip()
         return annotation
 
     def _parse_tfrecord_index(self, cache_file: Path) -> int:
@@ -178,12 +181,14 @@ class TemporalCacheDataset(IterableDataset[TemporalCacheBatch]):
                     prompts_by_step: list[list[str]] = []
                     answers_by_step: list[list[str]] = []
                     keys_by_step: list[list[str]] = []
+                    target_lane_ids_by_step: list[list[int]] = []
 
                     for anchor_step in self.cfg.anchor_steps:
                         step_prompts: list[str] = []
                         step_answers: list[str] = []
                         step_keys: list[str] = []
                         step_scenario_indices = scenario_indices[start_index:end_index]
+                        step_target_lane_ids: list[int] = []
 
                         for scenario_index in step_scenario_indices:
                             annotation = self.load_annotation(cache_file, int(scenario_index), int(anchor_step))
@@ -196,23 +201,29 @@ class TemporalCacheDataset(IterableDataset[TemporalCacheBatch]):
                             elif self.cfg.language_label == "instruction":
                                 step_prompts.append(VLA_PROMPT)
                                 step_answers.append(f"{annotation['instruction']}")
+                            elif self.cfg.language_label == "function":
+                                step_prompts.append(VLA_FUNCTION_PROMPT)
+                                step_answers.append(f"{annotation['functions']}")
                             else:
                                 raise ValueError(
                                     f"Unsupported language_label: {self.cfg.language_label}"
                                 )
-
+                            step_target_lane_ids.append(int(annotation.get("target_lane_id", -1)))
                         prompts_by_step.append(step_prompts)
                         answers_by_step.append(step_answers)
+                        target_lane_ids_by_step.append(step_target_lane_ids)
                         if self.cfg.language_label == "qa":
                             keys_by_step.append(step_keys)
 
                     prompts = self._transpose_nested(prompts_by_step)
                     answers = self._transpose_nested(answers_by_step)
                     keys = self._transpose_nested(keys_by_step) if self.cfg.language_label == "qa" else None
+                    target_lane_ids = self._transpose_nested(target_lane_ids_by_step)
                 else:
                     prompts = None
                     answers = None
                     keys = None
+                    target_lane_ids = None
 
                 scenario_id = [
                     f"{tfrecord_index:05d}_{int(scenario_index)}"
@@ -227,6 +238,7 @@ class TemporalCacheDataset(IterableDataset[TemporalCacheBatch]):
                     prompts=prompts,
                     answers=answers,
                     keys=keys,
+                    target_lane_ids=target_lane_ids,
                     scenario_id=scenario_id,
                     tfrecord_index=tfrecord_ids[start_index:end_index],
                 )
