@@ -36,6 +36,8 @@ import numpy as np
 import optax
 from flax import nnx
 
+from rl.diffusion_ft.unrolled_prediction import teacher_forced_unroll
+
 
 def _clone_module(module: nnx.Module) -> nnx.Module:
     """Deep-copy an nnx module (independent parameter arrays)."""
@@ -165,6 +167,11 @@ class DiffusionRLActor:
         # warmup where only collect runs). Passing params as a *traced* arg and
         # merging inside (as batched_log_probs already does) compiles once.
         self._jit_samplers: dict[bool, Any] = {}
+        # Jitted teacher-forced unroll kernels, keyed by the Python constants that
+        # change the traced program (loop length, gradient window, DDIM eta). Same
+        # discipline as `_jit_samplers`: params are a *traced* argument merged
+        # inside, so one entry is compiled for the run instead of one per iteration.
+        self._jit_unrolls: dict[tuple[int, int, float], Any] = {}
 
     # ------------------------------------------------------------------ #
     def _sampler_for(self, rl_mode: bool):
@@ -310,6 +317,43 @@ class DiffusionRLActor:
         x0 = jnp.transpose(target_btd, (0, 2, 1))  # [B,T,D] -> [B,D,T]
         lpe = self.diffusion.loss_per_example(x0, ec1, ec2, emask, rng=erng, denoise_fn=fn)  # [B]
         return jnp.sum(lpe * alive_b) / jnp.maximum(jnp.sum(alive_b), 1.0)
+
+    def base_anchor_loss(self, params, target_btd, cond1, cond2, cond2_mask,
+                         alive_b, rng):
+        """Do-no-harm tether to the FROZEN BASE policy (not the human log).
+
+        Gaussian KL under the shared posterior std between the trainable and the
+        frozen base denoiser's one-step posterior means, at states ``x_t`` formed
+        by noising ``target_btd`` at a single shared ``(t, eps)`` draw. Unlike
+        ``_expert_loss`` -- whose target is the human log, which the pretrained
+        policy already departs from *while still succeeding*, so pulling toward it
+        perturbs a working policy -- this term's minimizer is the base policy
+        itself: it is exactly zero in value AND gradient when the trainable copy
+        equals the base, so it penalizes only *movement away from the pretrained
+        behavior* and contributes no force where the policy already matches base.
+        That makes it the do-no-harm leash on the successes the safety term is not
+        trying to change. Averaged over the alive samples only.
+
+        ``rng`` MUST be split once per gradient step by the caller and passed in
+        (never a literal constant): `q_sample` turns it into both ``t`` and the
+        forward noise, so a frozen key descends one Monte-Carlo slice of the KL
+        rather than the KL -- the same frozen-rng bug that made the 09-02 anchor
+        control the worst arm of six.
+        """
+        x0 = jnp.transpose(target_btd, (0, 2, 1))          # [B,T,D] -> [B,D,T]
+        kt, ke = jax.random.split(rng)
+        t = jax.random.randint(kt, (x0.shape[0],), 0,
+                               self.diffusion.timesteps, dtype=jnp.int32)
+        x_t = self.diffusion.q_sample(x0, t, jax.random.normal(ke, x0.shape))
+        fn = self._trainable_fn(params)
+        mean_tr, var, _ = self.diffusion.p_mean_variance(
+            x_t, t, cond1, cond2, cond2_mask, denoise_fn=fn)
+        mean_base, _, _ = self.diffusion.p_mean_variance(
+            x_t, t, cond1, cond2, cond2_mask, denoise_fn=self.frozen_denoise)
+        mean_base = jax.lax.stop_gradient(mean_base)
+        std = jnp.maximum(jnp.sqrt(var), self.sigma_logprob_floor)
+        per_b = jnp.mean(0.5 * ((mean_tr - mean_base) / std) ** 2, axis=(1, 2))  # [B]
+        return jnp.sum(per_b * alive_b) / jnp.maximum(jnp.sum(alive_b), 1.0)
 
     @staticmethod
     def _wmean_kb(x_kb, w_b):
@@ -481,8 +525,14 @@ class DiffusionRLActor:
         is off unless asked for (the trainer asks on the last expert step only).
         """
         if self._jit_expert_grad is None:
+            # argnums belongs to value_and_grad (differentiate w.r.t. _tparams,
+            # the first arg), NOT to jit -- jax.jit has no such kwarg and raises
+            # TypeError on the first expert step. That crash is why every arm of
+            # the 20260828 ratio sweep with expert_steps>0 died ~90s in while the
+            # x0 control ran fine: this line is only reached when expert_steps>0,
+            # so no run before that sweep had ever executed it.
             self._jit_expert_grad = jax.jit(
-                jax.value_and_grad(self._expert_loss), argnums=0)
+                jax.value_and_grad(self._expert_loss, argnums=0))
         loss, grads = self._jit_expert_grad(self._tparams, expert, alive_b)
         updates, self._opt_state_expert = self.tx_expert.update(
             grads, self._opt_state_expert, self._tparams)
@@ -500,6 +550,113 @@ class DiffusionRLActor:
             metrics["kl_gauss_expert"] = float(
                 np.asarray(self._transition_kl(mu_old, mu_new, std, alive_b)))
         return metrics
+
+    def safety_update(self, loss_fn, *, lr_scale: float = 1.0):
+        """One gradient step on the trainable denoiser against an arbitrary
+        differentiable loss over the *sampled* trajectory.
+
+        This is the analytic-gradient counterpart to :meth:`ppo_update`. PPO needs
+        a score-function estimator because the simulator reward is a black box;
+        the geometric safety loss is a differentiable function of the trajectory,
+        so its gradient can be taken directly through the sampler and is not an
+        estimate at all. ``loss_fn(params) -> (scalar, aux)`` is built by the
+        caller because it needs the environment's postprocess and roadgraph, which
+        the actor deliberately knows nothing about.
+
+        Like :meth:`expert_update`, this is **not** gated by the PPO trust region:
+        that region exists to keep an importance ratio valid for data drawn under
+        the behaviour policy, and there is no ratio here. It reuses the expert
+        optimizer state so that the anchor and the safety term -- which are
+        stepped together as one objective -- share one Adam moment estimate rather
+        than fighting over two.
+        """
+        grads, loss, aux = self.safety_grads(loss_fn)
+        out = {"loss": float(np.asarray(loss))}
+        out.update({k: float(np.asarray(v)) for k, v in aux.items()})
+        out.update(self.apply_safety_grads(grads, lr_scale=lr_scale))
+        return out
+
+    def safety_grads(self, loss_fn):
+        """``loss_fn``'s gradient w.r.t. the trainable denoiser, *unapplied*.
+
+        Split out of :meth:`safety_update` so a caller can average the gradient
+        over several replan contexts and take ONE optimizer step instead of one
+        step per context. That distinction matters more than it looks: an Adam
+        update is ``lr * m/(sqrt(v)+eps)``, which is O(lr) per parameter *whatever
+        the gradient norm is*, so the number of steps -- not the size of the
+        signal -- is what sets how far the policy travels from the pretrained
+        weights. Stepping once per context therefore both shortens the averaging
+        window and multiplies the distance walked, and with a weak signal the
+        walk is mostly noise. Returns ``(grads, loss, aux)``.
+        """
+        (loss, aux), grads = jax.value_and_grad(loss_fn, has_aux=True)(self._tparams)
+        return grads, loss, aux
+
+    def apply_safety_grads(self, grads, *, lr_scale: float = 1.0):
+        """Take one optimizer step on an already-averaged safety gradient.
+
+        Note that ``tx_expert``'s ``clip_by_global_norm`` sits *before* Adam and
+        so barely constrains the update: Adam divides by its own running RMS, and
+        a uniform pre-scaling of the gradient cancels once the moments have warmed
+        up. The clip bounds the gradient, not the distance travelled. Whatever
+        limits the latter has to be the step count or the learning rate.
+        """
+        updates, self._opt_state_expert = self.tx_expert.update(
+            grads, self._opt_state_expert, self._tparams)
+        if lr_scale != 1.0:
+            updates = jax.tree_util.tree_map(lambda g: g * lr_scale, updates)
+        self._tparams = optax.apply_updates(self._tparams, updates)
+        return {"grad_norm": float(np.asarray(optax.global_norm(grads)))}
+
+    def sample_world_for(self, params, cond1, cond2, cond2_mask, rng, *, rl_mode=True):
+        """Differentiable sample under an explicit params pytree, ``[B, C, T]``.
+
+        Exposes the traced sampler so a caller can build a loss that backpropagates
+        into the denoiser. ``collect``/``act`` bind ``self._tparams``; this does
+        not, which is what lets ``jax.grad`` reach the parameters.
+        """
+        return self._sampler_for(bool(rl_mode))(params, cond1, cond2, cond2_mask, rng)[0]
+
+    # ------------------------------------------------------------------ #
+    def _unroll_for(self, k_steps: int, grad_steps: int, eta: float):
+        """Jitted teacher-forced unroll, one compiled program per (K, G, eta)."""
+        key = (int(k_steps), int(grad_steps), float(eta))
+        cached = self._jit_unrolls.get(key)
+        if cached is not None:
+            return cached
+        diffusion = self.diffusion
+        tgdef, tnonparam = self._tgdef, self._tnonparam
+
+        def merge(p):
+            return nnx.merge(tgdef, p, tnonparam)
+
+        def run(params, cond1, cond2, cond2_mask, x0_bct, t_grid_kb, rng):
+            return teacher_forced_unroll(
+                diffusion, merge, params, x0_bct=x0_bct, t_grid_kb=t_grid_kb,
+                cond1=cond1, cond2=cond2, cond2_mask=cond2_mask,
+                grad_steps=key[1], eta=key[2], rng=rng)
+
+        jitted = jax.jit(run)
+        self._jit_unrolls[key] = jitted
+        return jitted
+
+    def unrolled_sample_for(self, params, cond1, cond2, cond2_mask, x0_bct,
+                            t_grid_kb, rng, *, grad_steps: int = 1, eta: float = 0.0):
+        """Teacher-forced unrolled candidate under explicit params, ``[B, C, T]``.
+
+        The cheap counterpart to :meth:`sample_world_for`: instead of denoising
+        from pure noise through the whole chain, corrupt the expert trajectory to
+        ``t_grid_kb[0]`` and unroll ``K = t_grid_kb.shape[0]`` steps back down to
+        ``t_grid_kb[-1]``. Differentiable in ``params`` through the last
+        ``grad_steps`` evaluations. See :mod:`rl.diffusion_ft.unrolled_prediction`.
+
+        The caller is responsible for keeping ``t_grid_kb`` inside the trainable
+        window (``t < k_trainable``): every step here runs the *trainable* copy,
+        and the sampler only ever invokes it at ``t <= k_trainable - 1``.
+        """
+        k = int(t_grid_kb.shape[0])
+        return self._unroll_for(k, grad_steps, eta)(
+            params, cond1, cond2, cond2_mask, x0_bct, t_grid_kb, rng)
 
     def set_expert_kl_probe(self, cond1, cond2, cond2_mask, trace) -> None:
         """Give ``expert_update`` the batch to measure its KL-vs-behavior on.
