@@ -46,7 +46,12 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 # ---- shared configuration for every arm -------------------------------------
 # Data: the whole training corpus, which is also the corpus the base checkpoint
 # was pretrained on -- so the expert loss anchors to the same distribution.
-export DFT_SHARD_GLOB="${DFT_SHARD_GLOB:-/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*-of-01000}"
+# No-colon `-` (not `:-`): an explicitly EMPTY DFT_SHARD_GLOB must survive, because
+# empty is what switches train_dppo.sbatch from corpus sampling back to a fixed
+# DFT_TFRECORD/DFT_INDICES batch -- i.e. how this sweep is pointed at the failure
+# set. With `:-` an empty override silently reverts to the corpus. Same idiom as
+# DFT_EXCLUDE in sweep_reward.sh.
+export DFT_SHARD_GLOB="${DFT_SHARD_GLOB-/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*-of-01000}"
 export DFT_SCENES_PER_ITER="${DFT_SCENES_PER_ITER:-32}"
 export DFT_EVAL_SCENES="${DFT_EVAL_SCENES:-32}"
 export DFT_RESAMPLE_EVERY="${DFT_RESAMPLE_EVERY:-1}"

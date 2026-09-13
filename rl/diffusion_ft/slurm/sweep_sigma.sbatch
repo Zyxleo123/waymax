@@ -9,6 +9,10 @@
 #SBATCH --time=4:00:00
 #SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
 #SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+# Preemption-safe: a sigma point whose rollouts.jsonl exists is skipped, so a
+# requeued job resumes. --open-mode=append keeps the previous attempt's log.
+#SBATCH --requeue
+#SBATCH --open-mode=append
 #
 # How large may DPPO's exploration noise be before the BEHAVIOUR policy stops
 # being able to drive?

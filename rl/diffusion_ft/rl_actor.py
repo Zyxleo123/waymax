@@ -166,7 +166,9 @@ class DiffusionRLActor:
         # entry per iter (~0.6 GiB/iter host leak, probe 33193, present even in
         # warmup where only collect runs). Passing params as a *traced* arg and
         # merging inside (as batched_log_probs already does) compiles once.
-        self._jit_samplers: dict[bool, Any] = {}
+        # Keyed (rl_mode, num_sample_steps) -- see `_sampler_for` for why the
+        # step count has to be part of the key and not just a closure constant.
+        self._jit_samplers: dict[tuple[bool, int | None], Any] = {}
         # Jitted teacher-forced unroll kernels, keyed by the Python constants that
         # change the traced program (loop length, gradient window, DDIM eta). Same
         # discipline as `_jit_samplers`: params are a *traced* argument merged
@@ -175,8 +177,25 @@ class DiffusionRLActor:
 
     # ------------------------------------------------------------------ #
     def _sampler_for(self, rl_mode: bool):
-        """Leak-free jitted sampler (params traced, merged inside), one per mode."""
-        key = bool(rl_mode)
+        """Leak-free jitted sampler (params traced, merged inside), one per mode.
+
+        Keyed on ``(rl_mode, num_sample_steps)``, NOT on ``rl_mode`` alone.
+        ``num_sample_steps`` is read here and captured as a closure constant, so a
+        cache keyed only on the mode would hand back a sampler compiled against
+        whatever the attribute happened to be on the FIRST call and silently
+        ignore every later assignment to it. That is not hypothetical: it made
+        ``tests/bench_ddim_ab.py`` measure nothing -- it warms a collect (so the
+        ``rl_mode=True`` entry is compiled at the starting value) and then sweeps
+        by assigning ``actor.num_sample_steps = S``, which after that first call
+        could not change the sampler. Every row of that A/B was the same full
+        chain, so it reported ~1.0x speedup and flat quality at every step count,
+        which reads exactly like "subsampling does not help". Including the value
+        in the key is what makes the attribute live, and it is also what lets one
+        run collect with a strided prefix while eval keeps the full chain.
+        """
+        mode = bool(rl_mode)
+        num_sample_steps = self.num_sample_steps
+        key = (mode, num_sample_steps)
         cached = self._jit_samplers.get(key)
         if cached is not None:
             return cached
@@ -184,7 +203,6 @@ class DiffusionRLActor:
         tgdef, tnonparam = self._tgdef, self._tnonparam
         k_trainable, prefix_len = self.k_trainable, self.prefix_len
         sigma_s, sigma_lp = self.sigma_sample_floor, self.sigma_logprob_floor
-        num_sample_steps = self.num_sample_steps
         in_ch, horizon = diffusion.denoise_fn.in_ch, diffusion.denoise_fn.horizon
 
         def sampler(params, cond1, cond2, cond2_mask, rng):
@@ -193,7 +211,7 @@ class DiffusionRLActor:
             return diffusion.sample_with_trace(
                 shape, cond1, cond2, cond2_mask, rng=rng,
                 k_trainable=k_trainable, trainable_denoise_fn=denoise,
-                rl_mode=key, sigma_sample_floor=sigma_s,
+                rl_mode=mode, sigma_sample_floor=sigma_s,
                 sigma_logprob_floor=sigma_lp, prefix_len=prefix_len,
                 num_sample_steps=num_sample_steps)
 
@@ -304,22 +322,28 @@ class DiffusionRLActor:
         )
 
     # ------------------------------------------------------------------ #
-    def _expert_loss(self, params, expert, alive_b):
+    def _expert_loss(self, params, expert, alive_b, time_weight=None):
         """Ordinary diffusion loss of the trainable denoiser on expert targets.
 
         ``expert`` is ``(target_btd, cond1, cond2, cond2_mask, rng)`` -- the
         normalized expert (log) trajectory and its frozen condition. Anchors the
         trainable copy to the demonstration (DPPO + expert anchor). Averaged over
         the *alive* samples only, so padded post-terminal replans do not tug the
-        anchor toward a stale expert target."""
+        anchor toward a stale expert target.
+
+        ``time_weight`` is an optional ``[T]`` weight over the model horizon, used
+        to restrict the anchor to the window the env will actually execute (see
+        ``train_safety --anchor_window``). It reweights the LOSS only: the
+        denoiser still predicts, and is still noised over, the whole horizon."""
         target_btd, ec1, ec2, emask, erng = expert
         fn = self._trainable_fn(params)
         x0 = jnp.transpose(target_btd, (0, 2, 1))  # [B,T,D] -> [B,D,T]
-        lpe = self.diffusion.loss_per_example(x0, ec1, ec2, emask, rng=erng, denoise_fn=fn)  # [B]
+        lpe = self.diffusion.loss_per_example(x0, ec1, ec2, emask, rng=erng, denoise_fn=fn,
+                                              time_weight=time_weight)  # [B]
         return jnp.sum(lpe * alive_b) / jnp.maximum(jnp.sum(alive_b), 1.0)
 
     def base_anchor_loss(self, params, target_btd, cond1, cond2, cond2_mask,
-                         alive_b, rng):
+                         alive_b, rng, time_weight=None):
         """Do-no-harm tether to the FROZEN BASE policy (not the human log).
 
         Gaussian KL under the shared posterior std between the trainable and the
@@ -339,6 +363,11 @@ class DiffusionRLActor:
         forward noise, so a frozen key descends one Monte-Carlo slice of the KL
         rather than the KL -- the same frozen-rng bug that made the 09-02 anchor
         control the worst arm of six.
+
+        ``time_weight`` is an optional ``[T]`` weight over the model horizon, so
+        the tether can be charged on the executed window only (``train_safety
+        --anchor_window``). Both denoiser passes still run the whole horizon; only
+        the reduction is windowed.
         """
         x0 = jnp.transpose(target_btd, (0, 2, 1))          # [B,T,D] -> [B,D,T]
         kt, ke = jax.random.split(rng)
@@ -352,7 +381,16 @@ class DiffusionRLActor:
             x_t, t, cond1, cond2, cond2_mask, denoise_fn=self.frozen_denoise)
         mean_base = jax.lax.stop_gradient(mean_base)
         std = jnp.maximum(jnp.sqrt(var), self.sigma_logprob_floor)
-        per_b = jnp.mean(0.5 * ((mean_tr - mean_base) / std) ** 2, axis=(1, 2))  # [B]
+        sq = 0.5 * ((mean_tr - mean_base) / std) ** 2                   # [B, D, T]
+        if time_weight is None:
+            per_b = jnp.mean(sq, axis=(1, 2))                           # [B]
+        else:
+            # Weighted mean over time (divided by the weight sum, not by T) so a
+            # window mask does not double as a weight cut on the term -- same
+            # convention as `GaussianDiffusion._compute_loss_per_example`.
+            w = jnp.broadcast_to(jnp.asarray(time_weight, sq.dtype), sq.shape[-1:])
+            per_b = (jnp.sum(sq * w, axis=(1, 2))
+                     / (jnp.maximum(jnp.sum(w), 1e-8) * sq.shape[1]))
         return jnp.sum(per_b * alive_b) / jnp.maximum(jnp.sum(alive_b), 1.0)
 
     @staticmethod
@@ -616,6 +654,56 @@ class DiffusionRLActor:
         not, which is what lets ``jax.grad`` reach the parameters.
         """
         return self._sampler_for(bool(rl_mode))(params, cond1, cond2, cond2_mask, rng)[0]
+
+    def _prefix_samplers(self):
+        """Jitted ``(with_prefix, late_only)`` pair for the current step count.
+
+        ``with_prefix(params, c1, c2, m, rng) -> (x, (x_{k-1}, key_late))`` is the
+        rl_mode sampler that also hands back the frozen prefix's output;
+        ``late_only(params, c1, c2, m, x_{k-1}, key_late) -> x`` replays just the
+        ``k_trainable`` late steps from it. The prefix runs the frozen base
+        denoiser, so late_only reproduces with_prefix's trajectory for the same
+        params -- and is what a gradient pass differentiates."""
+        key = ("prefix", self.num_sample_steps)
+        cached = self._jit_samplers.get(key)
+        if cached is not None:
+            return cached
+        diffusion = self.diffusion
+        tgdef, tnonparam = self._tgdef, self._tnonparam
+        kw = dict(k_trainable=self.k_trainable, rl_mode=True,
+                  sigma_sample_floor=self.sigma_sample_floor,
+                  sigma_logprob_floor=self.sigma_logprob_floor,
+                  prefix_len=self.prefix_len,
+                  num_sample_steps=self.num_sample_steps)
+        in_ch, horizon = diffusion.denoise_fn.in_ch, diffusion.denoise_fn.horizon
+
+        def with_prefix(params, cond1, cond2, cond2_mask, rng):
+            denoise = nnx.merge(tgdef, params, tnonparam)
+            x, _, pre = diffusion.sample_with_trace(
+                (cond1.shape[0], in_ch, horizon), cond1, cond2, cond2_mask, rng=rng,
+                trainable_denoise_fn=denoise, return_prefix=True, **kw)
+            return x, pre
+
+        def late_only(params, cond1, cond2, cond2_mask, x_prefix, key_late):
+            denoise = nnx.merge(tgdef, params, tnonparam)
+            x, _ = diffusion.sample_with_trace(
+                (cond1.shape[0], in_ch, horizon), cond1, cond2, cond2_mask,
+                rng=key_late, trainable_denoise_fn=denoise,
+                x_prefix=x_prefix, key_late=key_late, **kw)
+            return x
+
+        pair = (jax.jit(with_prefix), jax.jit(late_only))
+        self._jit_samplers[key] = pair
+        return pair
+
+    def sample_world_with_prefix(self, params, cond1, cond2, cond2_mask, rng):
+        """:meth:`sample_world_for` (rl_mode) plus ``(x_{k-1}, key_late)``."""
+        return self._prefix_samplers()[0](params, cond1, cond2, cond2_mask, rng)
+
+    def sample_late_for(self, params, cond1, cond2, cond2_mask, x_prefix, key_late):
+        """Differentiable late chain from a stored prefix, ``[B, C, T]``."""
+        return self._prefix_samplers()[1](params, cond1, cond2, cond2_mask,
+                                          x_prefix, key_late)
 
     # ------------------------------------------------------------------ #
     def _unroll_for(self, k_steps: int, grad_steps: int, eta: float):

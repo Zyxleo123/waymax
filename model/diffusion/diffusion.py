@@ -461,9 +461,18 @@ class GaussianDiffusion(nnx.Module):
         x_final, _ = jax.lax.fori_loop(0, num_steps, body, (x_init, key_steps))
         return x_final
 
-    def _compute_loss_per_example(self, x0: jnp.ndarray, cond1: jnp.ndarray, cond2: jnp.ndarray, cond2_mask: jnp.ndarray, noise: jnp.ndarray, t: jnp.ndarray, denoise_fn=None) -> jnp.ndarray:
+    def _compute_loss_per_example(self, x0: jnp.ndarray, cond1: jnp.ndarray, cond2: jnp.ndarray, cond2_mask: jnp.ndarray, noise: jnp.ndarray, t: jnp.ndarray, denoise_fn=None, time_weight: jnp.ndarray | None = None) -> jnp.ndarray:
         """Per-example diffusion loss, averaged over channels and time but NOT
-        over the batch. Returns ``[B]``. ``_compute_loss`` is its batch-mean."""
+        over the batch. Returns ``[B]``. ``_compute_loss`` is its batch-mean.
+
+        ``time_weight`` is an optional ``[T]`` weight over the horizon axis. The
+        reduction stays a *weighted mean* (divided by the weight sum, not by T),
+        so a 0/1 window mask is on the same scale as the unweighted loss rather
+        than being shrunk by the fraction of the horizon it keeps -- otherwise
+        narrowing the window would silently also lower the term's weight in a
+        multi-term objective. ``None`` reduces over the whole horizon and is
+        bit-for-bit the pre-existing behaviour.
+        """
         fn = self.denoise_fn if denoise_fn is None else denoise_fn
         x_t = self.q_sample(x0, t, noise=noise)
         pred = fn(x_t, t, cond1, cond2, cond2_mask)
@@ -480,17 +489,24 @@ class GaussianDiffusion(nnx.Module):
             raise ValueError(f"Unsupported predict_type: {self.predict_type}")
 
         se = (pred - target) ** 2
-        return jnp.mean(se, axis=tuple(range(1, se.ndim)))  # mean over C, T -> [B]
+        if time_weight is None:
+            return jnp.mean(se, axis=tuple(range(1, se.ndim)))  # mean over C, T -> [B]
+        # se is [B, C, T]; weight the trailing (time) axis only.
+        w = jnp.asarray(time_weight, se.dtype)
+        w = jnp.broadcast_to(w, se.shape[-1:])
+        num = jnp.sum(se * w, axis=tuple(range(1, se.ndim)))
+        den = jnp.maximum(jnp.sum(w), 1e-8) * se.shape[1]
+        return num / den
 
     def _compute_loss(self, x0: jnp.ndarray, cond1: jnp.ndarray, cond2: jnp.ndarray, cond2_mask: jnp.ndarray, noise: jnp.ndarray, t: jnp.ndarray) -> jnp.ndarray:
         return jnp.mean(self._compute_loss_per_example(x0, cond1, cond2, cond2_mask, noise, t))
 
-    def _loss_impl(self, x0: jnp.ndarray, cond1: jnp.ndarray, cond2: jnp.ndarray, cond2_mask: jnp.ndarray, rng: jax.Array, per_example: bool = False, denoise_fn=None) -> jnp.ndarray:
+    def _loss_impl(self, x0: jnp.ndarray, cond1: jnp.ndarray, cond2: jnp.ndarray, cond2_mask: jnp.ndarray, rng: jax.Array, per_example: bool = False, denoise_fn=None, time_weight: jnp.ndarray | None = None) -> jnp.ndarray:
         batch = x0.shape[0]
         key_t, key_noise = jax.random.split(rng)
         t = jax.random.randint(key_t, (batch,), 0, self.timesteps, dtype=jnp.int32)
         noise = jax.random.normal(key_noise, x0.shape, dtype=jnp.float32)
-        per = self._compute_loss_per_example(x0, cond1, cond2, cond2_mask, noise, t, denoise_fn=denoise_fn)
+        per = self._compute_loss_per_example(x0, cond1, cond2, cond2_mask, noise, t, denoise_fn=denoise_fn, time_weight=time_weight)
         return per if per_example else jnp.mean(per)
 
     def _resample_impl(self, proposals: jnp.ndarray, cond1: jnp.ndarray, cond2: jnp.ndarray, cond2_mask: jnp.ndarray, n_timesteps: int, rng: jax.Array, noise_scale: float = 1.0, eta: float = 1.0, sampling_temp: float = 1.0, temp_mode: str = "uniform") -> jnp.ndarray:
@@ -547,15 +563,18 @@ class GaussianDiffusion(nnx.Module):
         *,
         rng: jax.Array,
         denoise_fn=None,
+        time_weight: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         """Diffusion loss per batch element, ``[B]`` (mean over channels + time).
 
         ``loss(...) == loss_per_example(...).mean()`` for the same rng, so this is
         a drop-in for reward-weighted / filtered fine-tuning where each example
         carries a different weight. ``denoise_fn`` substitutes the denoiser (e.g.
-        the DPPO-trainable copy for an expert-anchor minibatch).
+        the DPPO-trainable copy for an expert-anchor minibatch). ``time_weight``
+        is an optional ``[T]`` weight over the horizon (see
+        :meth:`_compute_loss_per_example`); ``None`` scores the whole horizon.
         """
-        return self._loss_impl(x0, cond1, cond2, cond2_mask, rng, per_example=True, denoise_fn=denoise_fn)
+        return self._loss_impl(x0, cond1, cond2, cond2_mask, rng, per_example=True, denoise_fn=denoise_fn, time_weight=time_weight)
 
     # ----------------------------------------------------------------------- #
     # RL / DPPO support: reverse-transition statistics, log-probabilities, and
@@ -647,6 +666,9 @@ class GaussianDiffusion(nnx.Module):
         temp_mode: str = "uniform",
         num_sample_steps: int | None = None,
         scan_late: bool = True,
+        x_prefix: jnp.ndarray | None = None,
+        key_late: jax.Array | None = None,
+        return_prefix: bool = False,
     ):
         """Sample and record the last ``k_trainable`` denoising transitions.
 
@@ -678,6 +700,12 @@ class GaussianDiffusion(nnx.Module):
         Returns ``(trajectory, trace)`` where ``trace`` is a dict of arrays stacked
         over the ``k_trainable`` steps (leading axis K, ordered high-t -> t=0):
         ``x_t, x_prev, timestep, mean, std, log_prob``.
+
+        The early steps use the frozen ``self.denoise_fn`` only, so their output is
+        a function of ``rng`` alone. ``return_prefix=True`` appends ``(x_{k-1},
+        key_late)`` to the return; passing those back as ``x_prefix``/``key_late``
+        skips the early steps and reproduces the same late chain -- a gradient
+        pass then pays ``k`` denoiser evals instead of ``timesteps``.
         """
         batch_size = shape[0]
         num_steps = self.timesteps
@@ -691,12 +719,17 @@ class GaussianDiffusion(nnx.Module):
             raise ValueError(f"num_sample_steps must be in [{k}, {num_steps}], got {S}.")
         stride_frozen = S != num_steps
 
-        key_x, key_steps = jax.random.split(rng)
-        x = jax.random.normal(key_x, shape, dtype=jnp.float32)
         temp_sched = self._temp_schedule(sampling_temp, temp_mode, num_steps)
+        if x_prefix is not None:
+            x, key = x_prefix, key_late
+        else:
+            key_x, key_steps = jax.random.split(rng)
+            x = jax.random.normal(key_x, shape, dtype=jnp.float32)
 
         # --- early (frozen) steps: compact loop, no trace --------------------- #
-        if not stride_frozen:
+        if x_prefix is not None:
+            pass
+        elif not stride_frozen:
             # Full unit-step chain (t = num_steps-1 .. k), bit-identical to before.
             def body(i, carry):
                 x_curr, key = carry
@@ -744,6 +777,8 @@ class GaussianDiffusion(nnx.Module):
 
             x, key = jax.lax.fori_loop(0, n_frozen, fbody, (x, key_steps))
 
+        prefix_out = (x, key)
+
         # --- late (trainable) steps: record transitions ---------------------- #
         # Collection (rl_mode) runs the sequential late chain as a compiled
         # lax.scan -- one fused program instead of k eager denoiser dispatches,
@@ -774,7 +809,7 @@ class GaussianDiffusion(nnx.Module):
                 late_body, (x, key), ts)
             trace = {"x_t": xt_s, "x_prev": xprev_s, "timestep": t_s,
                      "mean": mean_s, "std": std_s, "log_prob": lp_s}
-            return x, trace
+            return (x, trace, prefix_out) if return_prefix else (x, trace)
 
         # --- late (trainable) steps: unrolled, record transitions ------------ #
         xt_l, xprev_l, t_l, mean_l, std_l, lp_l = [], [], [], [], [], []
@@ -825,7 +860,7 @@ class GaussianDiffusion(nnx.Module):
             "std": _stack(std_l, (0,) + tuple(shape)),
             "log_prob": jnp.stack(lp_l, axis=0) if lp_l else jnp.zeros((0, batch_size), jnp.float32),
         }
-        return x, trace
+        return (x, trace, prefix_out) if return_prefix else (x, trace)
 
     def resample(
         self,

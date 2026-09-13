@@ -87,10 +87,12 @@ def neighbor_window(state, t0: int, n_steps: int):
     log = state.log_trajectory
     ego_b = _ego_index_b(state)
     n_obj = jnp.asarray(log.x).shape[1]
-    sl = slice(t0 + 1, t0 + 1 + n_steps)
-
+    # dynamic_slice, not a Python slice, so ``t0`` may be traced: one compiled
+    # gradient then serves every replan. Identical for a Python int because the
+    # caller clips ``n_steps`` to the horizon (no start-index clamping kicks in).
     def to_btn(f):
-        return jnp.transpose(jnp.asarray(f)[:, :, sl], (0, 2, 1))     # [B,N,t]->[B,t,N]
+        w = jax.lax.dynamic_slice_in_dim(jnp.asarray(f), t0 + 1, int(n_steps), axis=2)
+        return jnp.transpose(w, (0, 2, 1))                            # [B,N,t]->[B,t,N]
 
     not_ego = ~jax.nn.one_hot(ego_b, n_obj, dtype=bool)               # [B, N]
     box = jnp.stack(
@@ -143,7 +145,7 @@ def candidate_safety(
     width_b = ego_row(log.width)[:, 0]
     # z only steers which roadgraph points are associated (z_stretch) and carries
     # no gradient; take it from the log over the same window.
-    z_bt = ego_row(log.z)[:, t0 + 1 : t0 + 1 + n_steps]
+    z_bt = jax.lax.dynamic_slice_in_dim(ego_row(log.z), t0 + 1, int(n_steps), axis=1)
 
     window = world_traj_bw5[:, 1 : 1 + n_steps, :]
     ego_box = ego_window_boxes(window, length_b, width_b)

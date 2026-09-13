@@ -48,6 +48,7 @@ from waymax import env as waymax_env
 
 from data.postprocess import postprocess_predictions
 from data.preprocess import preprocess_simulator_state
+from data.types import PreprocessBatch
 from simulation.evaluation_utils import infer_goals_from_sim_state
 
 from rl.diffusion_ft.checkpoint import DiffusionCheckpoint
@@ -150,8 +151,15 @@ class DiffusionWaymaxEnv:
         goal_shaping_coef: float = 0.0,
         goal_shaping_discount: float = 0.99,
         goal_shaping_normalize: bool = True,
+        jit_replan: bool = True,
     ):
         self._ckpt = ckpt
+        # Compile each replan's world steps + reward + next-observation preprocess
+        # into one XLA program. Eager, the preprocessor's vmapped lexsort/unique/
+        # cond roadgraph build dispatched op-by-op and was ~0.5 s per replan --
+        # about half of every collection and eval. False keeps the original eager
+        # path for A/B (tests/bench_env_jit.py).
+        self._jit_replan_enabled = bool(jit_replan)
         self._cfg = ckpt.preprocess_cfg
         self._reward_cfg = reward_config or RewardConfig()
         # Route-based reward (V-Max `progression` / `off_route`) needs the SDC's
@@ -178,7 +186,12 @@ class DiffusionWaymaxEnv:
 
         metrics_to_run: tuple[str, ...] = ("overlap", "offroad")
         if self._need_route:
-            # ``sdc_progression`` is the on-route arclength (V-Max `progression`);
+            # ``sdc_progression`` is the route fraction NORMALIZED to [0, 1]
+            # (waymax `metrics/route.py`, FULL_PROGRESS_VALUE): the arclength
+            # from the logged start to the ego's projection, over the arclength
+            # from the logged start to the logged final position. It is NOT
+            # metres -- a `progress` coefficient tuned as if it were per-metre is
+            # off by the route length. (V-Max `progression`.)
             # ``sdc_off_route`` is 0 on-route else the lateral distance to it
             # (V-Max `off_route`). Both are SDC-only metrics (not in the planning
             # env's multi-agent one-hot list) so they come back shaped ``[B]``.
@@ -213,6 +226,12 @@ class DiffusionWaymaxEnv:
         self._jit_step = jax.jit(self._env.step)
         self._jit_metrics = jax.jit(_metric_values)
         self._jit_condition = jax.jit(self._policy.compute_condition)
+        self._jit_features = jax.jit(self._features_core)
+        self._jit_prefix = jax.jit(self._prefix_core, static_argnames=("n_exec",))
+        cfg = self._cfg
+        self._jit_post = jax.jit(
+            lambda norm, aux: postprocess_predictions(norm, aux, cfg)[
+                "trajectory_world_world_dt"].astype(jnp.float32))
 
         # Per-episode batched state.
         self._state: Any = None
@@ -286,16 +305,21 @@ class DiffusionWaymaxEnv:
         the preprocessor observes what the policy actually drove), anchored at
         the current timestep, with each scene's real goal step and goal xy.
         """
-        scratch = _splice_sim_into_log_batched(self._state)
-        self._rng, key = jax.random.split(self._rng)
-        pre_batch, _ = preprocess_simulator_state(
-            scratch,
-            key,
-            self._cfg,
-            anchor_step_override=self.timestep,
-            goal_step_override=self._goal_t_b,   # array: real per-scene goal step
-            goal_xy_override=self._goal_xy_b2,
-        )
+        if self._jit_replan_enabled:
+            raw, aux, self._rng = self._jit_features(
+                self._state, self._rng, self._goal_t_b, self._goal_xy_b2)
+            pre_batch = PreprocessBatch(features=raw, aux=aux)
+        else:
+            scratch = _splice_sim_into_log_batched(self._state)
+            self._rng, key = jax.random.split(self._rng)
+            pre_batch, _ = preprocess_simulator_state(
+                scratch,
+                key,
+                self._cfg,
+                anchor_step_override=self.timestep,
+                goal_step_override=self._goal_t_b,   # array: real per-scene goal step
+                goal_xy_override=self._goal_xy_b2,
+            )
         features = dict(pre_batch.features)
         bsz = self._batch_size
         features["inst_features"] = jnp.zeros((bsz, self._cfg.inst_dim), dtype=jnp.float32)
@@ -304,6 +328,62 @@ class DiffusionWaymaxEnv:
         features["subgoal_valid"] = jnp.zeros((bsz,), dtype=jnp.float32)
         self._last_pre_batch = pre_batch
         return features
+
+    def _features_core(self, state, rng, goal_t_b, goal_xy_b2):
+        """Traced twin of the eager branch of :meth:`_build_features`.
+
+        The anchor step is ``state.timestep`` as a traced scalar rather than the
+        host int, so one executable serves every replan instead of one per t0.
+        Returns ``(raw_features, aux, rng)`` with the same key split as eager."""
+        scratch = _splice_sim_into_log_batched(state)
+        rng, key = jax.random.split(rng)
+        pre_batch, _ = preprocess_simulator_state(
+            scratch, key, self._cfg,
+            anchor_step_override=state.timestep,
+            goal_step_override=goal_t_b,
+            goal_xy_override=goal_xy_b2,
+        )
+        return pre_batch.features, pre_batch.aux, rng
+
+    def _prefix_core(self, state, traj, reward_state, goal_xy_b2, *, n_exec):
+        """Traced twin of the eager world-step loop in :meth:`_execute_prefix`.
+
+        ``lax.scan`` over the ``n_exec`` executed steps (static), so the waymax
+        step + metrics + reward compile once rather than ten times unrolled.
+        ``reward_state`` travels as a tuple (``RewardState`` is not a pytree).
+        Returns ``(state, reward_state, per_step [B,k], comps {key: [B,k]},
+        term_any [B])``."""
+        bsz = traj.shape[0]
+        need_route = self._need_route
+        rcfg = self._reward_cfg
+
+        def body(carry, pose_b5):
+            st, rs = carry
+            action = datatypes.Action(data=pose_b5,
+                                      valid=jnp.ones((bsz, 1), dtype=jnp.bool_))
+            st = self._env.step(st, action)
+            m = self._env.metrics(st)
+            s_b = lateral_b = None
+            if need_route:
+                s_b = jnp.reshape(m["sdc_progression"].value, (bsz,))
+                lateral_b = jnp.reshape(m["sdc_off_route"].value, (bsz,))
+            goal_dist_b = jnp.linalg.norm(_ego_pose_now_b(st) - goal_xy_b2, axis=-1)
+            reward_b, rs_new, term_b, comps = reward_mod.reward_step(
+                rcfg, RewardState(*rs),
+                goal_dist_b=goal_dist_b,
+                overlap_b=jnp.reshape(m["overlap"].value, (bsz,)),
+                offroad_b=jnp.reshape(m["offroad"].value, (bsz,)),
+                s_b=s_b, lateral_b=lateral_b)
+            rs_new = tuple(getattr(rs_new, f.name)
+                           for f in dataclasses.fields(RewardState))
+            return (st, rs_new), (reward_b, term_b, comps)
+
+        xs = jnp.transpose(traj[:, 1:n_exec + 1, :], (1, 0, 2))     # [k, B, 5]
+        (state, reward_state), (rew_kb, term_kb, comps_kb) = jax.lax.scan(
+            body, (state, reward_state), xs)
+        per_step_bk = jnp.transpose(rew_kb, (1, 0))
+        comps_bk = {k: jnp.moveaxis(v, 0, -1) for k, v in comps_kb.items()}
+        return state, reward_state, per_step_bk, comps_bk, jnp.any(term_kb, axis=0)
 
     # ------------------------------------------------------------------ #
     def sample_trajectory(
@@ -345,6 +425,25 @@ class DiffusionWaymaxEnv:
         return jnp.asarray(post["trajectory_world_world_dt"], dtype=jnp.float32)
 
     @property
+    def last_aux(self):
+        """The current replan's postprocess aux (ego frame, time base, extents).
+
+        Constant for one replan and needed to map a normalized candidate back to
+        world coordinates *later* -- the analytic safety fine-tune collects replan
+        contexts in a no-grad rollout and differentiates them after the env has
+        moved on, so it cannot rely on ``_last_pre_batch``.
+        """
+        return self._last_pre_batch.aux
+
+    def norm_to_world_with(self, norm_btd: jax.Array, aux) -> jax.Array:
+        """:meth:`norm_to_world` against an explicitly supplied ``aux``."""
+        if self._jit_replan_enabled:
+            # Nested inside an outer jit/grad this simply inlines.
+            return self._jit_post(jnp.asarray(norm_btd), aux)
+        post = postprocess_predictions(jnp.asarray(norm_btd), aux, self._cfg)
+        return jnp.asarray(post["trajectory_world_world_dt"], dtype=jnp.float32)
+
+    @property
     def policy(self):
         """The frozen policy (scene tokenizer + base denoiser)."""
         return self._policy
@@ -376,57 +475,69 @@ class DiffusionWaymaxEnv:
         done_before_b = self._reward_state.done
         phi_anchor_dist_b = self._reward_state.prev_dist
 
-        for k in range(1, n_exec + 1):
-            pose_b5 = traj[:, k, :]  # target [x, y, yaw, vel_x, vel_y]
-            # env.step -> PlanningAgentDynamics.compute_update tiles BOTH data and
-            # valid over the object axis with the same `x[..., newaxis, :]`, so
-            # valid must carry a trailing axis (``[B, 1]``) to tile consistently
-            # with data (``[B, 5]``); a bare ``[B]`` mis-tiles to ``[num_objects, B]``.
-            action = datatypes.Action(
-                data=pose_b5,
-                valid=jnp.ones((bsz, 1), dtype=jnp.bool_),
-            )
-            self._state = self._jit_step(self._state, action)
-
-            # Single-agent current-step metrics are per world; normalize any
-            # trailing singleton (``[B,1]``) to ``[B]`` so they broadcast cleanly
-            # against goal_dist_b in the reward.
-            s_b = lateral_b = None
-            if self._need_route:
-                overlap_b, offroad_b, s_b, lateral_b = self._jit_metrics(self._state)
-                s_b = jnp.reshape(s_b, (bsz,))          # on-route arclength
-                lateral_b = jnp.reshape(lateral_b, (bsz,))  # 0 on-route else dist
-            else:
-                overlap_b, offroad_b = self._jit_metrics(self._state)
-            overlap_b = jnp.reshape(overlap_b, (bsz,))
-            offroad_b = jnp.reshape(offroad_b, (bsz,))
-            goal_dist_b = jnp.linalg.norm(
-                _ego_pose_now_b(self._state) - self._goal_xy_b2, axis=-1
-            )
-            reward_b, self._reward_state, term_b, comps = reward_mod.reward_step(
-                self._reward_cfg,
-                self._reward_state,
-                goal_dist_b=goal_dist_b,
-                overlap_b=overlap_b,
-                offroad_b=offroad_b,
-                s_b=s_b,
-                lateral_b=lateral_b,
-            )
-            per_step.append(reward_b)
-            term_any_b = term_any_b | term_b
-            for key, val in comps.items():
-                if key.endswith("_flag"):
-                    comp_accum[key] = comp_accum.get(key, jnp.zeros((bsz,), bool)) | val
-                else:
-                    comp_accum[key] = comp_accum.get(key, jnp.zeros((bsz,))) + val
-                comp_steps.setdefault(key, []).append(val)
-
-        if per_step:
-            per_step_bk = jnp.stack(per_step, axis=-1)  # [B, n_exec]
+        if self._jit_replan_enabled and n_exec > 0:
+            rs = tuple(getattr(self._reward_state, f.name)
+                       for f in dataclasses.fields(RewardState))
+            self._state, rs, per_step_bk, per_step_comps, term_any_b = self._jit_prefix(
+                self._state, traj, rs, self._goal_xy_b2, n_exec=n_exec)
+            self._reward_state = RewardState(*rs)
+            comp_accum = {k: (jnp.any(v, axis=-1) if k.endswith("_flag")
+                              else jnp.sum(v, axis=-1))
+                          for k, v in per_step_comps.items()}
             reward_sum_b = jnp.sum(per_step_bk, axis=-1)
         else:
-            per_step_bk = jnp.zeros((bsz, 0), dtype=jnp.float32)
-            reward_sum_b = jnp.zeros((bsz,), dtype=jnp.float32)
+            for k in range(1, n_exec + 1):
+                pose_b5 = traj[:, k, :]  # target [x, y, yaw, vel_x, vel_y]
+                # env.step -> PlanningAgentDynamics.compute_update tiles BOTH data and
+                # valid over the object axis with the same `x[..., newaxis, :]`, so
+                # valid must carry a trailing axis (``[B, 1]``) to tile consistently
+                # with data (``[B, 5]``); a bare ``[B]`` mis-tiles to ``[num_objects, B]``.
+                action = datatypes.Action(
+                    data=pose_b5,
+                    valid=jnp.ones((bsz, 1), dtype=jnp.bool_),
+                )
+                self._state = self._jit_step(self._state, action)
+
+                # Single-agent current-step metrics are per world; normalize any
+                # trailing singleton (``[B,1]``) to ``[B]`` so they broadcast cleanly
+                # against goal_dist_b in the reward.
+                s_b = lateral_b = None
+                if self._need_route:
+                    overlap_b, offroad_b, s_b, lateral_b = self._jit_metrics(self._state)
+                    s_b = jnp.reshape(s_b, (bsz,))          # on-route arclength
+                    lateral_b = jnp.reshape(lateral_b, (bsz,))  # 0 on-route else dist
+                else:
+                    overlap_b, offroad_b = self._jit_metrics(self._state)
+                overlap_b = jnp.reshape(overlap_b, (bsz,))
+                offroad_b = jnp.reshape(offroad_b, (bsz,))
+                goal_dist_b = jnp.linalg.norm(
+                    _ego_pose_now_b(self._state) - self._goal_xy_b2, axis=-1
+                )
+                reward_b, self._reward_state, term_b, comps = reward_mod.reward_step(
+                    self._reward_cfg,
+                    self._reward_state,
+                    goal_dist_b=goal_dist_b,
+                    overlap_b=overlap_b,
+                    offroad_b=offroad_b,
+                    s_b=s_b,
+                    lateral_b=lateral_b,
+                )
+                per_step.append(reward_b)
+                term_any_b = term_any_b | term_b
+                for key, val in comps.items():
+                    if key.endswith("_flag"):
+                        comp_accum[key] = comp_accum.get(key, jnp.zeros((bsz,), bool)) | val
+                    else:
+                        comp_accum[key] = comp_accum.get(key, jnp.zeros((bsz,))) + val
+                    comp_steps.setdefault(key, []).append(val)
+
+            per_step_comps = {k: jnp.stack(v, axis=-1) for k, v in comp_steps.items()}
+            if per_step:
+                per_step_bk = jnp.stack(per_step, axis=-1)  # [B, n_exec]
+                reward_sum_b = jnp.sum(per_step_bk, axis=-1)
+            else:
+                per_step_bk = jnp.zeros((bsz, 0), dtype=jnp.float32)
+                reward_sum_b = jnp.zeros((bsz,), dtype=jnp.float32)
 
         # --- potential-based goal shaping (V-Max BraxWrapper parity) --------- #
         # F = coef * (gamma * Phi(s') * flag - Phi(s)),  Phi(s) = -dist / dist0.
@@ -470,7 +581,7 @@ class DiffusionWaymaxEnv:
             per_step_reward_bk=per_step_bk,
             components=comp_accum,
             trajectory_world_bt5=traj,
-            per_step_components={k: jnp.stack(v, axis=-1) for k, v in comp_steps.items()},
+            per_step_components=per_step_comps,
         )
 
     # ------------------------------------------------------------------ #
@@ -513,8 +624,29 @@ class DiffusionWaymaxEnv:
             axis=-1,
         )
 
+    def ego_sim_world_trajectory(self) -> jax.Array:
+        """The ego's *simulated* world trajectory ``[B, T, 5]``, same layout as
+        :meth:`ego_log_world_trajectory`.
+
+        Pairs with the log one to measure how far the driven rollout has wandered
+        from the demonstration -- the degeneracy diagnostic a single-term safety
+        objective needs, since falling geometric loss and rising drift together
+        mean clearance is being bought by leaving the demonstrated line.
+        """
+        ego_b = _ego_indices_b(self._state)
+        sim = self._state.sim_trajectory
+
+        def ego_row(field: jax.Array) -> jax.Array:
+            return jnp.take_along_axis(field, ego_b[:, None, None], axis=1)[:, 0]
+
+        return jnp.stack(
+            [ego_row(sim.x), ego_row(sim.y), ego_row(sim.yaw),
+             ego_row(sim.vel_x), ego_row(sim.vel_y)],
+            axis=-1,
+        )
+
     # ------------------------------------------------------------------ #
-    def expert_replay_episode(self) -> dict[str, Any]:
+    def expert_replay_episode(self, log_override_bt5: jax.Array | None = None) -> dict[str, Any]:
         """Roll the whole episode by feeding the ego's *logged* poses as actions.
 
         Deterministic (no sampling): at each replan the candidate is the log
@@ -523,7 +655,14 @@ class DiffusionWaymaxEnv:
         permutation tests. Returns aggregated metrics, per-step rewards, and the
         episode return.
         """
-        log_world_bt5 = self.ego_log_world_trajectory()  # [B, T, 5]
+        # `log_override_bt5` replaces the human log with a caller-supplied [B,T,5]
+        # in the same `x, y, yaw, vel_x, vel_y` layout. Used by the log-replay
+        # collision probe to re-run the demonstration under a small perturbation:
+        # every non-ego agent is on rails (controlled_object=SDC), so this measures
+        # how much of the collision rate is caused by the SDC deviating from the
+        # path the other agents were recorded around, rather than by bad driving.
+        log_world_bt5 = (self.ego_log_world_trajectory() if log_override_bt5 is None
+                         else jnp.asarray(log_override_bt5, dtype=jnp.float32))  # [B, T, 5]
         horizon = int(log_world_bt5.shape[1])
         bsz = self._batch_size
 

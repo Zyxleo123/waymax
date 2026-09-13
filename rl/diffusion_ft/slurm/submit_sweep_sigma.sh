@@ -57,11 +57,20 @@ echo "Wrote env file: $ENV_FILE"; cat "$ENV_FILE"
 # `general` runs qos_general as its default QOS, so no --qos flag is needed.
 DFT_PARTITION="${DFT_PARTITION:-general}"
 DFT_QOS="${DFT_QOS:-}"
-DFT_NODELIST="${DFT_NODELIST:-gpu28}"
+# No-colon `-`: an explicitly EMPTY DFT_NODELIST must survive as "no pin". With
+# `:-` an empty override silently reverted to gpu28, which then contradicted a
+# gpu28 exclusion (`--nodelist=gpu28 --exclude=gpu28` -> an unsatisfiable job).
+# Same idiom as DFT_EXCLUDE in sweep_reward.sh and DFT_SHARD_GLOB in
+# sweep_expert_ratio.sh.
+DFT_NODELIST="${DFT_NODELIST-gpu28}"
 SB_FLAGS=(--partition="$DFT_PARTITION")
 [[ -n "$DFT_QOS" ]]      && SB_FLAGS+=(--qos="$DFT_QOS")
 [[ -n "$DFT_NODELIST" ]] && SB_FLAGS+=(--nodelist="$DFT_NODELIST")
 [[ -n "${DFT_EXCLUDE:-}" ]] && SB_FLAGS+=(--exclude="$DFT_EXCLUDE")
+# DFT_TIME: an honest, short wall clock is what makes the job backfill-eligible
+# into a reserved node's gap. The sweep is resumable (a point whose
+# rollouts.jsonl exists is skipped), so under-asking costs a resubmit, not a run.
+[[ -n "${DFT_TIME:-}" ]] && SB_FLAGS+=(--time="$DFT_TIME")
 echo "sbatch flags: ${SB_FLAGS[*]}"
 
 # Scrub SLURM_* so submitting from inside an allocation cannot leak this job's

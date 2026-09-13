@@ -42,6 +42,27 @@ class RewardConfig:
     a weight is added here, mirror it there. See ``waymax_env`` for the long-form
     rationale on each choice (one-time collision/offroad charges, bounded route
     indicators, etc.).
+
+    Two of the fields here exist to fix a *ranking* defect rather than to retune
+    a magnitude, and are worth reading together (see
+    ``tests/test_reward_ranking.py``):
+
+    * ``offroad_entry`` / ``collision_entry`` -- an extra charge levied on each
+      on-road -> off-road (or no-contact -> contact) **transition**. A per-step
+      charge (``offroad_per_step``) is paid for making an excursion *shorter*;
+      only an edge charge is paid for not taking it at all. The three modes are
+      the three ways to price the same event: charged-once (an entry toll on the
+      *first* excursion only -- farmable, since the second is free), per-step
+      (dwell only -- the marginal value of the last off-road step equals that of
+      any interior one, so the optimizer buys shortening, never avoidance), and
+      entry+dwell, which prices both the decision to leave the road and the time
+      spent off it.
+    * ``clean_goal_bonus`` -- pay ``goal_bonus`` only to an episode that reaches
+      the goal having never gone off-road or collided. This is what puts a
+      discontinuity at "zero violations", which is where the solve criterion
+      (reached AND never offroad AND never collided) has its own. Without it the
+      reward is a smooth function of a quantity whose objective value is a step
+      function, and no coefficient can fix that.
     """
 
     progress: float = 1.0
@@ -55,6 +76,9 @@ class RewardConfig:
     terminate_on_offroad: bool = False
     offroad_per_step: bool = False
     collision_per_step: bool = False
+    offroad_entry: float = 0.0
+    collision_entry: float = 0.0
+    clean_goal_bonus: bool = False
     route_reward: bool = False
     lateral_penalty: float = 0.5
     off_route_threshold_m: float | None = None
@@ -73,6 +97,11 @@ class RewardState:
     * ``charged_offroad``    -- whether the one-time offroad penalty was paid.
       Still tracked under ``offroad_per_step`` (the field keeps the pytree shape
       constant so the JITted rollout does not retrace) but unused there.
+    * ``was_offroad``        -- the *instantaneous* offroad flag at the previous
+      step (not the monotone ``charged_offroad``). Their difference is the
+      rising edge that ``offroad_entry`` charges: ``off_b & ~was_offroad``
+      fires once per excursion, however long each excursion runs.
+    * ``was_collision``      -- ditto for contact.
     * ``done``               -- whether the episode has already terminated. Once
       set, subsequent steps contribute zero reward (an ended world is frozen),
       so per-step rewards still sum to the episode return.
@@ -82,6 +111,8 @@ class RewardState:
     prev_s: jax.Array
     charged_collision: jax.Array
     charged_offroad: jax.Array
+    was_collision: jax.Array
+    was_offroad: jax.Array
     done: jax.Array
 
 
@@ -99,6 +130,10 @@ def init_reward_state(
         prev_s=init_s_b,
         charged_collision=zeros_bool,
         charged_offroad=zeros_bool,
+        # The ego starts on-road and out of contact, so the first off-road /
+        # colliding step is genuinely a rising edge and pays the entry charge.
+        was_collision=zeros_bool,
+        was_offroad=zeros_bool,
         done=zeros_bool,
     )
 
@@ -187,9 +222,36 @@ def reward_step(
         pay_offroad_b = off_b
     else:
         pay_offroad_b = off_b & (~state.charged_offroad)
-    collision_term_b = cfg.collision * pay_collision_b.astype(jnp.float32)
-    offroad_term_b = cfg.offroad * pay_offroad_b.astype(jnp.float32)
-    goal_term_b = cfg.goal_bonus * reached_b.astype(jnp.float32)
+    # Rising-edge (entry) charges. `charged_*` is monotone, so it cannot express
+    # "started a *new* excursion"; `was_*` is the previous step's instantaneous
+    # flag, and `flag & ~was_flag` fires exactly once per excursion. This is the
+    # only term whose value depends on the excursion COUNT rather than on the
+    # total dwell, and so the only one an optimizer can collect by avoiding an
+    # excursion rather than by shortening one.
+    entry_offroad_b = off_b & (~state.was_offroad)
+    entry_collision_b = collision_b & (~state.was_collision)
+    collision_term_b = (
+        cfg.collision * pay_collision_b.astype(jnp.float32)
+        + cfg.collision_entry * entry_collision_b.astype(jnp.float32)
+    )
+    offroad_term_b = (
+        cfg.offroad * pay_offroad_b.astype(jnp.float32)
+        + cfg.offroad_entry * entry_offroad_b.astype(jnp.float32)
+    )
+
+    # Clean-gated goal bonus. `charged_*` carries "ever violated *before* this
+    # step"; OR in the current step's flag so arriving at the goal while off-road
+    # does not count as clean. Gating here (rather than adding a separate terminal
+    # term) keeps the bonus inside the existing `goal_bonus` component, so the
+    # six-way reward decomposition and its sum-to-return invariant are unchanged.
+    ever_offroad_b = state.charged_offroad | off_b
+    ever_collision_b = state.charged_collision | collision_b
+    clean_b = ~(ever_offroad_b | ever_collision_b)
+    if cfg.clean_goal_bonus:
+        pay_goal_b = reached_b & clean_b
+    else:
+        pay_goal_b = reached_b
+    goal_term_b = cfg.goal_bonus * pay_goal_b.astype(jnp.float32)
 
     raw_reward_b = (
         progress_b
@@ -217,8 +279,10 @@ def reward_step(
     new_state = RewardState(
         prev_dist=goal_dist_b,
         prev_s=new_prev_s,
-        charged_collision=state.charged_collision | collision_b,
-        charged_offroad=state.charged_offroad | off_b,
+        charged_collision=ever_collision_b,
+        charged_offroad=ever_offroad_b,
+        was_collision=collision_b,
+        was_offroad=off_b,
         done=state.done | terminated_b,
     )
 
@@ -232,5 +296,12 @@ def reward_step(
         "collision_flag": collision_b,
         "offroad_flag": off_b,
         "reached_flag": reached_b,
+        # Rising edges and the running cleanliness bit, for diagnostics. All are
+        # `_flag` keys, so callers that accumulate components OR them (rather
+        # than summing them into the return) and the reward decomposition above
+        # stays exactly six additive terms.
+        "offroad_entry_flag": entry_offroad_b,
+        "collision_entry_flag": entry_collision_b,
+        "clean_flag": clean_b,
     }
     return reward_b, new_state, terminated_b, components

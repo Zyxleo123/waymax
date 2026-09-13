@@ -54,6 +54,14 @@ DFT_EVAL_SEEDS="${DFT_EVAL_SEEDS:-1}"   # >1 averages eval over N seeds (reports
 DFT_CLEAR_CACHES="${DFT_CLEAR_CACHES:-0}"   # 1 = jax.clear_caches() each iter (leak probe/stopgap)
 DFT_PROFILE="${DFT_PROFILE:-0}"   # 1 = per-phase timing (collect sample/env, update)
 DFT_RESUME="${DFT_RESUME:-}"          # save() ckpt dir to restore actor+critic and continue
+DFT_CRITIC_INIT="${DFT_CRITIC_INIT:-}"  # save() ckpt dir to restore ONLY the critic (actor stays base)
+# One ckpt is ~606 MB (actor + critic + both Adam optimizer states). At save_every
+# 10 a 500-iter run writes 50 = ~30 GB, and a 6-arm sweep ~180 GB; nothing pruned
+# them until 1075 had piled up (~634 GB) and every arm of the 20260830 ratio sweep
+# died 75-157 iters in on "Disk quota exceeded". Save less often, keep only the
+# newest few. train_log.jsonl is never pruned.
+DFT_SAVE_EVERY="${DFT_SAVE_EVERY:-50}"
+DFT_KEEP_CKPTS="${DFT_KEEP_CKPTS:-3}"   # 0 = keep every checkpoint (the old behavior)
 DFT_ITER_OFFSET="${DFT_ITER_OFFSET:-0}"   # add to logged iter so a resumed curve continues
 DFT_PG_SCALE="${DFT_PG_SCALE:-0}"   # 0 = auto (channels*prefix_len)
 # Equal sample/log-prob sigma floor (the actor requires equality). 0.1 adds ~1sigma
@@ -92,6 +100,32 @@ DFT_REWARD_OFFROAD="${DFT_REWARD_OFFROAD:--5.0}"
 DFT_REWARD_COLLISION="${DFT_REWARD_COLLISION:--10.0}"
 DFT_REWARD_GOAL_BONUS="${DFT_REWARD_GOAL_BONUS:-10.0}"
 DFT_REWARD_OFF_ROUTE="${DFT_REWARD_OFF_ROUTE:--0.2}"
+# ---- reward ORDERING knobs (see rl/diffusion_ft/tests/test_reward_ranking.py) --
+# The three flags below are the ones that change which trajectories the reward
+# RANKS highest, as opposed to how hard it pushes. Every recipe shipped before
+# them scores a 2-step corner cut above a clean prompt arrival, and scores never
+# reaching the goal above reaching it quickly -- which is why every sweep so far
+# moved the return without moving the solve rate.
+#
+# Entry charge: levied on each on-road -> off-road transition. A per-step charge
+# is paid for making an excursion shorter; the charged-once form makes the second
+# excursion free. Only this term is paid for not leaving the road at all. Pair
+# with DFT_OFFROAD_PER_STEP=1 and a small DFT_REWARD_OFFROAD (~-0.1).
+DFT_REWARD_OFFROAD_ENTRY="${DFT_REWARD_OFFROAD_ENTRY:-0.0}"
+# The contact twin; only meaningful with DFT_TERMINATE_COLLISION=0.
+DFT_REWARD_COLLISION_ENTRY="${DFT_REWARD_COLLISION_ENTRY:-0.0}"
+# Pay the goal bonus only to an episode that arrives having never gone off-road
+# or collided -- i.e. only to a scene the solve metric counts. Puts the reward's
+# discontinuity where the solve criterion's already is.
+DFT_CLEAN_GOAL_BONUS="${DFT_CLEAN_GOAL_BONUS:-0}"
+# 1 (default, and what every run so far used) = progress paid per world step in
+# which the route fraction advanced: a DURATION reward, total ~progress x episode
+# length, so arriving at the goal forfeits the remainder. 0 = progress*(s-prev_s),
+# telescoping to progress x (fraction of route covered), independent of duration.
+# waymax sdc_progression is normalized to [0,1], so the telescoping form wants a
+# coefficient sized against the goal bonus (~5.0), NOT the 0.2 the indicator uses.
+DFT_PROGRESSION_INDICATOR="${DFT_PROGRESSION_INDICATOR:-1}"
+DFT_REWARD_STEP_PENALTY="${DFT_REWARD_STEP_PENALTY:-0.0}"
 DFT_GOAL_SHAPING_COEF="${DFT_GOAL_SHAPING_COEF:-0.0}"
 DFT_GOAL_SHAPING_NORMALIZE="${DFT_GOAL_SHAPING_NORMALIZE:-1}"
 DFT_NUM_PATHS="${DFT_NUM_PATHS:-10}"
@@ -102,10 +136,21 @@ DFT_NUM_POINTS_PER_PATH="${DFT_NUM_POINTS_PER_PATH:-300}"
 # held-out eval set) instead of one memorized batch of DFT_INDICES. Needs the
 # byte-offset indexes: bash rl/diffusion_ft/slurm/submit_build_womd_offsets.sh
 DFT_SHARD_GLOB="${DFT_SHARD_GLOB:-}"
+# Restrict corpus sampling to a selected POOL of scene ids (a hard_womd.json from
+# rl/diffusion_ft/tools/select_hard_womd.py). Empty = uniform over the glob, which
+# on WOMD means the base policy already solves ~95-98% and there is no headroom to
+# read a result in. Requires DFT_SHARD_GLOB and the SAME glob it was scanned with.
+DFT_SCENE_IDS_JSON="${DFT_SCENE_IDS_JSON:-}"
 DFT_INDEX_DIR="${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
 DFT_SCENES_PER_ITER="${DFT_SCENES_PER_ITER:-32}"
 DFT_RESAMPLE_EVERY="${DFT_RESAMPLE_EVERY:-1}"
 DFT_EVAL_SCENES="${DFT_EVAL_SCENES:-32}"
+# Additionally eval the FIXED named splits (failure/success held-out +
+# failure/success train, each capped) from submit_build_splits.sh's
+# eval_splits.json, logged under per-split `<split>/` prefixes. Needs
+# DFT_SHARD_GLOB = the glob the scan used.
+DFT_EVAL_SPLITS_JSON="${DFT_EVAL_SPLITS_JSON:-}"
+DFT_EVAL_SPLIT_CAP="${DFT_EVAL_SPLIT_CAP:-48}"
 DFT_DATA_SEED="${DFT_DATA_SEED:-0}"
 DFT_PREFETCH="${DFT_PREFETCH:-1}"
 # ---- expert (behavior-cloning) steps ----------------------------------------
@@ -126,7 +171,8 @@ echo "expert_steps=$DFT_EXPERT_STEPS expert_lr=$DFT_EXPERT_LR" \
 if [[ -n "$DFT_SHARD_GLOB" ]]; then
   echo "data=full-corpus glob=$DFT_SHARD_GLOB scenes/iter=$DFT_SCENES_PER_ITER" \
        "resample_every=$DFT_RESAMPLE_EVERY eval_scenes=$DFT_EVAL_SCENES" \
-       "data_seed=$DFT_DATA_SEED index_dir=$DFT_INDEX_DIR"
+       "data_seed=$DFT_DATA_SEED index_dir=$DFT_INDEX_DIR" \
+       "pool=${DFT_SCENE_IDS_JSON:-none}"
 else
   echo "data=fixed indices=$DFT_INDICES tfrecord=$DFT_TFRECORD"
 fi
@@ -158,6 +204,9 @@ RESUME_ARGS=(--iter_offset "$DFT_ITER_OFFSET")
 if [[ -n "$DFT_RESUME" ]]; then
   RESUME_ARGS+=(--resume "$DFT_RESUME")
 fi
+if [[ -n "$DFT_CRITIC_INIT" ]]; then
+  RESUME_ARGS+=(--critic_init "$DFT_CRITIC_INIT")
+fi
 
 PREFETCH_ARGS=(--prefetch)
 [[ "$DFT_PREFETCH" == "0" ]] && PREFETCH_ARGS=(--no-prefetch)
@@ -168,6 +217,9 @@ DATA_ARGS=("${PREFETCH_ARGS[@]}" --index_dir "$DFT_INDEX_DIR"
            --eval_scenes "$DFT_EVAL_SCENES"
            --data_seed "$DFT_DATA_SEED")
 [[ -n "$DFT_SHARD_GLOB" ]] && DATA_ARGS+=(--shard_glob "$DFT_SHARD_GLOB")
+[[ -n "$DFT_SCENE_IDS_JSON" ]] && DATA_ARGS+=(--scene_ids_json "$DFT_SCENE_IDS_JSON")
+[[ -n "$DFT_EVAL_SPLITS_JSON" ]] && DATA_ARGS+=(--eval_splits_json "$DFT_EVAL_SPLITS_JSON"
+                                               --eval_split_cap "$DFT_EVAL_SPLIT_CAP")
 
 WANDB_ARGS=(--no-wandb)
 if [[ "$DFT_WANDB" != "0" ]]; then
@@ -189,14 +241,22 @@ TERMCOL_ARGS=(--terminate_on_collision)
 [[ "$DFT_TERMINATE_COLLISION" == "0" ]] && TERMCOL_ARGS=(--no-terminate_on_collision)
 SHAPNORM_ARGS=(--goal_shaping_normalize)
 [[ "$DFT_GOAL_SHAPING_NORMALIZE" == "0" ]] && SHAPNORM_ARGS=(--no-goal_shaping_normalize)
+CLEANGOAL_ARGS=(--no-clean_goal_bonus)
+[[ "$DFT_CLEAN_GOAL_BONUS" != "0" ]] && CLEANGOAL_ARGS=(--clean_goal_bonus)
+PROGIND_ARGS=(--progression_indicator)
+[[ "$DFT_PROGRESSION_INDICATOR" == "0" ]] && PROGIND_ARGS=(--no-progression_indicator)
 REWARD_ARGS=(
   "${ROUTE_ARGS[@]}" "${TERMOFF_ARGS[@]}" "${PERSTEP_ARGS[@]}" "${SHAPNORM_ARGS[@]}"
   "${COLSTEP_ARGS[@]}" "${TERMCOL_ARGS[@]}"
+  "${CLEANGOAL_ARGS[@]}" "${PROGIND_ARGS[@]}"
   --reward_progress "$DFT_REWARD_PROGRESS"
   --reward_offroad "$DFT_REWARD_OFFROAD"
   --reward_collision "$DFT_REWARD_COLLISION"
   --reward_goal_bonus "$DFT_REWARD_GOAL_BONUS"
   --reward_off_route "$DFT_REWARD_OFF_ROUTE"
+  --reward_offroad_entry "$DFT_REWARD_OFFROAD_ENTRY"
+  --reward_collision_entry "$DFT_REWARD_COLLISION_ENTRY"
+  --reward_step_penalty "$DFT_REWARD_STEP_PENALTY"
   --goal_shaping_coef "$DFT_GOAL_SHAPING_COEF"
   --num_paths "$DFT_NUM_PATHS"
   --num_points_per_path "$DFT_NUM_POINTS_PER_PATH"
@@ -207,7 +267,11 @@ echo "reward: route=$DFT_ROUTE_REWARD term_offroad=$DFT_TERMINATE_OFFROAD" \
      "term_collision=$DFT_TERMINATE_COLLISION" \
      "progress=$DFT_REWARD_PROGRESS offroad=$DFT_REWARD_OFFROAD" \
      "collision=$DFT_REWARD_COLLISION goal=$DFT_REWARD_GOAL_BONUS" \
-     "off_route=$DFT_REWARD_OFF_ROUTE shaping=$DFT_GOAL_SHAPING_COEF"
+     "off_route=$DFT_REWARD_OFF_ROUTE shaping=$DFT_GOAL_SHAPING_COEF" \
+     "offroad_entry=$DFT_REWARD_OFFROAD_ENTRY" \
+     "collision_entry=$DFT_REWARD_COLLISION_ENTRY" \
+     "clean_goal=$DFT_CLEAN_GOAL_BONUS prog_indicator=$DFT_PROGRESSION_INDICATOR" \
+     "step_penalty=$DFT_REWARD_STEP_PENALTY"
 
 "$PYTHON" -m rl.diffusion_ft.train --method dppo \
   --ckpt "$DFT_CKPT" --tfrecord "$DFT_TFRECORD" --indices "$DFT_INDICES" \
@@ -218,6 +282,7 @@ echo "reward: route=$DFT_ROUTE_REWARD term_offroad=$DFT_TERMINATE_OFFROAD" \
   --gae_lambda "$DFT_GAE_LAMBDA" --ppo_epochs "$DFT_PPO_EPOCHS" \
   --value_epochs "$DFT_VALUE_EPOCHS" --pg_scale "$DFT_PG_SCALE" \
   --warmup_iters "$DFT_WARMUP" --eval_every "$DFT_EVAL_EVERY" \
+  --save_every "$DFT_SAVE_EVERY" --keep_last_ckpts "$DFT_KEEP_CKPTS" \
   --eval_seeds "$DFT_EVAL_SEEDS" \
   --sigma_sample_floor "$DFT_SIGMA_FLOOR" --sigma_logprob_floor "$DFT_SIGMA_FLOOR" \
   --target_kl "$DFT_TARGET_KL" \

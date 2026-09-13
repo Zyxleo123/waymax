@@ -137,6 +137,32 @@ def compute_world_dt_seconds(state: Mapping[str, np.ndarray], fallback_dt: float
 	return np.where(any_valid, first_dt, np.full_like(first_dt, fallback_dt, dtype=np.float32)).astype(np.float32)
 
 
+def ego_source_time_seconds(
+	ts_bt: np.ndarray,
+	anchor_step_b: np.ndarray,
+	world_dt_b: np.ndarray,
+	fallback_dt: float = 0.1,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+	"""NumPy mirror of `data.preprocess.ego_source_time_seconds`.
+
+	Kept in step with the JAX version deliberately: this file is the cached path,
+	and a time base that differs between the two would make a cached batch and a
+	live batch disagree about what the human demonstration was. See the JAX
+	docstring for the measurement (timestamps 45.08 m vs step-index 0.000 m).
+	"""
+	anchor_ts_b = np.take_along_axis(ts_bt, anchor_step_b[:, None], axis=1)[:, 0]
+	stamped = ts_bt - anchor_ts_b[:, None]
+
+	n_t = int(ts_bt.shape[1])
+	steps = (np.arange(n_t, dtype=np.float32)[None, :]
+	         - anchor_step_b[:, None].astype(np.float32))
+	dt_b = np.where(world_dt_b > 0.0, world_dt_b, fallback_dt)
+	indexed = steps * dt_b[:, None]
+
+	usable = np.all(np.diff(ts_bt, axis=1) > 0.0, axis=1)
+	return np.where(usable[:, None], stamped, indexed), anchor_ts_b, usable
+
+
 def sample_anchor_step(
 	state: Mapping[str, np.ndarray],
 	rng: np.random.Generator,
@@ -461,8 +487,8 @@ def _preprocess_single_cached_scenario(
 
 	ego_world_btd_full = np.stack([x_bt, y_bt, vx_bt, vy_bt, yaw_bt], axis=-1)
 
-	anchor_ts_b = np.take_along_axis(ts_bt, anchor_step_b[:, None], axis=1)[:, 0]
-	src_t_b = ts_bt - anchor_ts_b[:, None]
+	src_t_b, anchor_ts_b, _ = ego_source_time_seconds(
+		ts_bt, anchor_step_b, world_dt_b, cfg.world_dt_fallback)
 	model_t = np.arange(cfg.predict_horizon + 1, dtype=np.float32) * float(cfg.model_dt)
 	ego_resampled_world = resample_trajectory_timebase_numpy(ego_world_btd_full, src_t_b, model_t, yaw_index=4)
 
@@ -581,8 +607,8 @@ def _preprocess_single_cached_scenario_with_history(
 
 	ego_world_btd_full = np.stack([x_bt, y_bt, vx_bt, vy_bt, yaw_bt], axis=-1)
 
-	anchor_ts_b = np.take_along_axis(ts_bt, anchor_step_b[:, None], axis=1)[:, 0]
-	src_t_b = ts_bt - anchor_ts_b[:, None]
+	src_t_b, anchor_ts_b, _ = ego_source_time_seconds(
+		ts_bt, anchor_step_b, world_dt_b, cfg.world_dt_fallback)
 	model_t = np.arange(cfg.predict_horizon + 1, dtype=np.float32) * float(cfg.model_dt)
 	ego_resampled_world = resample_trajectory_timebase_numpy(ego_world_btd_full, src_t_b, model_t, yaw_index=4)
 

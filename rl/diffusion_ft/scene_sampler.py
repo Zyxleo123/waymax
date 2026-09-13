@@ -167,19 +167,81 @@ class SceneSampler:
                  include_sdc_paths: bool = False, num_paths: int = 45,
                  num_points_per_path: int = 800, max_num_rg_points: int = 30000,
                  seed: int = 0, prefetch: bool = True,
-                 index_dir: str | None = DEFAULT_INDEX_DIR):
+                 index_dir: str | None = DEFAULT_INDEX_DIR,
+                 scene_ids: Sequence[int] | None = None,
+                 scene_groups: Sequence[Sequence[int]] | None = None,
+                 group_weights: Sequence[float] | None = None):
         self.index = ShardIndex(shard_glob, index_dir=index_dir)
         self.batch_size = int(batch_size)
         self.rng = np.random.default_rng(int(seed))
+
+        # Optional POOL restriction: draw only from these global scene ids instead
+        # of all `index.total`. This is how a *selected* corpus (e.g. the
+        # headroom-scanned hard-WOMD pool from tools/select_hard_womd.py) is
+        # trained on without materializing a separate tfrecord -- the ids address
+        # the same shards through the same byte-offset index.
+        #
+        # Uniform sampling over the whole corpus is the default and is unchanged.
+        # A pool is a real distribution shift, so it is stated in describe() and
+        # must be a deliberate flag, never a silent default.
+        # Optional BALANCED sampling: `scene_groups` are the pool's disjoint
+        # parts (failures / successes) and `group_weights` the share of every
+        # training batch each one gets. Without it a union pool is sampled
+        # uniformly, so a 400-scene failure group inside a 23k-scene success pool
+        # is 1.7% of the gradient -- present in the pool and absent from the
+        # training signal. Weights are a per-batch quota, not a probability: the
+        # composition of every batch is then identical, which is what makes the
+        # failure/success trade-off in the curve attributable.
+        self.groups: list[np.ndarray] | None = None
+        self.group_weights: np.ndarray | None = None
+        if scene_groups is not None:
+            groups = [np.unique(np.asarray(list(g), dtype=np.int64))
+                      for g in scene_groups]
+            if any(g.size == 0 for g in groups):
+                raise ValueError("scene_groups contains an empty group")
+            w = (np.ones(len(groups), dtype=np.float64) if group_weights is None
+                 else np.asarray(list(group_weights), dtype=np.float64))
+            if w.size != len(groups):
+                raise ValueError(
+                    f"group_weights has {w.size} values for {len(groups)} groups")
+            if not np.all(w >= 0) or w.sum() <= 0:
+                raise ValueError("group_weights must be non-negative and not all zero")
+            self.groups = groups
+            self.group_weights = w / w.sum()
+            if scene_ids is None:
+                scene_ids = np.concatenate(groups)
+
+        self.pool: np.ndarray | None = None
+        if scene_ids is not None:
+            pool = np.unique(np.asarray(list(scene_ids), dtype=np.int64))
+            if pool.size == 0:
+                raise ValueError("scene_ids was given but empty")
+            if pool.min() < 0 or pool.max() >= self.index.total:
+                raise ValueError(
+                    f"scene_ids out of range for this shard set: "
+                    f"[{int(pool.min())}, {int(pool.max())}] vs total {self.index.total}. "
+                    "The ids are positions in THIS glob's concatenated shard order, "
+                    "so they only mean anything against the glob they were scanned "
+                    "with.")
+            need = int(batch_size) + int(eval_size)
+            if pool.size < need:
+                raise ValueError(
+                    f"pool has {pool.size} scenes but batch_size+eval_size = {need}; "
+                    "training draws distinct scenes and would loop forever.")
+            self.pool = pool
         self._cfg_kwargs = dict(
             include_sdc_paths=include_sdc_paths, num_paths=num_paths,
             num_points_per_path=num_points_per_path, max_num_rg_points=max_num_rg_points,
         )
         self._train_cfg = build_ds_cfg(batch_dims=(self.batch_size,), **self._cfg_kwargs)
 
-        # Held-out eval ids, drawn once and removed from the training pool.
+        # Held-out eval ids, drawn once and removed from the training pool. Drawn
+        # from the SAME distribution the training stream sees -- the pool when one
+        # is set -- so the eval number stays a held-out read of the task being
+        # trained on rather than of an easier corpus.
+        _source = self.pool if self.pool is not None else self.index.total
         self.eval_ids: np.ndarray = (
-            self.rng.choice(self.index.total, size=int(eval_size), replace=False)
+            self.rng.choice(_source, size=int(eval_size), replace=False)
             if eval_size > 0 else np.zeros(0, dtype=np.int64)
         )
         self._eval_set = set(int(i) for i in self.eval_ids.tolist())
@@ -201,17 +263,113 @@ class SceneSampler:
             self._thread.start()
 
     # ------------------------------------------------------------------ #
+    def _group_quota(self, n: int) -> list[int]:
+        """Split a batch of ``n`` across the groups by ``group_weights``.
+
+        Largest-remainder, so the quotas sum to exactly ``n`` and a group whose
+        share rounds below 1 still gets a scene whenever it is the largest
+        remainder -- rounding each share independently would silently drop the
+        minority group at small batch sizes.
+        """
+        w = self.group_weights
+        exact = w * n
+        quota = np.floor(exact).astype(np.int64)
+        short = int(n - quota.sum())
+        if short > 0:
+            order = np.argsort(-(exact - quota))
+            quota[order[:short]] += 1
+        return [int(q) for q in quota]
+
+    def _draw_from(self, source, n: int, taken: set[int]) -> list[int]:
+        """``n`` distinct ids from ``source``, skipping ``taken`` and eval ids."""
+        out: list[int] = []
+        if n <= 0:
+            return out
+        if isinstance(source, np.ndarray):
+            # A group smaller than its own quota makes the draw loop forever
+            # (distinct ids, none held out), which on a compute node looks like a
+            # hung job with no error. Fail at the first batch instead.
+            avail = int(np.isin(source, list(self._eval_set), invert=True).sum())
+            if avail < n:
+                raise ValueError(
+                    f"a scene group has {avail} drawable scenes (after held-out "
+                    f"eval ids) but its per-batch quota is {n}; lower "
+                    f"--scenes_per_iter, --eval_scenes, or the group's weight")
+        while len(out) < n:
+            k = 2 * (n - len(out)) + 8
+            cand = (self.rng.choice(source, size=k) if isinstance(source, np.ndarray)
+                    else self.rng.integers(0, source, size=k))
+            for c in cand.tolist():
+                c = int(c)
+                if c in self._eval_set or c in taken:
+                    continue
+                taken.add(c)
+                out.append(c)
+                if len(out) == n:
+                    break
+        return out
+
     def _draw_ids(self, n: int) -> np.ndarray:
-        """``n`` distinct global scene ids, none of them held-out eval scenes."""
+        """``n`` distinct global scene ids, none of them held-out eval scenes.
+
+        With ``scene_groups`` set, every batch carries each group's quota exactly;
+        otherwise the pool (or the whole corpus) is sampled uniformly.
+        """
+        if self.groups is not None:
+            taken: set[int] = set()
+            out: list[int] = []
+            for g, q in zip(self.groups, self._group_quota(n)):
+                out.extend(self._draw_from(g, q, taken))
+            self.rng.shuffle(out)
+            return np.asarray(out, dtype=np.int64)
         out: list[int] = []
         while len(out) < n:
-            cand = self.rng.integers(0, self.index.total, size=2 * (n - len(out)) + 8)
+            if self.pool is not None:
+                cand = self.rng.choice(self.pool, size=2 * (n - len(out)) + 8)
+            else:
+                cand = self.rng.integers(0, self.index.total, size=2 * (n - len(out)) + 8)
             for c in cand.tolist():
                 if c not in self._eval_set and c not in out:
                     out.append(int(c))
                     if len(out) == n:
                         break
         return np.asarray(out, dtype=np.int64)
+
+    def group_labels(self, ids: Sequence[int]) -> np.ndarray:
+        """Per-id index into ``scene_groups`` (-1 for an id in no group).
+
+        Derived from the ids rather than recorded at draw time on purpose: the
+        groups are disjoint id-sets (the trainer refuses overlapping
+        ``--train_splits``), so membership is recoverable from the batch alone.
+        That keeps ``_draw_ids``'s shuffle and the prefetch queue's (state, ids)
+        protocol untouched -- a labels array threaded through the queue would have
+        to stay aligned with the shuffle across a thread boundary, which is a
+        silent-mislabelling bug waiting to happen (see the ES runner, which
+        misnamed scenes for exactly that reason).
+        """
+        arr = np.asarray(list(ids), dtype=np.int64)
+        out = np.full(arr.shape, -1, dtype=np.int64)
+        if self.groups is None:
+            return out
+        for gi, g in enumerate(self.groups):
+            out[np.isin(arr, g)] = gi
+        return out
+
+    def load_explicit(self, ids: Sequence[int]) -> Any:
+        """Load EXACTLY these global scene ids, in order, as one batched state.
+
+        For eval on a fixed, named split (failure / success held-out) rather than
+        a random training draw: the ids are positions in this glob's concatenated
+        shard order, so they mean the same scenes the scan labelled. Builds a
+        one-off ds_cfg sized to the request so any split length is loadable; the
+        object/roadgraph dims match the train/eval cfg (same ``_cfg_kwargs``), so
+        the env's ``max_num_objects`` still fits.
+        """
+        ids = [int(i) for i in ids]
+        if not ids:
+            raise ValueError("load_explicit got an empty id list")
+        cfg = build_ds_cfg(batch_dims=(len(ids),), **self._cfg_kwargs)
+        return self._load_ids(ids, cfg)
 
     def _load_ids(self, ids: Iterable[int], ds_cfg) -> Any:
         t0 = time.time()
@@ -265,5 +423,13 @@ class SceneSampler:
         return self._eval_state
 
     def describe(self) -> str:
-        return (f"{len(self.index.paths)} shards, {self.index.total} scenes, "
-                f"train batch {self.batch_size}, held-out eval {len(self.eval_ids)}")
+        scope = (f"{self.index.total} scenes" if self.pool is None
+                 else f"POOL {self.pool.size} of {self.index.total} scenes")
+        bal = ""
+        if self.groups is not None:
+            bal = ("  balanced " + "/".join(
+                f"{q}of{g.size}" for g, q in zip(
+                    self.groups, self._group_quota(self.batch_size))))
+        return (f"{len(self.index.paths)} shards, {scope}, "
+                f"train batch {self.batch_size}, held-out eval {len(self.eval_ids)}"
+                f"{bal}")

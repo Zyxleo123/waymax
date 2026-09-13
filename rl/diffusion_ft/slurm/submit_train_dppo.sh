@@ -59,6 +59,52 @@
 #
 # Verified by rl/diffusion_ft/tests/test_collision_per_step.py (CPU, seconds).
 #
+# ---- Reward ORDERING: the recipe to actually run -----------------------------
+# Every recipe above is a MAGNITUDE change, and all of them rank trajectories in
+# an order that does not put the solved ones on top. Checked by
+# `sbatch rl/diffusion_ft/slurm/reward_ranking.sbatch` (CPU, seconds), which
+# scores episode archetypes under each shipped recipe. All three fail:
+#
+#   * a 2-step corner cut that arrives outscores a CLEAN prompt arrival
+#     (noescape +8.60 vs +7.00), and so does never arriving at all (+8.00) --
+#     because `progression_indicator` pays progress per world step *alive*, so
+#     the progress banked is proportional to episode LENGTH and reaching the goal
+#     terminates the episode and forfeits the rest. At progress 0.2 over 40 world
+#     steps, arriving before step ~15 is strictly punished. That is the base
+#     policy's reached=0.00, and no goal-bonus size fixes it.
+#   * under `offroad_per_step`, avoiding the last off-road step pays exactly the
+#     same as shortening an excursion by one step (ratio 1.00), so the optimizer
+#     buys shortening and stopping, never avoidance. This is the penalty_up
+#     signature: return up 10x, off-road-ever 0.28 -> 0.50.
+#   * splitting one 12-step excursion into two 6-step ones is FREE under all
+#     three (charged-once: the 2nd excursion costs nothing; per-step: cost
+#     depends only on total dwell).
+#
+# Three flags fix the ordering rather than the magnitude:
+#   DFT_PROGRESSION_INDICATOR=0  progress*(s - prev_s), telescoping to
+#                                progress*(route fraction covered) -- duration
+#                                independent. sdc_progression is normalized to
+#                                [0,1], so this needs progress ~5.0, NOT 0.2.
+#   DFT_REWARD_OFFROAD_ENTRY     charged on each on-road -> off-road transition:
+#                                the only off-road term paid for NOT leaving.
+#   DFT_CLEAN_GOAL_BONUS=1       goal bonus only to an episode that arrives
+#                                having never gone off-road or collided.
+#
+#   DFT_ROUTE_REWARD=1 DFT_OFFROAD_PER_STEP=1 DFT_TERMINATE_OFFROAD=0 \
+#   DFT_COLLISION_PER_STEP=1 DFT_TERMINATE_COLLISION=0 \
+#   DFT_PROGRESSION_INDICATOR=0 DFT_CLEAN_GOAL_BONUS=1 \
+#   DFT_REWARD_PROGRESS=5.0 DFT_REWARD_OFFROAD=-0.1 DFT_REWARD_OFFROAD_ENTRY=-1.0 \
+#   DFT_REWARD_COLLISION=-0.1 DFT_REWARD_COLLISION_ENTRY=-2.0 \
+#   DFT_REWARD_GOAL_BONUS=5.0 DFT_REWARD_OFF_ROUTE=-0.2 DFT_GOAL_SHAPING_COEF=1.0 \
+#   DFT_ITERS=2 DFT_JOBNAME=dppo_ranking_smoke \
+#   bash rl/diffusion_ft/slurm/submit_train_dppo.sh
+#
+# The reward scale moves entirely, so do NOT read the return curve across this
+# change. Read `eval_solve_deterministic` and `eval_offroad_deterministic`, and
+# expect the return and the solve rate to move TOGETHER -- that co-movement is
+# the thing the previous runs never had, and the only evidence that would
+# justify touching the optimizer next.
+#
 # ---- Full training corpus + expert step ratio --------------------------------
 # Every run above trains on ONE fixed batch of scenes for its whole life, which is
 # an overfit target. DFT_SHARD_GLOB switches to a fresh batch drawn uniformly over
@@ -120,6 +166,9 @@ ENV_FILE="$ENV_DIR/dppo_${DFT_JOBNAME:-dft_dppo}_${STAMP}.env"
   echo "DFT_CLEAR_CACHES=${DFT_CLEAR_CACHES:-0}"
   echo "DFT_PROFILE=${DFT_PROFILE:-0}"
   echo "DFT_RESUME=${DFT_RESUME:-}"
+  echo "DFT_SAVE_EVERY=${DFT_SAVE_EVERY:-50}"
+  echo "DFT_KEEP_CKPTS=${DFT_KEEP_CKPTS:-3}"
+  echo "DFT_CRITIC_INIT=${DFT_CRITIC_INIT:-}"
   echo "DFT_ITER_OFFSET=${DFT_ITER_OFFSET:-0}"
   echo "DFT_PG_SCALE=${DFT_PG_SCALE:-0}"
   echo "DFT_SIGMA_FLOOR=${DFT_SIGMA_FLOOR:-0.1}"
@@ -141,6 +190,11 @@ ENV_FILE="$ENV_DIR/dppo_${DFT_JOBNAME:-dft_dppo}_${STAMP}.env"
   echo "DFT_REWARD_OFFROAD=${DFT_REWARD_OFFROAD:--5.0}"
   echo "DFT_REWARD_COLLISION=${DFT_REWARD_COLLISION:--10.0}"
   echo "DFT_REWARD_GOAL_BONUS=${DFT_REWARD_GOAL_BONUS:-10.0}"
+  echo "DFT_REWARD_OFFROAD_ENTRY=${DFT_REWARD_OFFROAD_ENTRY:-0.0}"
+  echo "DFT_REWARD_COLLISION_ENTRY=${DFT_REWARD_COLLISION_ENTRY:-0.0}"
+  echo "DFT_CLEAN_GOAL_BONUS=${DFT_CLEAN_GOAL_BONUS:-0}"
+  echo "DFT_PROGRESSION_INDICATOR=${DFT_PROGRESSION_INDICATOR:-1}"
+  echo "DFT_REWARD_STEP_PENALTY=${DFT_REWARD_STEP_PENALTY:-0.0}"
   echo "DFT_REWARD_OFF_ROUTE=${DFT_REWARD_OFF_ROUTE:--0.2}"
   echo "DFT_GOAL_SHAPING_COEF=${DFT_GOAL_SHAPING_COEF:-0.0}"
   echo "DFT_GOAL_SHAPING_NORMALIZE=${DFT_GOAL_SHAPING_NORMALIZE:-1}"
@@ -151,10 +205,16 @@ ENV_FILE="$ENV_DIR/dppo_${DFT_JOBNAME:-dft_dppo}_${STAMP}.env"
   # Full-corpus scene sampling (empty DFT_SHARD_GLOB = the historical fixed batch).
   # Quoted: the glob must reach the batch script unexpanded.
   echo "DFT_SHARD_GLOB='${DFT_SHARD_GLOB:-}'"
+  # Selected scene pool (tools/select_hard_womd.py). Empty = uniform sampling.
+  echo "DFT_SCENE_IDS_JSON=${DFT_SCENE_IDS_JSON:-}"
   echo "DFT_INDEX_DIR=${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
   echo "DFT_SCENES_PER_ITER=${DFT_SCENES_PER_ITER:-32}"
   echo "DFT_RESAMPLE_EVERY=${DFT_RESAMPLE_EVERY:-1}"
   echo "DFT_EVAL_SCENES=${DFT_EVAL_SCENES:-32}"
+  # Fixed named eval splits (failure/success held-out + train probe) from
+  # submit_build_splits.sh. Empty = only the random held-out eval set.
+  echo "DFT_EVAL_SPLITS_JSON=${DFT_EVAL_SPLITS_JSON:-}"
+  echo "DFT_EVAL_SPLIT_CAP=${DFT_EVAL_SPLIT_CAP:-48}"
   echo "DFT_DATA_SEED=${DFT_DATA_SEED:-0}"
   echo "DFT_PREFETCH=${DFT_PREFETCH:-1}"
   # Expert:DPPO step ratio (DFT_EXPERT_STEPS : DFT_PPO_EPOCHS).

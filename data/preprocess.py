@@ -62,6 +62,55 @@ def compute_world_dt_seconds(state: datatypes.SimulatorState, fallback_dt: float
     return jnp.where(any_valid, first_dt, jnp.full_like(first_dt, fallback_dt))
 
 
+def ego_source_time_seconds(
+    ts_bt: jax.Array,
+    anchor_step_b: jax.Array,
+    world_dt_b: jax.Array,
+    fallback_dt: float = 0.1,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Source time base for resampling the ego log onto the model's grid.
+
+    `resample_trajectory_timebase_jax` calls `searchsorted`, which requires a
+    **sorted** source. Timestamps are not guaranteed to be one: invalid log steps
+    carry `timestamp_micros = 0`, and a whole corpus can carry nothing else --
+    every record in the ScenarioMax failure set has an all-zero timestamp column.
+    Fed that, `searchsorted` returns a meaningless bracket and the resampled
+    "expert future" is an interpolation between two unrelated points in time.
+
+    Measured (job 39707, 8 scenes): the timestamp base reproduced the log it was
+    resampling to **45.08 m** on average, and the resulting BC target round-tripped
+    through `norm_to_world` to 60.9 m from the log it IS, implying 78.4 m/s. On a
+    step-index base the same 8 scenes reproduce at **0.000 m**.
+
+    So: use the timestamps when they are strictly increasing, and otherwise the
+    step-index base `(t - anchor) * world_dt`, which is exact for a uniformly
+    sampled log. The choice is per scene and made on the same float32 values the
+    resampler will see, so it cannot pass a row the resampler would choke on.
+
+    This is the guard `compute_world_dt_seconds` has always had for the dt scalar
+    (`dt > 0.0`, else `fallback_dt`) applied to the time *vector*, which never had
+    one. Note what that asymmetry cost: the scalar's fallback silently rescued the
+    policy's model_dt -> world_dt resample on this corpus, so nothing downstream
+    ever revealed that the timestamps were unusable, while the vector -- one
+    function away, in the same file -- was quietly producing garbage BC targets.
+
+    Wherever timestamps are well-formed this returns exactly what the old code did.
+
+    Returns `(src_t_bt, anchor_ts_b, used_timestamps_b)`.
+    """
+    anchor_ts_b = jnp.take_along_axis(ts_bt, anchor_step_b[:, None], axis=1)[:, 0]
+    stamped = ts_bt - anchor_ts_b[:, None]
+
+    n_t = ts_bt.shape[1]
+    steps = (jnp.arange(n_t, dtype=jnp.float32)[None, :]
+             - anchor_step_b[:, None].astype(jnp.float32))
+    dt_b = jnp.where(world_dt_b > 0.0, world_dt_b, fallback_dt)
+    indexed = steps * dt_b[:, None]
+
+    usable = jnp.all(jnp.diff(ts_bt, axis=1) > 0.0, axis=1)
+    return jnp.where(usable[:, None], stamped, indexed), anchor_ts_b, usable
+
+
 def sample_anchor_step(
     state: datatypes.SimulatorState,
     rng: jax.Array,
@@ -145,7 +194,27 @@ def resample_trajectory_timebase_jax(
         t0 = src_t_t[lo]
         t1 = src_t_t[hi]
         denom = jnp.maximum(t1 - t0, 1e-6)
-        w = (dst_t_k - t0) / denom
+        # Clamp to [0, 1]: interpolate, never EXTRAPOLATE. `hi` is already clamped
+        # to a valid index, but without clamping the weight a query past the last
+        # source time still runs the line out indefinitely -- and the 1e-6 denom
+        # floor turns that into a catastrophe rather than a drift. Invalid log
+        # steps carry timestamp_micros = 0, which breaks the monotonicity
+        # `searchsorted` assumes; the returned bracket can then straddle a
+        # near-zero time gap, denom floors at 1e-6, and w reaches ~5e6, so a 0.1 m
+        # step between two samples extrapolates to ~500 km.
+        #
+        # Measured 2026-08-30: this made `features["ego_trajectory"]` -- the
+        # normalized future used as the *behaviour-cloning target* -- come back at
+        # mean|x| 8486 against a model output space of mean|x| 0.156, and the
+        # diffusion anchor loss read 2e8 while the same loss on the model's own
+        # sample read 0.00137. Every expert-anchor / BC arm in rl/diffusion_ft has
+        # been regressing toward that garbage.
+        #
+        # Pretraining never hit it because `sample_anchor_step` reserves room for
+        # the full horizon; `anchor_step_override` (used by DiffusionWaymaxEnv at
+        # every replan) makes no such guarantee. Clamping is a no-op wherever the
+        # query was already in range, so well-formed inputs are unaffected.
+        w = jnp.clip((dst_t_k - t0) / denom, 0.0, 1.0)
 
         y0 = traj_td[lo, :]
         y1 = traj_td[hi, :]
@@ -376,8 +445,8 @@ def _preprocess_single_batch(
 
     ego_world_btd_full = jnp.stack([x_bt, y_bt, vx_bt, vy_bt, yaw_bt], axis=-1)
 
-    anchor_ts_b = jnp.take_along_axis(ts_bt, anchor_step_b[:, None], axis=1)[:, 0]
-    src_t_b = ts_bt - anchor_ts_b[:, None]
+    src_t_b, anchor_ts_b, _ = ego_source_time_seconds(
+        ts_bt, anchor_step_b, world_dt_b, cfg.world_dt_fallback)
     model_t = jnp.arange(cfg.predict_horizon + 1, dtype=jnp.float32) * cfg.model_dt
     ego_resampled_world = resample_trajectory_timebase_jax(ego_world_btd_full, src_t_b, model_t, yaw_index=4)
 

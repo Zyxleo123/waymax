@@ -191,10 +191,18 @@ class DPPOTrainer:
             terminate_on_offroad=a.terminate_on_offroad,
             offroad_per_step=a.offroad_per_step,
             collision_per_step=a.collision_per_step,
+            offroad_entry=a.reward_offroad_entry,
+            collision_entry=a.reward_collision_entry,
+            clean_goal_bonus=a.clean_goal_bonus,
+            step_penalty=a.reward_step_penalty,
             route_reward=a.route_reward,
-            # V-Max `progression` is a boolean indicator (+w on any arclength gain),
-            # and `off_route` a bounded indicator (fires when off-route dist > 0).
-            progression_indicator=a.route_reward,
+            # V-Max `progression` is a boolean indicator (+w on any gain) and
+            # `off_route` a bounded indicator (fires when off-route dist > 0).
+            # The indicator form defaults on with --route_reward for backwards
+            # compatibility, but see --no-progression_indicator: it pays per step
+            # *alive*, so its total is proportional to episode LENGTH and
+            # arriving at the goal forfeits the remainder of the stream.
+            progression_indicator=(a.route_reward and a.progression_indicator),
             off_route_threshold_m=(0.0 if a.route_reward else None),
             off_route_penalty=a.reward_off_route,
         )
@@ -255,7 +263,21 @@ class DPPOTrainer:
             value = np.asarray(critic.value(cond1))
 
             buf["cond1"].append(cond1); buf["cond2"].append(cond2); buf["mask"].append(mask)
-            buf["trace"].append(trace); buf["expert_target"].append(features["ego_trajectory"])
+            buf["trace"].append(trace)
+            # Slice to the model's horizon, exactly as diffusion_policy.loss()
+            # does (`ego_trajectory[:, :predict_horizon, :]`). The preprocessor
+            # builds this on `model_t = arange(predict_horizon + 1)`, so it is 26
+            # steps for a 25-step model -- one trailing step too many. Feeding all
+            # 26 to loss_per_example does NOT raise (the conv denoiser is
+            # length-agnostic and _loss_impl only reads x0.shape), it just scores
+            # a horizon the checkpoint never trained on: measured expert_loss
+            # ~1.1e8, flat from the first step, never descending, while kl_x ~0.1
+            # per iteration shoved the policy toward it -- every BC arm of the
+            # 20260830 sweep held solve at 0.000 while the x0 control reached
+            # 0.031. traj_ncT is [B, C, T] straight from the sampler, so its T is
+            # the model's own horizon and needs no metadata lookup.
+            buf["expert_target"].append(
+                features["ego_trajectory"][:, :traj_ncT.shape[-1], :])
             buf["value"].append(value); buf["alive"].append(~prev_done)
 
             out = env.step(trajectory_world_bt5=world)
@@ -389,6 +411,22 @@ class DPPOTrainer:
         vloss = self.critic.update(cond1, ret, weights=alive, epochs=args.value_epochs)
         last["value_loss"] = float(np.asarray(vloss["value_loss"]))
         last["value_loss_final"] = float(np.asarray(vloss["value_loss_final"]))
+        # Explained variance: the only number that says whether the critic is worth
+        # anything. `value_loss` alone cannot -- it scales with the reward, so it
+        # rises when returns grow even if the fit improved, and the six reward-sweep
+        # arms are not comparable on it at all. EV is scale-free: 0 means the critic
+        # is no better than predicting the batch mean (a zero baseline, all the
+        # variance left in the advantage), 1 means it removed the return spread.
+        # At lam=1 the critic is a pure baseline, so EV *is* the variance reduction
+        # it buys the policy gradient.
+        m = np.asarray(alive).astype(bool)
+        r = np.asarray(ret)[m]
+        if r.size > 1:
+            var = float(r.var())
+            last["return_std_raw"] = float(r.std())
+            last["value_ev"] = 1.0 - last["value_loss"] / var if var > 1e-8 else 0.0
+            last["value_ev_final"] = (1.0 - last["value_loss_final"] / var
+                                      if var > 1e-8 else 0.0)
         return last
 
     # --------------------------------------------------------------- #
@@ -420,6 +458,19 @@ class DPPOTrainer:
         reached = np.zeros(B, dtype=bool)
         collided = np.zeros(B, dtype=bool)
         offroad = np.zeros(B, dtype=bool)
+        # Where the return went. A bare scalar return is not interpretable -- a
+        # -42 can be dwell, boundary chatter billed by the entry charge, or route
+        # progression running backwards, and those call for opposite fixes. Sum
+        # the additive reward components, and count off-road/contact STEPS
+        # (dwell) separately from rising EDGES (excursions), which is exactly the
+        # split the entry charge is priced against.
+        comp_sums = {k: np.zeros(B) for k in
+                     ("progress", "offroad", "collision", "goal_bonus", "step_penalty")}
+        n_off_steps = np.zeros(B)
+        n_col_steps = np.zeros(B)
+        n_off_entries = np.zeros(B)
+        n_col_entries = np.zeros(B)
+        n_live_steps = np.zeros(B)
         for _ in range(int(n_steps)):
             cond1, cond2 = env.compute_condition(features)
             mask = features["inst_valid"]
@@ -440,6 +491,22 @@ class DPPOTrainer:
             reached |= (np.asarray(comps.get("reached_flag", zb)).astype(bool) & live)
             collided |= (np.asarray(comps.get("collision_flag", zb)).astype(bool) & live)
             offroad |= (np.asarray(comps.get("offroad_flag", zb)).astype(bool) & live)
+            for k in comp_sums:
+                if k in comps:
+                    comp_sums[k] += np.asarray(comps[k]) * live
+            # `components` OR-collapses the boolean flags, so the per-world-step
+            # arrays are the only place a COUNT survives.
+            ps = out.per_step_components
+            if ps:
+                def _n(key):
+                    got = ps.get(key)
+                    return (np.asarray(got).astype(bool).sum(axis=-1) * live
+                            if got is not None else np.zeros(B))
+                n_off_steps += _n("offroad_flag")
+                n_col_steps += _n("collision_flag")
+                n_off_entries += _n("offroad_entry_flag")
+                n_col_entries += _n("collision_entry_flag")
+                n_live_steps += int(np.asarray(ps["offroad_flag"]).shape[-1]) * live
             prev_done = prev_done | np.asarray(out.terminated_b) | np.asarray(out.truncated_b)
             features = out.features
             if prev_done.all():
@@ -453,7 +520,116 @@ class DPPOTrainer:
             "reached": float(reached.mean()),
             "collided": float(collided.mean()),
             "offroad": float(offroad.mean()),
+            **{f"r_{k}": float(v.mean()) for k, v in comp_sums.items()},
+            "off_steps": float(n_off_steps.mean()),
+            "col_steps": float(n_col_steps.mean()),
+            # Excursions per episode. If this is ~1-2 the entry charge is pricing
+            # driving decisions as intended; if it is ~10 on a 40-step episode the
+            # policy is chattering across the boundary and the edge detector is
+            # billing the noise, not the decision.
+            "off_entries": float(n_off_entries.mean()),
+            "col_entries": float(n_col_entries.mean()),
+            "live_steps": float(n_live_steps.mean()),
         }
+
+    def _eval_metrics(self, eval_state, nseed: int) -> dict[str, float]:
+        """One eval set -> the flat metric dict, averaged over ``nseed`` seeds.
+
+        Returns BARE keys (``return_deterministic``, ``solve_deterministic``,
+        ...); the caller prefixes them (``eval_`` for the main held-out set,
+        ``<split>/`` for a named split) so every eval set reports the exact same
+        family of numbers under its own namespace.
+        """
+        det = [self.evaluate(eval_state, deterministic=True, seed_offset=778 + 2 * s)
+               for s in range(nseed)]
+        sto = [self.evaluate(eval_state, deterministic=False, seed_offset=1777 + 2 * s)
+               for s in range(nseed)]
+        det_ret = np.array([d["return"] for d in det])
+        sto_ret = np.array([d["return"] for d in sto])
+        det_solve = np.array([d["solve"] for d in det])
+        sto_solve = np.array([d["solve"] for d in sto])
+        m: dict[str, float] = {
+            "return_deterministic": float(det_ret.mean()),
+            "return_stochastic": float(sto_ret.mean()),
+            # Solve rate = reached goal & no collision & no offroad (the real
+            # objective; the shaped return is only a proxy).
+            "solve_deterministic": float(det_solve.mean()),
+            "solve_stochastic": float(sto_solve.mean()),
+        }
+        # Un-collapsed rates: when solve is pinned at 0, these say whether the
+        # wall is "never reaches goal" or "reaches but goes dirty". Plus the
+        # return decomposition + dwell/edge split, so a return that moves can be
+        # attributed to a term instead of guessed at.
+        for k in ("reached", "collided", "offroad",
+                  "r_progress", "r_offroad", "r_collision", "r_goal_bonus",
+                  "r_step_penalty", "off_steps", "col_steps", "off_entries",
+                  "col_entries", "live_steps"):
+            m[f"{k}_deterministic"] = float(np.mean([d[k] for d in det]))
+            m[f"{k}_stochastic"] = float(np.mean([d[k] for d in sto]))
+        if nseed > 1:
+            m["return_deterministic_std"] = float(det_ret.std())
+            m["return_stochastic_std"] = float(sto_ret.std())
+            m["solve_deterministic_std"] = float(det_solve.std())
+        return m
+
+    def _load_eval_splits(self):
+        """Load the fixed named eval splits from ``--eval_splits_json``.
+
+        Returns ``{prefix: state}`` for the failure/success held-out sets and a
+        capped train probe. The split scene ids are positions in the scan's
+        ``shard_glob`` order; they only address the same scenes when the sampler
+        was built on that same glob, so this refuses a mismatch rather than
+        silently evaluating different scenes.
+        """
+        args = self.args
+        if not args.eval_splits_json:
+            return {}
+        if self.sampler is None:
+            raise SystemExit(
+                "--eval_splits_json needs --shard_glob (the split ids are "
+                "positions in the corpus shard order); it does nothing for a "
+                "fixed --indices batch.")
+        blob = json.loads(Path(args.eval_splits_json).read_text())
+        # The scene ids are positions in the SORTED shard list, so what has to
+        # match is the expanded file list, not the glob string -- `...-*` and
+        # `...-*-of-01000` are different strings that resolve to the same shards
+        # in the same order. Compare the resolved lists, not the patterns.
+        blob_glob = blob.get("shard_glob")
+        if blob_glob:
+            import glob as _glob
+            scan_shards = sorted(_glob.glob(blob_glob))
+            train_shards = sorted(_glob.glob(args.shard_glob))
+            if scan_shards != train_shards:
+                raise SystemExit(
+                    f"eval splits were scanned against\n  {blob_glob}\n"
+                    f"({len(scan_shards)} shards) but --shard_glob is\n"
+                    f"  {args.shard_glob}\n({len(train_shards)} shards), and the "
+                    f"resolved shard lists differ. The scene ids are positions in "
+                    f"the sorted shard order; they do not transfer.")
+        # JSON split name -> wandb prefix (identity: the prefix names exactly
+        # which split each metric came from). The *_train pools are what a
+        # fine-tune actually trains on; a capped slice probes whether the loss
+        # moves the scenes it optimizes (failure_train) without breaking the
+        # ones it must leave alone (success_train).
+        wanted = {"failure_heldout": "failure_heldout",
+                  "success_heldout": "success_heldout",
+                  "failure_train": "failure_train",
+                  "success_train": "success_train"}
+        cap = max(1, int(args.eval_split_cap))
+        splits = blob["splits"]
+        out: dict[str, Any] = {}
+        for name, prefix in wanted.items():
+            if name not in splits:
+                print(f"[dppo] eval split '{name}' absent from "
+                      f"{args.eval_splits_json}; skipping")
+                continue
+            ids = [int(i) for i in splits[name]["scene_ids"]][:cap]
+            if not ids:
+                continue
+            out[prefix] = self.sampler.load_explicit(ids)
+            print(f"[dppo] eval split {prefix}: {len(ids)} scenes "
+                  f"(cap {cap}) from '{name}'")
+        return out
 
     # --------------------------------------------------------------- #
     def _init_wandb(self, indices, out_dir):
@@ -501,6 +677,26 @@ class DPPOTrainer:
         #  * `--indices` on one tfrecord (the historical overfit target): unchanged
         #    behavior, one fixed batch loaded once, eval on the training scenes.
         self.sampler = None
+        if args.scene_ids_json and not args.shard_glob:
+            raise SystemExit(
+                "--scene_ids_json is a pool over --shard_glob's corpus; it does "
+                "nothing for a fixed --indices batch. Pass both, or neither.")
+        scene_ids = None
+        if args.scene_ids_json:
+            pool = json.loads(Path(args.scene_ids_json).read_text())
+            scene_ids = [int(i) for i in pool["scene_ids"]]
+            # The ids are positions in the concatenated shard order, so a
+            # different glob silently addresses different scenes. Refuse rather
+            # than train on a corpus nobody selected.
+            if pool.get("shard_glob") and pool["shard_glob"] != args.shard_glob:
+                raise SystemExit(
+                    f"pool was scanned against\n  {pool['shard_glob']}\nbut "
+                    f"--shard_glob is\n  {args.shard_glob}\nThe scene ids are "
+                    f"positions in the glob's shard order; they do not transfer.")
+            print(f"[dppo] scene pool: {len(scene_ids)} scenes from "
+                  f"{args.scene_ids_json} (scanned {pool.get('n_scanned', '?')}, "
+                  f"base solve over the scan "
+                  f"{pool.get('criteria', {}).get('base_det_solve_over_scan', float('nan')):.3f})")
         if args.shard_glob:
             self.sampler = SceneSampler(
                 args.shard_glob, batch_size=args.scenes_per_iter,
@@ -508,6 +704,7 @@ class DPPOTrainer:
                 num_paths=args.num_paths, num_points_per_path=args.num_points_per_path,
                 seed=args.data_seed, prefetch=args.prefetch,
                 index_dir=(args.index_dir or None),
+                scene_ids=scene_ids,
             )
             print(f"[dppo] data: {self.sampler.describe()} "
                   f"(resample every {args.resample_every} iters)")
@@ -524,8 +721,13 @@ class DPPOTrainer:
             eval_state = state
             _check_routes(state, args, "train", labels=indices)
         self._build_for(state)
+        # Fixed named eval splits (failure/success held-out + train probe),
+        # loaded once and cached. Empty unless --eval_splits_json is set.
+        self.eval_splits = self._load_eval_splits()
         if args.resume:
             self.load(args.resume)
+        if args.critic_init:
+            self.load_critic(args.critic_init)
         wandb_run = self._init_wandb(
             indices if self.sampler is None else list(map(int, self.sampler.last_ids)),
             out_dir)
@@ -545,7 +747,12 @@ class DPPOTrainer:
               f"collision_per_step={int(args.collision_per_step)} "
               f"progress={args.reward_progress} offroad={args.reward_offroad} "
               f"collision={args.reward_collision} goal={args.reward_goal_bonus} "
-              f"off_route={args.reward_off_route} shaping={args.goal_shaping_coef}")
+              f"off_route={args.reward_off_route} shaping={args.goal_shaping_coef} "
+              f"offroad_entry={args.reward_offroad_entry} "
+              f"collision_entry={args.reward_collision_entry} "
+              f"clean_goal={int(args.clean_goal_bonus)} "
+              f"prog_indicator={int(args.progression_indicator)} "
+              f"step_penalty={args.reward_step_penalty}")
         for it in range(args.iters):
             # Global step for logging/plots: lets a --resume run continue the
             # curve (--iter_offset) instead of restarting at 0. Loop control
@@ -588,30 +795,15 @@ class DPPOTrainer:
                 nseed = max(1, int(args.eval_seeds))
                 # Always the FIXED (held-out, when sampling) eval set -- never the
                 # iteration's training draw, which would measure the draw, not the
-                # policy.
-                det = [self.evaluate(eval_state, deterministic=True, seed_offset=778 + 2 * s)
-                       for s in range(nseed)]
-                sto = [self.evaluate(eval_state, deterministic=False, seed_offset=1777 + 2 * s)
-                       for s in range(nseed)]
-                det_ret = np.array([d["return"] for d in det])
-                sto_ret = np.array([d["return"] for d in sto])
-                det_solve = np.array([d["solve"] for d in det])
-                sto_solve = np.array([d["solve"] for d in sto])
-                eval_row["eval_return_deterministic"] = float(det_ret.mean())
-                eval_row["eval_return_stochastic"] = float(sto_ret.mean())
-                # Solve rate = reached goal & no collision & no offroad (the real
-                # objective; the shaped return is only a proxy).
-                eval_row["eval_solve_deterministic"] = float(det_solve.mean())
-                eval_row["eval_solve_stochastic"] = float(sto_solve.mean())
-                # Un-collapsed rates: when solve is pinned at 0, these say whether
-                # the wall is "never reaches goal" or "reaches but goes dirty".
-                for k in ("reached", "collided", "offroad"):
-                    eval_row[f"eval_{k}_deterministic"] = float(np.mean([d[k] for d in det]))
-                    eval_row[f"eval_{k}_stochastic"] = float(np.mean([d[k] for d in sto]))
-                if nseed > 1:
-                    eval_row["eval_return_deterministic_std"] = float(det_ret.std())
-                    eval_row["eval_return_stochastic_std"] = float(sto_ret.std())
-                    eval_row["eval_solve_deterministic_std"] = float(det_solve.std())
+                # policy. The main random held-out set keeps its flat `eval_*`
+                # keys; each named split reports the same metric family under its
+                # own `<split>/` prefix (failure_heldout, success_heldout,
+                # train_probe), so a dashboard can read them side by side.
+                for prefix, es in [("eval_", eval_state),
+                                   *((f"{name}/", st)
+                                     for name, st in self.eval_splits.items())]:
+                    m = self._eval_metrics(es, nseed)
+                    eval_row.update({f"{prefix}{k}": v for k, v in m.items()})
             prof_row = {"t_collect": round(t_collect, 2), "t_update": round(t_update, 2),
                         **getattr(self, "_prof_collect", {})} if args.profile else {}
             data_row = ({"scenes_seen": self.sampler.n_loaded,
@@ -659,12 +851,14 @@ class DPPOTrainer:
                   f"ratio-1={metrics.get('mean_ratio',1)-1:+.3e} "
                   f"clipf={metrics.get('clip_frac',0):.3f} "
                   f"vloss={metrics.get('value_loss',0):.1f}->{metrics.get('value_loss_final',0):.1f} "
+                  f"ev={metrics.get('value_ev',0):+.2f}->{metrics.get('value_ev_final',0):+.2f} "
                   f"t={row['time_s']}s rss={row['rss_gb']:.1f}G nstep={row['n_steps']}"
                   + (f" [collect={row['t_collect']}s(sample={row.get('t_sample','?')}"
                      f"/env={row.get('t_env','?')}) update={row['t_update']}s]"
                      if args.profile else ""))
             if (it + 1) % args.save_every == 0 or it + 1 == args.iters:
                 self.save(out_dir / f"ckpt_{it+1:04d}")
+                self._prune_ckpts(out_dir, keep=args.keep_last_ckpts)
             # Host RAM grew ~0.6 GiB/iter at a *constant* batch shape (leak probe
             # job 32647): not recompilation. gc.collect() alone did NOT help (probe
             # 32673, identical slope), so it is not Python reference cycles but
@@ -690,6 +884,27 @@ class DPPOTrainer:
                 "critic": jax.tree_util.tree_map(np.asarray, self.critic.state_dict()),
             }, f)
 
+    @staticmethod
+    def _prune_ckpts(out_dir: Path, keep: int) -> None:
+        """Keep only the ``keep`` newest ``ckpt_*`` dirs; delete the rest.
+
+        One checkpoint is ~606 MB (actor + critic + BOTH Adam optimizer states,
+        two moments per param). At the default --save_every 10 a 500-iter run
+        writes 50 of them = ~30 GB, and a 6-arm sweep ~180 GB. Nothing pruned
+        them, so 1075 accumulated (~634 GB) and every arm of the 20260830 ratio
+        sweep died mid-run on `OSError: [Errno 122] Disk quota exceeded` -- not
+        at startup, but 75-157 iters in, after the quota ran out.
+
+        Only ``ckpt_*`` dirs are touched: train_log.jsonl is the experimental
+        record, is tiny, and always survives. keep<=0 disables pruning.
+        """
+        if keep is None or keep <= 0:
+            return
+        import shutil
+        ckpts = sorted(p for p in out_dir.glob("ckpt_*") if p.is_dir())
+        for stale in ckpts[:-keep]:
+            shutil.rmtree(stale, ignore_errors=True)
+
     def load(self, path: str) -> None:
         """Restore the fine-tuned actor+critic from a `save()` checkpoint (dir or
         the actor_value.pkl itself), so a run can continue past its iter budget.
@@ -708,6 +923,30 @@ class DPPOTrainer:
         self.critic.load_state_dict(to_j(sd["critic"]))
         print(f"[dppo] resumed actor+critic from {pkl}")
 
+    def load_critic(self, path: str) -> None:
+        """Restore ONLY the critic from a `save()` checkpoint, leaving the actor
+        at the base diffusion policy.
+
+        This is the load side of critic pretraining: fit V on a broad corpus with
+        the actor frozen (``--warmup_iters >= --iters``), then start the failure-set
+        run from that baseline instead of from a randomly-initialized MLP. Unlike
+        ``--resume`` this deliberately does NOT touch the actor, so the policy still
+        starts at the pretrained diffusion checkpoint.
+
+        The critic regresses returns under one specific ``RewardConfig``, so a
+        checkpoint is only meaningful for a run with the SAME reward flags -- a V
+        fit against a different reward is a value function for a different MDP.
+        Nothing here can detect that, so it is on the caller to keep them matched.
+        """
+        import pickle
+        p = Path(path)
+        pkl = p / "actor_value.pkl" if p.is_dir() else p
+        with open(pkl, "rb") as f:
+            sd = pickle.load(f)
+        self.critic.load_state_dict(
+            jax.tree_util.tree_map(jnp.asarray, sd["critic"]))
+        print(f"[dppo] critic initialized from {pkl} (actor left at base ckpt)")
+
 
 # --------------------------------------------------------------------------- #
 def build_argparser() -> argparse.ArgumentParser:
@@ -719,10 +958,19 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--out_dir", type=str, default="/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/dppo")
     p.add_argument("--iters", type=int, default=50)
     p.add_argument("--save_every", type=int, default=10)
+    p.add_argument("--keep_last_ckpts", type=int, default=3,
+                   help="keep only the N newest ckpt_* dirs (0 = keep all). One "
+                        "ckpt is ~606 MB, so an unpruned 500-iter run costs ~30 GB "
+                        "and a 6-arm sweep ~180 GB -- that is what exhausted the "
+                        "disk quota mid-sweep on 20260830")
     p.add_argument("--resume", type=str, default="",
                    help="restore actor+critic from a save() checkpoint dir (or its "
                         "actor_value.pkl) and continue training -- e.g. to push a run "
                         "that was still improving past its iter budget")
+    p.add_argument("--critic_init", type=str, default="",
+                   help="restore ONLY the critic from a save() checkpoint (actor stays "
+                        "at the base diffusion ckpt) -- the load side of critic "
+                        "pretraining. Must match the pretrain run's reward flags")
     p.add_argument("--iter_offset", type=int, default=0,
                    help="add to the logged/plotted iter (not loop control) so a "
                         "--resume run continues the curve instead of restarting at 0")
@@ -818,6 +1066,48 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--reward_goal_bonus", type=float, default=10.0,
                    help="one-time goal bonus. Old default 10.0; parity 5.0 (goal "
                         "shaping carries the credit assignment).")
+    p.add_argument("--reward_offroad_entry", type=float, default=0.0,
+                   help="EXTRA charge on each on-road -> off-road transition, on top "
+                        "of whatever --reward_offroad charges. This is the only "
+                        "off-road term an optimizer can collect by NOT leaving the "
+                        "road: a per-step charge is paid for making an excursion "
+                        "shorter, and the charged-once form makes the second "
+                        "excursion free. See tests/test_reward_ranking.py (P2, P3). "
+                        "0=off (old behavior); suggested -1.0 paired with "
+                        "--offroad_per_step --reward_offroad -0.1.")
+    p.add_argument("--reward_collision_entry", type=float, default=0.0,
+                   help="as --reward_offroad_entry, for contact. Only meaningful "
+                        "with --no-terminate_on_collision (otherwise the episode "
+                        "ends on the first edge anyway). 0=off; suggested -2.0.")
+    p.add_argument("--clean_goal_bonus", action=argparse.BooleanOptionalAction,
+                   default=False,
+                   help="pay --reward_goal_bonus only to an episode that reaches the "
+                        "goal having NEVER gone off-road or collided -- i.e. only to "
+                        "a scene the solve metric counts. This is what puts a "
+                        "discontinuity in the reward where the solve criterion has "
+                        "one; without it the reward is smooth in a quantity whose "
+                        "objective value is a step function and no coefficient can "
+                        "fix the ordering. Off=old behavior.")
+    p.add_argument("--reward_step_penalty", type=float, default=0.0,
+                   help="constant per-world-step cost. 0=off (old behavior). Prices "
+                        "loitering directly; largely redundant once "
+                        "--no-progression_indicator removes the reward for staying "
+                        "alive, so leave at 0 unless you see dawdling.")
+    p.add_argument("--progression_indicator", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="how --route_reward pays progress. True (default, and what "
+                        "every run so far used) = +--reward_progress per world step "
+                        "in which the route fraction advanced at all -- a DURATION "
+                        "reward whose total is ~progress*episode_length, so reaching "
+                        "the goal terminates the episode and forfeits the rest of it "
+                        "(at progress 0.2 over 40 steps, arriving before step ~15 "
+                        "scores worse than never arriving). False = "
+                        "progress*(s - prev_s), which telescopes to "
+                        "progress*(fraction of route covered) and is independent of "
+                        "duration. waymax `sdc_progression` is normalized to [0,1] "
+                        "(FULL_PROGRESS_VALUE), so the telescoping form needs a "
+                        "coefficient sized against the goal bonus (~5.0), not 0.2. "
+                        "No effect without --route_reward.")
     p.add_argument("--reward_off_route", type=float, default=-0.2,
                    help="bounded off-route penalty per step (fires when off-route>0). "
                         "Only used with --route_reward. V-Max parity -0.2.")
@@ -827,6 +1117,15 @@ def build_argparser() -> argparse.ArgumentParser:
                         "accelerator applied per replan step at --gamma. 0=off; parity 1.0.")
     p.add_argument("--goal_shaping_normalize", action=argparse.BooleanOptionalAction,
                    default=True, help="divide Phi by the initial goal distance (scale-free).")
+    p.add_argument("--scene_ids_json", default="",
+                   help="A hard_womd.json from tools/select_hard_womd.py: restrict "
+                        "full-corpus sampling to that POOL of scene ids instead of "
+                        "drawing uniformly. Needs --shard_glob, and the glob must "
+                        "match the one the pool was scanned against (the ids are "
+                        "positions in that glob's concatenated shard order). This is "
+                        "a deliberate distribution shift -- a uniform WOMD draw has "
+                        "the base policy already solving ~95-98%%, so there is no "
+                        "headroom to read a fine-tune result in.")
     p.add_argument("--num_paths", type=int, default=10,
                    help="sdc_paths dim for --route_reward. ScenarioMax (failures."
                         "tfrecord) = 10; raw WOMD tf_example = 45.")
@@ -887,7 +1186,7 @@ def build_argparser() -> argparse.ArgumentParser:
                         "rl/diffusion_ft/slurm/submit_build_womd_offsets.sh")
     p.add_argument("--scenes_per_iter", type=int, default=32,
                    help="training batch size when --shard_glob is set (B=64 OOM'd in the "
-                        "actor grad; 32 is 4x the data of 8 for +11% time)")
+                        "actor grad; 32 is 4x the data of 8 for +11%% time)")
     p.add_argument("--resample_every", type=int, default=1,
                    help="draw a new training batch every N iterations. 1 = every "
                         "iteration (maximum coverage); >1 amortizes the load and lets "
@@ -897,6 +1196,17 @@ def build_argparser() -> argparse.ArgumentParser:
                         "corpus and excluded from every training draw), so the eval curve "
                         "is comparable across iterations and measures generalization. "
                         "Only used with --shard_glob")
+    p.add_argument("--eval_splits_json", type=str, default="",
+                   help="eval_splits.json from submit_build_splits.sh: additionally "
+                        "evaluate the FIXED named splits (failure_heldout, "
+                        "success_heldout, failure_train, success_train) each "
+                        "--eval_every, logged under per-split `<split>/` prefixes. The "
+                        "split ids are positions in the corpus shard order, so this needs "
+                        "--shard_glob matching the scan's glob.")
+    p.add_argument("--eval_split_cap", type=int, default=48,
+                   help="cap each named eval split to this many scenes so the extra eval "
+                        "stays cheap (held-outs are 64, failure_train ~560, success_train "
+                        "~23k -- the cap is what keeps the last one from OOMing)")
     p.add_argument("--data_seed", type=int, default=0,
                    help="seed for the scene draw. Change it to re-randomize the data "
                         "stream while holding the training seed fixed")

@@ -141,15 +141,25 @@ class ReplanContext:
     """
 
     __slots__ = ("t0", "cond1", "cond2", "mask", "aux", "alive", "n_steps",
-                 "expert_target")
+                 "n_exec", "expert_target", "x_prefix", "key_late")
 
-    def __init__(self, t0, cond1, cond2, mask, aux, alive, n_steps):
+    def __init__(self, t0, cond1, cond2, mask, aux, alive, n_steps, n_exec=None):
         self.t0, self.cond1, self.cond2 = int(t0), cond1, cond2
         self.mask, self.aux, self.alive, self.n_steps = mask, aux, alive, int(n_steps)
+        # World steps the env will actually DRIVE, which is no longer the same as
+        # `n_steps` (the scored window) once --safety_window widens the loss past
+        # the replan interval. Kept for the viz/`done_at` bookkeeping, which must
+        # track execution rather than scoring.
+        self.n_exec = int(n_steps if n_exec is None else n_exec)
         # Attached after the rollout by whoever needs it (the anchor term, the
         # teacher-forced unroll). `__slots__` means an unset attribute raises
         # rather than reading None, so bind it here.
         self.expert_target = None
+        # `--reuse_prefix`: the collection sample's frozen-prefix output x_{k-1}
+        # and its late-chain key, so the gradient pass replays only the
+        # k_trainable steps of the trajectory that was actually executed.
+        self.x_prefix = None
+        self.key_late = None
 
 
 class SafetyFineTuner:
@@ -158,6 +168,7 @@ class SafetyFineTuner:
         self.ckpt = load_diffusion_checkpoint(args.ckpt)
         self.sl_cfg = SafetyLossConfig(
             edge_margin_m=args.edge_margin, agent_margin_m=args.agent_margin,
+            edge_tau_m=args.edge_tau, agent_tau_m=args.agent_tau,
             n_discs=args.n_discs, agent_geometry=args.agent_geometry)
         self.objcfg = SafetyObjectiveConfig(
             safety=self.sl_cfg, safety_weight=args.safety_weight,
@@ -197,11 +208,32 @@ class SafetyFineTuner:
         self.env = DiffusionWaymaxEnv(
             self.ckpt, reward_config=RewardConfig(), max_num_objects=n_obj,
             replan_interval_steps=args.replan_interval_steps, seed=args.seed)
+        # DDIM striding of the frozen prefix, resolved once. `None` = full chain.
+        # Two values, because the training passes and the eval measure different
+        # things: collection/gradient may run an approximation of the policy,
+        # but an eval that strides too would confound a curve movement between
+        # the weights and the sampler. `sample_with_trace` requires
+        # k_trainable <= S <= timesteps; check here so a bad flag fails at startup
+        # instead of inside the first traced rollout.
+        n_t = int(self.env.policy.diffusion.timesteps)
+        def _steps(v, name):
+            v = int(v)
+            if v <= 0:
+                return None
+            if not (int(args.k_trainable) <= v <= n_t):
+                raise SystemExit(
+                    f"--{name}={v} must lie in [k_trainable={args.k_trainable}, "
+                    f"timesteps={n_t}] (0 = full chain)")
+            return v
+        self._steps_train = _steps(getattr(args, "collect_steps", 0), "collect_steps")
+        self._steps_eval = _steps(getattr(args, "eval_steps", 0), "eval_steps")
+
         self.actor = DiffusionRLActor(
             self.env.policy.diffusion, k_trainable=args.k_trainable,
             prefix_len=args.prefix_len, sigma_sample_floor=args.sigma_floor,
             sigma_logprob_floor=args.sigma_floor, actor_lr=args.lr,
-            expert_lr=args.lr, seed=args.seed)
+            expert_lr=args.lr, seed=args.seed,
+            num_sample_steps=self._steps_train)
         self.actor.reset_trainable_to_frozen()
         self.frozen_ref = self.actor.frozen_state()
         self.eval_state = (self.sampler.eval_batch()
@@ -248,6 +280,7 @@ class SafetyFineTuner:
               f"-> gradient through reverse steps t={args.k_trainable - 1}..0 "
               f"({100.0 * args.k_trainable / n_t:.0f}% lowest-noise end)", flush=True)
         self._init_unroll()
+        self._init_windows()
         steps_per_iter = ("all contexts -> 1 step/iter" if args.grad_accum <= 0
                           else f"{args.grad_accum} ctx/step")
         print(f"[safety] optimizer: lr={args.lr} accum={steps_per_iter}  "
@@ -267,6 +300,86 @@ class SafetyFineTuner:
               flush=True)
 
     # ------------------------------------------------------------------ #
+    def _init_windows(self):
+        """Resolve the two scoring windows: the safety term's and the anchors'.
+
+        **They live in different time bases, which is the whole trap here.** The
+        candidate is ``predict_horizon`` model steps at ``model_dt`` (25 x 0.2 s =
+        5.0 s); ``postprocess_predictions`` resamples it to ``world_dt`` (0.1 s),
+        giving ~50 world steps plus the anchor at index 0; and the env executes
+        only ``replan_interval_steps`` (10) of those before replanning. So:
+
+        * ``--safety_window`` counts WORLD steps (the geometry is scored in world
+          coordinates against log-replayed neighbours). 0 = the executed window,
+          which is what every run before 2026-09-09 scored; -1 = the whole
+          candidate; N = N world steps.
+        * ``--anchor_window`` counts MODEL steps (the denoising losses reduce over
+          the denoiser's own horizon axis). -1 = the whole horizon, which is what
+          every run before 2026-09-09 anchored; 0 = auto, the executed window
+          converted into model steps; N = N model steps.
+
+        The auto/full conversions are done here so a sweep arm is a single flag
+        value and not arithmetic in a shell script.
+
+        Widening the safety window prices trajectory that will be REPLANNED before
+        it is driven -- see the `safety_objective` module docstring, which argues
+        against it. That is exactly why it is an ablation axis and not a default:
+        the counter-argument is that a 1.0 s window cannot see a violation the
+        candidate commits at 2.5 s, so the policy is free to aim at one.
+        """
+        a = self.args
+        cfg = self.ckpt.preprocess_cfg
+        model_dt = float(cfg.model_dt)
+        world_dt = float(cfg.world_dt_fallback)
+        h_model = int(self.actor.diffusion.denoise_fn.horizon)
+        # Valid world steps the candidate resamples to (index 0 is the anchor, so
+        # this counts steps 1..n). `preprocess` pads two extra steps whose time is
+        # clamped to the horizon end -- they duplicate the last pose, so scoring
+        # them would charge the same frame repeatedly. Excluded by construction.
+        n_world = int(round(h_model * model_dt / world_dt))
+        exec_world = int(a.replan_interval_steps)
+
+        sw = int(a.safety_window)
+        if sw == 0:
+            self.safety_window = exec_world
+        elif sw < 0:
+            self.safety_window = n_world
+        else:
+            self.safety_window = min(sw, n_world)
+        if self.safety_window < 1:
+            raise SystemExit(f"--safety_window resolves to {self.safety_window} steps")
+
+        aw = int(a.anchor_window)
+        if aw < 0:
+            self.anchor_window = h_model
+        elif aw == 0:
+            # The executed world window expressed in model steps, rounded UP: at
+            # replan=10 / dt 0.1 vs 0.2 that is 5 of the 25 model steps.
+            self.anchor_window = max(1, min(
+                h_model, int(np.ceil(exec_world * world_dt / model_dt))))
+        else:
+            self.anchor_window = min(aw, h_model)
+        # None (not an all-ones vector) when the window is the whole horizon, so
+        # the unwindowed code path stays bit-for-bit what it was.
+        self._anchor_tw = (
+            None if self.anchor_window >= h_model
+            else jnp.asarray(
+                (np.arange(h_model) < self.anchor_window).astype(np.float32)))
+
+        print(f"[safety] safety window: {self.safety_window} world steps "
+              f"({self.safety_window * world_dt:.1f} s of the candidate's "
+              f"{n_world * world_dt:.1f} s); env executes {exec_world} "
+              f"({exec_world * world_dt:.1f} s)"
+              + ("" if self.safety_window <= exec_world else
+                 "  -- SCORING PAST THE REPLAN: steps beyond the executed window "
+                 "are re-planned before they are ever driven"), flush=True)
+        print(f"[safety] anchor window: {self.anchor_window}/{h_model} model steps "
+              f"({self.anchor_window * model_dt:.1f} s)"
+              + ("  (whole horizon)" if self._anchor_tw is None else
+                 "  -- the anchors are charged on the EXECUTED part only; the "
+                 "denoiser still predicts the full horizon"), flush=True)
+
+    # ------------------------------------------------------------------ #
     def _init_unroll(self):
         """Resolve and validate the teacher-forced unroll window.
 
@@ -280,11 +393,32 @@ class SafetyFineTuner:
         """
         a = self.args
         self.unroll_steps = int(a.unroll_steps)
+        self.reuse_prefix = False
         if self.unroll_steps <= 0:
             self.unroll_steps = 0
-            print("[safety] proposal=free-running (full reverse chain, "
-                  f"{int(self.actor.diffusion.timesteps)} nn evals per gradient step)",
+            # Log-driven collection samples nothing, so there is no prefix to keep.
+            self.reuse_prefix = (bool(getattr(a, "reuse_prefix", False))
+                                 and a.anchor_states != "log")
+            if self.reuse_prefix:
+                print(f"[safety] reuse_prefix: gradient replays the {a.k_trainable} "
+                      "trainable steps of the EXECUTED sample from its stored "
+                      "frozen prefix (was: a fresh full-chain sample)", flush=True)
+            n_t = int(self.actor.diffusion.timesteps)
+            tr = self._steps_train or n_t
+            ev = self._steps_eval or n_t
+            print(f"[safety] proposal=free-running  train={tr} nn evals/proposal "
+                  f"eval={ev}"
+                  + ("  (full reverse chain)" if tr == n_t and ev == n_t else
+                     f"  [DDIM-strided prefix: {n_t} -> {tr} train / {ev} eval; "
+                     f"the {a.k_trainable} trainable steps are unchanged]"),
                   flush=True)
+            if self._steps_train and not self._steps_eval:
+                print("[safety]   train strided, eval on the FULL chain: the curve "
+                      "measures the deployable policy, so a gain there is not the "
+                      "sampler's doing", flush=True)
+            if self._steps_eval:
+                print("[safety]   WARNING eval is strided too -- eval numbers are "
+                      "NOT comparable to a full-chain run", flush=True)
             return
 
         n_t = int(self.actor.diffusion.timesteps)
@@ -345,8 +479,14 @@ class SafetyFineTuner:
 
     def _gate_expert_clean(self, state):
         """Drop scenes whose own log is off-road (they dominate an unbounded barrier)."""
-        clean_b, _, _ = expert_clean_mask(self.sl_cfg, state, init_steps=11)
-        return jnp.asarray(clean_b, jnp.float32)
+        # Jitted once: eager, the 91-step road-edge clearance ran op-by-op twice
+        # per iteration (policy + BC pass) and once per eval chunk.
+        fn = getattr(self, "_jit_clean", None)
+        if fn is None:
+            cfg = self.sl_cfg
+            fn = self._jit_clean = jax.jit(
+                lambda s: expert_clean_mask(cfg, s, init_steps=11)[0])
+        return jnp.asarray(fn(state), jnp.float32)
 
     def _propose(self, params, ctx, rng):
         """Normalized -> world candidate for one context, differentiable in params."""
@@ -514,14 +654,16 @@ class SafetyFineTuner:
             terms = candidate_safety(self.objcfg, world, state=state, t0=ctx.t0,
                                      n_steps=ctx.n_steps, alive_b=ctx.alive)
             safety = terms["total"]
-            anchor = (self.actor._expert_loss(params, expert, ctx.alive)
+            tw = self._anchor_tw
+            anchor = (self.actor._expert_loss(params, expert, ctx.alive, tw)
                       if expert is not None else jnp.asarray(0.0))
             # The BC pass has its own alive mask (its own expert-clean gate and
             # its own terminations); using `ctx.alive` here would weight the
             # human's states by which scenes the POLICY was still driving.
-            bc_loss = (self.actor._expert_loss(params, bc, bc_ctx.alive)
+            bc_loss = (self.actor._expert_loss(params, bc, bc_ctx.alive, tw)
                        if bc is not None else jnp.asarray(0.0))
-            base_anchor = (self.actor.base_anchor_loss(params, *base_anchor_args)
+            base_anchor = (self.actor.base_anchor_loss(params, *base_anchor_args,
+                                                       time_weight=tw)
                            if base_anchor_args is not None else jnp.asarray(0.0))
             total = (self.objcfg.safety_weight * safety + aw * anchor
                      + bw * bc_loss + baw * base_anchor)
@@ -533,8 +675,8 @@ class SafetyFineTuner:
         return loss_fn
 
     # ------------------------------------------------------------------ #
-    def _free_core(self, params, state, dyn, keys, *, t0, n_steps, h,
-                   has_expert, has_bc, has_base):
+    def _free_core(self, params, state, dyn, keys, *, n_steps, h,
+                   has_expert, has_bc, has_base, has_prefix=False):
         """Free-running safety loss as a pure function of ``params`` + arrays.
 
         The traced twin of :meth:`_loss_for`'s ``loss_fn`` for ``unroll_steps==0``:
@@ -550,24 +692,33 @@ class SafetyFineTuner:
         aw = float(self.args.anchor_weight)
         bw = float(getattr(self.args, "bc_weight", 0.0))
         baw = float(getattr(self.args, "base_anchor_weight", 0.0))
-        traj_ncT = self.actor.sample_world_for(
-            params, dyn["cond1"], dyn["cond2"], dyn["mask"], keys["propose"])
+        # `t0` is traced (dyn), so one executable serves all replans; it used to
+        # be static and compiled once per replan index (~6 min at startup).
+        t0 = dyn["t0"]
+        if has_prefix:
+            traj_ncT = self.actor.sample_late_for(
+                params, dyn["cond1"], dyn["cond2"], dyn["mask"],
+                dyn["x_prefix"], dyn["key_late"])
+        else:
+            traj_ncT = self.actor.sample_world_for(
+                params, dyn["cond1"], dyn["cond2"], dyn["mask"], keys["propose"])
         world = self.env.norm_to_world_with(jnp.transpose(traj_ncT, (0, 2, 1)),
                                              dyn["aux"])
         terms = candidate_safety(self.objcfg, world, state=state, t0=t0,
                                  n_steps=n_steps, alive_b=dyn["alive"])
         safety = terms["total"]
+        tw = self._anchor_tw
         anchor = (self.actor._expert_loss(
             params, (dyn["expert_target"][:, :h, :], dyn["cond1"], dyn["cond2"],
-                     dyn["mask"], keys["anchor"]), dyn["alive"])
+                     dyn["mask"], keys["anchor"]), dyn["alive"], tw)
             if has_expert else jnp.asarray(0.0))
         bc_loss = (self.actor._expert_loss(
             params, (dyn["bc_target"][:, :h, :], dyn["bc_cond1"], dyn["bc_cond2"],
-                     dyn["bc_mask"], keys["bc"]), dyn["bc_alive"])
+                     dyn["bc_mask"], keys["bc"]), dyn["bc_alive"], tw)
             if has_bc else jnp.asarray(0.0))
         base_anchor = (self.actor.base_anchor_loss(
             params, dyn["expert_target"][:, :h, :], dyn["cond1"], dyn["cond2"],
-            dyn["mask"], dyn["ba_alive"], keys["base"])
+            dyn["mask"], dyn["ba_alive"], keys["base"], time_weight=tw)
             if has_base else jnp.asarray(0.0))
         total = (self.objcfg.safety_weight * safety + aw * anchor
                  + bw * bc_loss + baw * base_anchor)
@@ -583,11 +734,11 @@ class SafetyFineTuner:
         if self._jit_free_grad is None:
             self._jit_free_grad = jax.jit(
                 jax.value_and_grad(self._free_core, has_aux=True),
-                static_argnames=("t0", "n_steps", "h",
-                                 "has_expert", "has_bc", "has_base"))
+                static_argnames=("n_steps", "h", "has_expert", "has_bc",
+                                 "has_base", "has_prefix"))
         return self._jit_free_grad
 
-    def _grads_for(self, state, ctx, rng, bc_ctx=None):
+    def _grads_for(self, state, ctx, rng, bc_ctx=None, propose_key=None):
         """(grads, loss, aux) w.r.t. the trainable denoiser for one context.
 
         Free-running (``unroll_steps==0``) goes through the cached jitted
@@ -595,6 +746,14 @@ class SafetyFineTuner:
         closure. The key derivation below mirrors :meth:`_loss_for` exactly --
         anchor, then bc, then base, with ``propose`` taking the remainder -- so
         the two paths differentiate the same objective from the same seed."""
+        # The gradient is a TRAINING pass, so it samples on the training chain --
+        # restated here because an eval rollout in between will have left the eval
+        # value on the actor. It matters only for the first call, which is the one
+        # that traces `_jit_free_grad` and bakes the value in as a closure
+        # constant; every later call reuses that executable regardless. Setting it
+        # unconditionally keeps the traced program and the eager unroll path
+        # agreeing on which chain the objective is defined over.
+        self.actor.num_sample_steps = self._steps_train
         if self.unroll_steps:
             return self.actor.safety_grads(self._loss_for(state, ctx, rng, bc_ctx))
 
@@ -616,7 +775,8 @@ class SafetyFineTuner:
             rng, k_bc = jax.random.split(rng)
         if has_base:
             rng, k_base = jax.random.split(rng)
-        k_propose = rng
+        # `propose_key` pins the full-chain sample's key (equivalence bench only).
+        k_propose = rng if propose_key is None else propose_key
         # Inactive branches never execute (static flag), but their keys still
         # ride in the `keys` pytree; reuse the propose key as a placeholder.
         keys = {"propose": k_propose,
@@ -645,12 +805,23 @@ class SafetyFineTuner:
                "aux": ctx.aux, "alive": ctx.alive, "ba_alive": ba_alive,
                "expert_target": expert_target,
                "bc_target": bc_target, "bc_cond1": bc_cond1, "bc_cond2": bc_cond2,
-               "bc_mask": bc_mask, "bc_alive": bc_alive}
+               "bc_mask": bc_mask, "bc_alive": bc_alive,
+               "t0": jnp.asarray(ctx.t0, jnp.int32)}
+        has_prefix = ctx.x_prefix is not None
+        if has_prefix:
+            dyn["x_prefix"], dyn["key_late"] = ctx.x_prefix, ctx.key_late
+
+        # Canonicalize to device arrays of their own dtype. The first replan's
+        # context differs from later ones in some leaf's abstract signature
+        # (weak type / host array), which recompiled the gradient once more on
+        # replan 1 (bench job 51578: 4 cache entries where 2 were expected).
+        dyn = jax.tree_util.tree_map(lambda x: jnp.asarray(x, dtype=x.dtype), dyn)
+        keys = jax.tree_util.tree_map(lambda x: jnp.asarray(x, dtype=x.dtype), keys)
 
         (loss, aux), grads = self._free_grad_fn()(
             self.actor._tparams, state, dyn, keys,
-            t0=ctx.t0, n_steps=ctx.n_steps, h=h,
-            has_expert=has_expert, has_bc=has_bc, has_base=has_base)
+            n_steps=ctx.n_steps, h=h, has_expert=has_expert, has_bc=has_bc,
+            has_base=has_base, has_prefix=has_prefix)
         return grads, loss, aux
 
     # ------------------------------------------------------------------ #
@@ -671,6 +842,14 @@ class SafetyFineTuner:
         """
         params = self.actor._tparams if params is None else params
         key = self.rng if rng is None else rng
+        # Which reverse chain this rollout samples on. The actor caches one
+        # compiled sampler per (rl_mode, num_sample_steps), so flipping this is a
+        # cache lookup after the first use of each value -- but it only reaches
+        # the *eager* sampler calls below. The gradient pass bakes the value into
+        # `_jit_free_grad` at trace time, which is why `_grads_for` re-asserts the
+        # training value rather than trusting whatever the last rollout left here.
+        self.actor.num_sample_steps = (self._steps_train if train
+                                       else self._steps_eval)
         features = self.env.reset(state, seed=self.args.seed)
         # Log-driven collection is a *training* option only: an eval that followed
         # the human would measure the demonstration, not the policy.
@@ -706,10 +885,17 @@ class SafetyFineTuner:
             mask = features["inst_valid"]
             t0 = self.env.timestep
             horizon = int(jnp.asarray(self.env.sim_state.log_trajectory.x).shape[-1])
-            n_steps = min(self.args.replan_interval_steps, horizon - 1 - t0)
-            if n_steps <= 0:
+            n_exec = min(self.args.replan_interval_steps, horizon - 1 - t0)
+            # The SCORED window, which is `--safety_window` (>= n_exec when the
+            # loss is charged past the replan) clipped by what the log can supply:
+            # `neighbor_window` slices log_trajectory at t0+1..t0+n_steps, so a
+            # window running off the end of the scenario would silently return a
+            # short slice and mismatch the ego boxes.
+            n_steps = min(self.safety_window, horizon - 1 - t0)
+            if n_exec <= 0 or n_steps <= 0:
                 break
-            ctx = ReplanContext(t0, cond1, cond2, mask, self.env.last_aux, alive, n_steps)
+            ctx = ReplanContext(t0, cond1, cond2, mask, self.env.last_aux, alive,
+                                n_steps, n_exec)
             if train:
                 contexts.append(ctx)
                 ctx_expert.append(features["ego_trajectory"])
@@ -720,6 +906,12 @@ class SafetyFineTuner:
                 # (current) state, 1.. are the steps to drive. Same slice
                 # `env.expert_replay_episode` uses.
                 world = log_world[:, t0 : t0 + self.args.replan_interval_steps + 1, :]
+            elif train and self.reuse_prefix:
+                traj_ncT, (ctx.x_prefix, ctx.key_late) = \
+                    self.actor.sample_world_with_prefix(
+                        params, ctx.cond1, ctx.cond2, ctx.mask, rk)
+                world = self.env.norm_to_world_with(
+                    jnp.transpose(traj_ncT, (0, 2, 1)), ctx.aux)
             else:
                 world = self._propose(params, ctx, rk)
             out = self.env.step(trajectory_world_bt5=world)
@@ -741,7 +933,7 @@ class SafetyFineTuner:
                 exec_step_idx.append(
                     t0 + 1 + np.arange(pso.shape[-1], dtype=np.int32))
             done = jnp.asarray(out.terminated_b) | jnp.asarray(out.truncated_b)
-            last_exec = int(t0 + (pso.shape[-1] if pso is not None else n_steps))
+            last_exec = int(t0 + (pso.shape[-1] if pso is not None else n_exec))
             newly_done = (done_at < 0) & (np.asarray(done))
             done_at[newly_done] = last_exec
             alive = alive * (1.0 - done.astype(jnp.float32))
@@ -1043,6 +1235,94 @@ class SafetyFineTuner:
         with (d / "probe_log.jsonl").open("a") as fh:
             fh.write(json.dumps(rec) + "\n")
 
+    def _classify_now(self, ids, chunk):
+        """Per-scene solved flag at the CURRENTLY loaded weights, in id order.
+
+        Rolls the given scene ids through `_probe_arm` (the fixed eval seed the
+        slider uses), so a scene's bucket here is the outcome its last slider
+        frame shows -- not a differently-seeded eval that would disagree.
+        """
+        keep = self.probe_set
+        solved = []
+        try:
+            for i in range(0, len(ids), chunk):
+                sub = ids[i:i + chunk]
+                self.probe_set = {"state": self.sampler.load_explicit(sub)}
+                fields, _ = self._probe_arm("ft")
+                solved.extend(int(v) for v in fields["solved_ft"].tolist())
+        finally:
+            self.probe_set = keep
+        return np.asarray(solved, dtype=bool)
+
+    def probe_offline(self, run_dir, out_dir, k):
+        """Re-select probe scenes from a finished run so all 8 transition
+        buckets are populated, then re-roll them across the run's checkpoints.
+
+        base-outcome (the split: failure_* = base failed, success_* = base
+        solved) x now-outcome (solved at the last checkpoint) x train/heldout is
+        2x2x2 = 8 columns. The in-run probe cannot show `regressed` because it
+        pins its scenes before training; this scans the split populations at the
+        trained weights and picks scenes that actually landed in each bucket.
+        """
+        a = self.args
+        run_dir, out_dir = Path(run_dir), Path(out_dir)
+        spec = self._read_splits_spec(a.splits_json)
+        chunk = max(1, int(a.eval_chunk))
+        cap = max(1, int(a.split_cap))
+        rng = np.random.default_rng(int(a.probe_seed))
+        ckpts = sorted(run_dir.glob("iter_*"), key=lambda p: int(p.name.split("_")[1]))
+        if not ckpts:
+            raise SystemExit(f"[probe-offline] no iter_* checkpoints in {run_dir}")
+        last = ckpts[-1]
+        print(f"[probe-offline] classifying at {last.name} over {cap}/split", flush=True)
+        self.load(last)
+
+        # base-failed vs base-solved x train/heldout -> now-outcome -> bucket.
+        cat_of = {("failure", True): "recovered", ("failure", False): "stillfail",
+                  ("success", True): "stillok",   ("success", False): "regressed"}
+        pinned_ids, pinned_lab, pinned_tr = [], [], []
+        counts = {}
+        for split in ("failure_train", "success_train",
+                      "failure_heldout", "success_heldout"):
+            if split not in spec["splits"]:
+                continue
+            base_fail = split.startswith("failure")
+            pool = "train" if split.endswith("_train") else "heldout"
+            ids = sorted(set(self._split_ids(spec, split)))[:cap]
+            solved = self._classify_now(ids, chunk)
+            for now_ok in (True, False):
+                cat = f"{cat_of[('failure' if base_fail else 'success', now_ok)]}_{pool}"
+                sel = np.asarray(ids)[solved == now_ok]
+                counts[cat] = int(sel.size)
+                if sel.size == 0:
+                    print(f"[probe-offline]   {cat:>18}: 0 scenes (empty bucket)", flush=True)
+                    continue
+                take = sel if sel.size <= k else rng.choice(sel, size=k, replace=False)
+                for i in np.sort(take).tolist():
+                    pinned_ids.append(int(i)); pinned_lab.append(cat)
+                    pinned_tr.append(pool == "train")
+                print(f"[probe-offline]   {cat:>18}: {sel.size} available, took {len(take)}",
+                      flush=True)
+        if not pinned_ids:
+            raise SystemExit("[probe-offline] no scenes selected")
+        self.probe_set = {"ids": pinned_ids, "labels": pinned_lab,
+                          "trained": pinned_tr,
+                          "state": self.sampler.load_explicit(pinned_ids)}
+        print(f"[probe-offline] pinned {len(pinned_ids)} scenes across "
+              f"{len(set(pinned_lab))} buckets; counts={counts}", flush=True)
+
+        # Base (frozen) + one frame per checkpoint, into out_dir/probe/.
+        (out_dir / "probe").mkdir(parents=True, exist_ok=True)
+        self.probe_static(out_dir)
+        for c in ckpts:
+            it = int(c.name.split("_")[1])
+            self.load(c)
+            self._adam_steps = it
+            self.probe_dump(out_dir, it)
+            print(f"[probe-offline] dumped {c.name}", flush=True)
+        print(f"[probe-offline] wrote {out_dir/'probe'}  ({len(ckpts)} frames + base)",
+              flush=True)
+
     # ------------------------------------------------------------------ #
     def _load_eval_splits(self):
         """Load the fixed named eval splits from ``--splits_json`` for the
@@ -1200,7 +1480,8 @@ class SafetyFineTuner:
                 if not k.startswith("_")}
 
     # ------------------------------------------------------------------ #
-    def verify_splits(self, out_path, *, names, repeats, seed, chunk, caps=None):
+    def verify_splits(self, out_path, *, names, repeats, seed, chunk, caps=None,
+                      ckpt=""):
         """Re-measure the BASE policy per scene on named splits; append JSONL rows.
 
         WHY. The split labels came from `scan_womd_headroom`, which scored the
@@ -1268,6 +1549,9 @@ class SafetyFineTuner:
                         fh.write(json.dumps({
                             "scene_id": int(sid), "split": name,
                             "repeats": int(repeats), "verify_seed": int(seed),
+                            # "" = frozen base. Recorded per row so two files can
+                            # never be silently paired against the wrong policy.
+                            "ckpt": str(ckpt),
                             **{f"{k}_frac": float(acc[k][j] / repeats) for k in acc},
                         }) + "\n")
                 done.update(sub)
@@ -1799,6 +2083,36 @@ def build_argparser():
     # The collection rollout is free-running; exploration noise is not needed and
     # 0.03 normalized is 3 m of positional jitter (ego_range=100). Keep it tiny.
     p.add_argument("--sigma_floor", type=float, default=1e-4)
+    # ---- DDIM striding of the FROZEN prefix (the loss-speed knob) ------------ #
+    # Free-running costs `timesteps` (100) denoiser evals per proposal, and the
+    # iteration pays that TWICE per replan: once in the collection rollout and
+    # again inside the gradient pass. Only the last `k_trainable` steps carry a
+    # gradient; the other 90 are frozen forward compute. `num_sample_steps`
+    # replaces that prefix with `S - k_trainable` strided DDIM steps over the same
+    # span, leaving the trainable late chain untouched -- so S=20 at k=10 is 20
+    # evals instead of 100 on BOTH passes.
+    #
+    # This is an APPROXIMATION, not a refactor: a strided prefix delivers a
+    # slightly different x_{k-1}, so the policy is not the same policy. That is
+    # why it is off by default and why eval has its own knob below. Gate it with
+    # slurm/submit_bench_safety_ddim.sh before adopting a value.
+    p.add_argument("--reuse_prefix", action=argparse.BooleanOptionalAction,
+                   default=False,
+                   help="free-running only: keep each collected sample's frozen "
+                        "prefix output and differentiate the executed trajectory "
+                        "by replaying just the k_trainable late steps, instead "
+                        "of re-running the whole chain on a fresh noise draw.")
+    p.add_argument("--collect_steps", type=int, default=0,
+                   help="0 = full reverse chain. S in [k_trainable, timesteps] "
+                        "DDIM-subsamples the frozen prefix for the TRAINING "
+                        "passes (collection rollout + gradient). S=20 at "
+                        "k_trainable=10 is ~5x fewer denoiser evals.")
+    p.add_argument("--eval_steps", type=int, default=0,
+                   help="Same knob for eval/probe/verify rollouts. Default 0 "
+                        "(full chain) deliberately: eval must measure the policy "
+                        "you would deploy, and striding it too would make a "
+                        "curve movement unattributable between the weights and "
+                        "the sampler. Set it only to reproduce an old run.")
     # ---- teacher-forced unroll (rl.diffusion_ft.unrolled_prediction) --------- #
     # 0 = free-running: denoise from pure noise through the whole chain (the
     # original path). K >= 1 = corrupt the expert future to a random low-noise
@@ -1864,6 +2178,33 @@ def build_argparser():
                         "iter 0 (the KL collapses within a few steps, like bc).")
     p.add_argument("--edge_margin", type=float, default=0.3)
     p.add_argument("--agent_margin", type=float, default=0.75)
+    # tau is the WIDTH OF THE KNEE of `tau*softplus((margin-c)/tau)`, and it is a
+    # separate knob from the margin: the margin says where the cost turns on, tau
+    # says how sharply. It also sets the loss AT the margin (tau*ln2) and the
+    # distance over which gradient exists past it (~2.7*tau), so a small tau is a
+    # near-hinge that only pushes on frames already inside the margin, while a
+    # large one is a soft field that pulls on clear frames too. Calibrated
+    # defaults, not arbitrary -- see tests/calibrate_expert.py.
+    p.add_argument("--edge_tau", type=float, default=0.15,
+                   help="softplus knee width (m) on the road-edge barrier")
+    p.add_argument("--agent_tau", type=float, default=0.25,
+                   help="softplus knee width (m) on the agent-gap barrier")
+    # See `SafetyFineTuner._init_windows` for the two time bases.
+    p.add_argument("--safety_window", type=int, default=0,
+                   help="WORLD steps of the candidate the safety term scores. "
+                        "0 = the executed window (replan_interval_steps), which "
+                        "is what every run before 2026-09-09 did; -1 = the whole "
+                        "candidate (~50 steps / 5 s); N = N world steps. Scoring "
+                        "past the replan prices trajectory that will be replanned "
+                        "before it is driven -- but a 1 s window also cannot see a "
+                        "violation the candidate commits at 2.5 s.")
+    p.add_argument("--anchor_window", type=int, default=-1,
+                   help="MODEL steps of the horizon the anchor/bc/base_anchor "
+                        "terms are charged on. -1 = the whole horizon (25 steps / "
+                        "5 s), the pre-2026-09-09 behaviour; 0 = auto, the "
+                        "executed window in model steps (5 at replan=10); N = N "
+                        "model steps. Windowing reweights the LOSS only -- the "
+                        "denoiser still predicts the full horizon.")
     p.add_argument("--n_discs", type=int, default=5)
     p.add_argument("--agent_geometry", default="exact", choices=("exact", "disc"))
     p.add_argument("--eval_every", type=int, default=10)
@@ -1964,6 +2305,23 @@ def build_argparser():
                         "every --eval_every; a split larger than --eval_chunk is "
                         "rolled in chunks, so this is a time budget, not a "
                         "memory limit.")
+    p.add_argument("--probe_offline", action="store_true",
+                   help="do not train: re-select probe scenes POST-HOC from a "
+                        "finished run so every transition bucket is populated "
+                        "(the in-run probe fixes its scenes before training, so "
+                        "its `regressed` bucket is empty whenever none of the "
+                        "pre-picked successes happen to regress). Classifies "
+                        "each split scene by its outcome at the last saved "
+                        "checkpoint, picks --probe_offline_k per (base-outcome x "
+                        "now-outcome x train/heldout) bucket, then re-rolls that "
+                        "pinned set over the FROZEN base and every iter_* "
+                        "checkpoint into --probe_offline_dir/probe for the "
+                        "slider. GPU; reads --out_dir's checkpoints.")
+    p.add_argument("--probe_offline_k", type=int, default=3,
+                   help="scenes per transition bucket for --probe_offline")
+    p.add_argument("--probe_offline_dir", default="",
+                   help="where --probe_offline writes its probe/ dumps "
+                        "(default <out_dir>/probe_offline)")
     p.add_argument("--verify_only", action="store_true",
                    help="do not train: re-score the FROZEN base per scene on "
                         "--splits and write verify_rows.jsonl, so the failure "
@@ -2015,11 +2373,32 @@ def main():
         names = [n.strip() for n in args.splits.split(",") if n.strip()]
         args.splits = ""
         tuner = SafetyFineTuner(args)
+        if args.load_ckpt:
+            # Score a FINE-TUNED checkpoint instead of the frozen base. The per-
+            # scene rows are what a deployment gate needs: "run the fine-tune only
+            # where a hardness score says so" can only be evaluated if the base
+            # and the fine-tune are both known scene by scene, on the SAME draws.
+            # Snapshot dirs (`iter_*`) carry weights only; `load` warns about the
+            # missing optimizer state, which an eval does not use.
+            print(f"[verify] scoring fine-tuned weights from {args.load_ckpt}",
+                  flush=True)
+            tuner.load(args.load_ckpt)
+        else:
+            print("[verify] scoring the FROZEN base checkpoint", flush=True)
         tuner.verify_splits(
             args.verify_out or (Path(args.out_dir) / "verify_rows.jsonl"),
-            names=names, repeats=int(args.verify_repeats),
+            names=names, repeats=int(args.verify_repeats), ckpt=args.load_ckpt,
             seed=int(args.verify_seed), chunk=int(args.eval_chunk),
             caps=[c.strip() for c in str(args.verify_cap).split(",") if c.strip()])
+        return
+    if args.probe_offline:
+        args.eval_only = True          # do not train; skip the in-run probe/marg
+        tuner = SafetyFineTuner(args)
+        if tuner.sampler is None:
+            raise SystemExit("--probe_offline needs --shard_glob and --splits_json")
+        run_dir = Path(args.out_dir)
+        pdir = Path(args.probe_offline_dir) if args.probe_offline_dir else run_dir / "probe_offline"
+        tuner.probe_offline(run_dir, pdir, int(args.probe_offline_k))
         return
     if args.eval_only:
         tuner = SafetyFineTuner(args)

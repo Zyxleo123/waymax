@@ -35,8 +35,27 @@ set -euo pipefail
 ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
 cd "$ROOT"; mkdir -p "$ROOT/logs/dft"
 
+# A DIRECTORY argument is array mode: this task sources <dir>/<task_id>.env, so
+# one job array can run N differently-configured arms under a single `%N`
+# concurrency throttle (that throttle is the only way to bound how many GPUs a
+# sweep holds at once -- independent sibling jobs have no such knob). Everything
+# else is unchanged: a FILE argument is sourced, a VAR=value argument exported.
 for arg in "$@"; do
-  if [[ -f "$arg" ]]; then
+  if [[ -d "$arg" ]]; then
+    if [[ -z "${SLURM_ARRAY_TASK_ID:-}" ]]; then
+      echo "FATAL: '$arg' is a directory but this is not an array job." >&2
+      echo "       Submit with --array, or pass a single .env FILE." >&2
+      exit 1
+    fi
+    ARM_ENV="$arg/${SLURM_ARRAY_TASK_ID}.env"
+    if [[ ! -f "$ARM_ENV" ]]; then
+      echo "FATAL: array task ${SLURM_ARRAY_TASK_ID} has no env file $ARM_ENV" >&2
+      exit 1
+    fi
+    echo "array task ${SLURM_ARRAY_TASK_ID} -> $ARM_ENV"
+    # shellcheck disable=SC1090
+    source "$ARM_ENV"
+  elif [[ -f "$arg" ]]; then
     # shellcheck disable=SC1090
     source "$arg"
   elif [[ "$arg" == *=* ]]; then export "${arg?}"; fi
@@ -62,7 +81,11 @@ DFT_SHARD_GLOB="${DFT_SHARD_GLOB:-/zfsauton/scratch/eshau/womd/tf_example/traini
 DFT_INDEX_DIR="${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
 DFT_TFRECORD="${DFT_TFRECORD:-}"
 DFT_INDICES="${DFT_INDICES:-0,1,2,3,4,5,6,7}"
-DFT_SCENES_PER_ITER="${DFT_SCENES_PER_ITER:-16}"
+# 32, not 16: at 16 the denoiser leaves the a6000 idle. Measured on the same
+# denoiser+env under DPPO (see the collect-bottleneck note): B=32 is 4x the data
+# for +11% wall time, and B=64 OOMs in the actor gradient. 48 needs an a6000 --
+# the 24 GB a5000s already OOM on the eval rollout at DFT_EVAL_CHUNK=64.
+DFT_SCENES_PER_ITER="${DFT_SCENES_PER_ITER:-32}"
 DFT_EVAL_SCENES="${DFT_EVAL_SCENES:-32}"
 DFT_DATA_SEED="${DFT_DATA_SEED:-0}"
 DFT_PREFETCH="${DFT_PREFETCH:-1}"
@@ -76,6 +99,13 @@ DFT_SPLITS="${DFT_SPLITS:-failure_heldout,success_heldout,failure_train,success_
 # 1000 puts that floor at ~0.015. Cost is linear in cap x DFT_EVAL_REPEATS x
 # |DFT_SPLITS| and is charged at every DFT_EVAL_EVERY, so raising this without
 # raising DFT_EVAL_EVERY turns a 2 h run into a 20 h one.
+#
+# That is exactly what happened. Measured 2026-09-09 on the 700-iteration run:
+# training is 11 s/iter (`iter_s`, stamped BEFORE the eval block, so eval is on
+# top of it), i.e. 2.1 h for the whole run -- while 70 eval points at
+# 2346 scenes x 4 repeats cost 25-40 h. Training was 5-10% of the wall clock and
+# the safety loss was never the constraint. DFT_EVAL_EVERY and DFT_EVAL_REPEATS
+# below are set from that measurement; raise the cap only together with them.
 DFT_SPLIT_CAP="${DFT_SPLIT_CAP:-1000}"
 # Splits longer than this are rolled in chunks and aggregated scene-weighted. A
 # single batched state of 1000 scenes is ~2 GB and its rollout does not fit on a
@@ -144,8 +174,31 @@ DFT_BASE_ANCHOR_SUCCESS_ONLY="${DFT_BASE_ANCHOR_SUCCESS_ONLY:-1}"
 DFT_SAFETY_WEIGHT="${DFT_SAFETY_WEIGHT:-1.0}"
 DFT_EDGE_MARGIN="${DFT_EDGE_MARGIN:-0.3}"
 DFT_AGENT_MARGIN="${DFT_AGENT_MARGIN:-0.75}"
+# tau = the WIDTH OF THE KNEE of `tau*softplus((margin-c)/tau)`, a separate knob
+# from the margin: the margin says WHERE cost starts, tau says HOW SHARPLY. It
+# sets the loss at the margin (tau*ln2) and the ~2.7*tau band past it over which
+# gradient still exists, so small tau is a near-hinge that only pushes frames
+# already inside the margin and large tau is a soft field that also pulls frames
+# that are already clear. Defaults are the calibrated ones (tests/calibrate_expert).
+DFT_EDGE_TAU="${DFT_EDGE_TAU:-0.15}"
+DFT_AGENT_TAU="${DFT_AGENT_TAU:-0.25}"
 DFT_AGENT_GEOMETRY="${DFT_AGENT_GEOMETRY:-exact}"
 DFT_N_DISCS="${DFT_N_DISCS:-5}"
+
+# ---- which part of the candidate each term is charged on ---------------------
+# Two different time bases, so two different units (see `_init_windows`):
+#  * SAFETY_WINDOW is in WORLD steps (0.1 s). The candidate resamples to ~50 of
+#    them (5 s) and the env drives only DFT_REPLAN (10, 1 s) before replanning.
+#    0 = the executed window, what every run before 2026-09-09 scored; -1 = the
+#    whole candidate; N = N world steps. Widening prices trajectory that gets
+#    replanned before it is driven -- but a 1 s window cannot see a violation the
+#    candidate commits at 2.5 s, so the policy is free to aim at one.
+#  * ANCHOR_WINDOW is in MODEL steps (0.2 s), the denoiser's own horizon axis
+#    (25 steps / 5 s). -1 = the whole horizon, the pre-2026-09-09 behaviour;
+#    0 = auto, the executed window in model steps (5); N = N model steps. It
+#    reweights the loss only -- the denoiser still predicts the full horizon.
+DFT_SAFETY_WINDOW="${DFT_SAFETY_WINDOW:-0}"
+DFT_ANCHOR_WINDOW="${DFT_ANCHOR_WINDOW:--1}"
 
 # ---- where the gradient enters ----------------------------------------------
 # k_trainable is the low-noise window: the gradient reaches the denoiser only at
@@ -154,6 +207,22 @@ DFT_N_DISCS="${DFT_N_DISCS:-5}"
 # already the bottom 10% of the chain; 3 restricts to the precise-turning end.
 DFT_K_TRAINABLE="${DFT_K_TRAINABLE:-10}"
 DFT_PREFIX_LEN="${DFT_PREFIX_LEN:-5}"
+
+# ---- DDIM striding of the frozen prefix (the loss-speed knob) ----------------
+# The free-running proposal costs 100 denoiser evals, and each replan pays it
+# TWICE: once in the collection rollout, once inside the gradient pass. Only the
+# last DFT_K_TRAINABLE steps carry a gradient, so the other 90 are frozen forward
+# compute. S here replaces that prefix with S - k strided DDIM steps: S=20 at
+# k=10 is 20 evals instead of 100 on both passes, ~5x off the training portion.
+#
+# It is an APPROXIMATION -- a strided prefix hands the trainable chain a slightly
+# different x_{k-1}, so it is a different policy. 0 (full chain) until
+# submit_bench_safety_ddim.sh says which S holds solved/offroad flat.
+DFT_COLLECT_STEPS="${DFT_COLLECT_STEPS:-0}"
+# Eval deliberately stays on the full chain even when collection is strided: the
+# curve has to measure the policy you would deploy, or a movement in it cannot be
+# attributed between the weights and the sampler.
+DFT_EVAL_STEPS="${DFT_EVAL_STEPS:-0}"
 
 # ---- how the scored trajectory is proposed ----------------------------------
 # 0 = free-running: denoise from pure noise through all 100 steps (the original
@@ -185,7 +254,16 @@ DFT_EPOCHS="${DFT_EPOCHS:-1}"
 DFT_MAX_REPLANS="${DFT_MAX_REPLANS:-8}"
 DFT_REPLAN="${DFT_REPLAN:-10}"
 DFT_LR="${DFT_LR:-1e-5}"
-DFT_EVAL_EVERY="${DFT_EVAL_EVERY:-10}"
+# 100, not 10. At 10 the run spent 90-95% of its wall clock evaluating (see the
+# DFT_SPLIT_CAP note): 70 eval points against 2.1 h of training. 100 still gives
+# ~30 curve points over a 3000-iteration run, which is more resolution than the
+# 700-iteration runs it replaces ever had.
+DFT_EVAL_EVERY="${DFT_EVAL_EVERY:-100}"
+# 1 = the gradient replays only the k_trainable late steps of the EXECUTED
+# sample from its stored frozen prefix (tests/bench_reuse_prefix.py checks it
+# matches the full chain on the same key). 0 = old behaviour: a fresh full-chain
+# sample per gradient, ~90 extra denoiser evals x 8 contexts per iteration.
+DFT_REUSE_PREFIX="${DFT_REUSE_PREFIX:-1}"
 DFT_SAVE_EVERY="${DFT_SAVE_EVERY:-25}"
 # Un-overwritten snapshots (weights only, ~121 MB). `latest` is overwritten, so
 # without these a long run cannot answer "the success split was best 2000
@@ -199,10 +277,14 @@ DFT_KEEP_EVERY="${DFT_KEEP_EVERY:-0}"
 # steps on a 200-iteration run and moved the random-walk distance. 1 restores it.
 DFT_GRAD_ACCUM="${DFT_GRAD_ACCUM:-0}"
 # Evals draw from their own seed, not the training stream, and average this many
-# of them. 4 is the point where a 48-scene split's noise stops dominating the
-# arm-vs-arm difference; it costs 4x the eval time, which is why eval_every=10.
+# of them. This was 4, and 4 was calibrated against DFT_SPLIT_CAP=48, where a
+# single pass has a binomial floor of ~0.07 on a rate near 0.8 -- the same size
+# as the effect being measured. The cap then went 48 -> 1000, which drops that
+# floor to ~0.013 in ONE pass, and nobody took the repeats back out: the run was
+# paying 4x to re-roll the same fixed 1000 scenes for precision it already had.
+# 1 unless you drop the cap back down; the two knobs buy the same thing.
 DFT_EVAL_SEED="${DFT_EVAL_SEED:-12345}"
-DFT_EVAL_REPEATS="${DFT_EVAL_REPEATS:-4}"
+DFT_EVAL_REPEATS="${DFT_EVAL_REPEATS:-1}"
 # Score the frozen base once on the same seeds and carry it in every eval row.
 DFT_EVAL_BASE="${DFT_EVAL_BASE:-1}"
 DFT_RESUME="${DFT_RESUME:-1}"
@@ -227,11 +309,16 @@ echo "out_dir=$DFT_OUT_DIR iters=$DFT_ITERS lr=$DFT_LR k_trainable=$DFT_K_TRAINA
 echo "anchor_weight=$DFT_ANCHOR_WEIGHT safety_weight=$DFT_SAFETY_WEIGHT" \
      "bc_weight=$DFT_BC_WEIGHT base_anchor_weight=$DFT_BASE_ANCHOR_WEIGHT" \
      "base_anchor_success_only=$DFT_BASE_ANCHOR_SUCCESS_ONLY"
-echo "margins edge=$DFT_EDGE_MARGIN agent=$DFT_AGENT_MARGIN geom=$DFT_AGENT_GEOMETRY"
+echo "margins edge=$DFT_EDGE_MARGIN agent=$DFT_AGENT_MARGIN geom=$DFT_AGENT_GEOMETRY" \
+     "tau edge=$DFT_EDGE_TAU agent=$DFT_AGENT_TAU"
+echo "windows safety=$DFT_SAFETY_WINDOW world-steps (0=executed, -1=full)" \
+     "anchor=$DFT_ANCHOR_WINDOW model-steps (-1=full horizon, 0=executed)"
 echo "sigma_floor=$DFT_SIGMA_FLOOR replan=$DFT_REPLAN max_replans=$DFT_MAX_REPLANS"
+echo "collect_steps=$DFT_COLLECT_STEPS eval_steps=$DFT_EVAL_STEPS (0=full chain)"
 echo "grad_accum=$DFT_GRAD_ACCUM eval_seed=$DFT_EVAL_SEED" \
      "eval_repeats=$DFT_EVAL_REPEATS eval_base=$DFT_EVAL_BASE"
 echo "eval_splits cap=$DFT_SPLIT_CAP chunk=$DFT_EVAL_CHUNK every=$DFT_EVAL_EVERY"
+echo "reuse_prefix=$DFT_REUSE_PREFIX"
 echo "iters=$DFT_ITERS save_every=$DFT_SAVE_EVERY keep_every=$DFT_KEEP_EVERY" \
      "resume=$DFT_RESUME"
 echo "train_pool=${DFT_TRAIN_SPLITS:-uniform-corpus} cap=$DFT_TRAIN_SPLIT_CAP" \
@@ -265,12 +352,17 @@ ARGS=(--ckpt "$DFT_CKPT" --out_dir "$DFT_OUT_DIR"
       --max_replans "$DFT_MAX_REPLANS" --replan_interval_steps "$DFT_REPLAN"
       --lr "$DFT_LR" --k_trainable "$DFT_K_TRAINABLE" --prefix_len "$DFT_PREFIX_LEN"
       --sigma_floor "$DFT_SIGMA_FLOOR"
+      --collect_steps "$DFT_COLLECT_STEPS" --eval_steps "$DFT_EVAL_STEPS"
       --unroll_steps "$DFT_UNROLL_STEPS" --unroll_grad_steps "$DFT_UNROLL_GRAD_STEPS"
       --unroll_t_start "$DFT_UNROLL_T_START" --unroll_t_end "$DFT_UNROLL_T_END"
       --unroll_eta "$DFT_UNROLL_ETA" --anchor_states "$DFT_ANCHOR_STATES"
       --safety_weight "$DFT_SAFETY_WEIGHT" --anchor_weight "$DFT_ANCHOR_WEIGHT"
       --bc_weight "$DFT_BC_WEIGHT" --base_anchor_weight "$DFT_BASE_ANCHOR_WEIGHT"
       --edge_margin "$DFT_EDGE_MARGIN" --agent_margin "$DFT_AGENT_MARGIN"
+      --edge_tau "$DFT_EDGE_TAU" --agent_tau "$DFT_AGENT_TAU"
+      # `=` form: both take -1, and a bare `--flag -1` is what argparse misread
+      # as an option string in job 43942.
+      --safety_window="$DFT_SAFETY_WINDOW" --anchor_window="$DFT_ANCHOR_WINDOW"
       --agent_geometry "$DFT_AGENT_GEOMETRY" --n_discs "$DFT_N_DISCS"
       --eval_every "$DFT_EVAL_EVERY" --save_every "$DFT_SAVE_EVERY"
       --keep_every "$DFT_KEEP_EVERY"
@@ -278,6 +370,7 @@ ARGS=(--ckpt "$DFT_CKPT" --out_dir "$DFT_OUT_DIR"
       --eval_seed "$DFT_EVAL_SEED" --eval_repeats "$DFT_EVAL_REPEATS"
       --resume "$DFT_RESUME" --seed "$DFT_SEED")
 [[ "$DFT_EVAL_BASE" == "0" ]] && ARGS+=(--no-eval_base) || ARGS+=(--eval_base)
+[[ "$DFT_REUSE_PREFIX" == "0" ]] && ARGS+=(--no-reuse_prefix) || ARGS+=(--reuse_prefix)
 [[ "$DFT_BASE_ANCHOR_SUCCESS_ONLY" == "0" ]] \
   && ARGS+=(--no-base_anchor_success_only) || ARGS+=(--base_anchor_success_only)
 if [[ -n "$DFT_TFRECORD" ]]; then
