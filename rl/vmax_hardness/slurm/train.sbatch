@@ -41,7 +41,7 @@ echo "fine-tune: init=$VMH_BEST_CKPT risk=$VMH_RISK_OUT/risk.npz alpha=$VMH_ALPH
 echo "save -> $VMH_SAVE_ROOT/$VMH_NAME_RUN"
 
 cd "$ROOT/V-Max"
-"$PYTHON" -m vmax.scripts.training.train \
+"$VMH_TRAIN_PYTHON" -m vmax.scripts.training.train \
   algorithm=sac \
   network/encoder=lq \
   path_dataset=/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord@1000 \

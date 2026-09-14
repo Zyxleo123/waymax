@@ -198,6 +198,44 @@ DFT_N_DISCS="${DFT_N_DISCS:-5}"
 #    0 = auto, the executed window in model steps (5); N = N model steps. It
 #    reweights the loss only -- the denoiser still predicts the full horizon.
 DFT_SAFETY_WINDOW="${DFT_SAFETY_WINDOW:-0}"
+# Matched-sample preservation + where the safety term applies (2026-09-13).
+# Defaults are the pre-09-13 behaviour: term off, safety on every live row.
+DFT_SAFETY_ROWS="${DFT_SAFETY_ROWS:-all}"
+DFT_PRESERVE_WEIGHT="${DFT_PRESERVE_WEIGHT:-0.0}"
+DFT_PRESERVE_SCENES="${DFT_PRESERVE_SCENES:-16}"
+DFT_PRESERVE_WINDOW="${DFT_PRESERVE_WINDOW:-0}"
+DFT_PRESERVE_RISK="${DFT_PRESERVE_RISK:-}"
+DFT_PRESERVE_HARD_FRAC="${DFT_PRESERVE_HARD_FRAC:-0.5}"
+DFT_PRESERVE_HARD_QUANTILE="${DFT_PRESERVE_HARD_QUANTILE:-0.8}"
+DFT_PRESERVE_REPLAY="${DFT_PRESERVE_REPLAY:-256}"
+DFT_PRESERVE_REPLAY_PER_ITER="${DFT_PRESERVE_REPLAY_PER_ITER:-8}"
+DFT_PRESERVE_REPLAY_USES="${DFT_PRESERVE_REPLAY_USES:-10}"
+DFT_REPAIR_DATA="${DFT_REPAIR_DATA:-}"
+DFT_REPAIR_WEIGHT="${DFT_REPAIR_WEIGHT:-0.0}"
+DFT_REPAIR_BATCH="${DFT_REPAIR_BATCH:-16}"
+# ---- transition replay (2026-09-14) ------------------------------------------
+# The collection rollout's OWN reverse-diffusion transitions, kept one per datum
+# and replayed later. The safety loss is charged on the clean prediction reached
+# from a stored (x_t, t): TB_UNROLL_STEPS=1 scores x0_hat directly (one network
+# eval, no unroll -- a posterior MEAN, so it carries the Jensen gap the unrolled
+# path exists to shrink), K>1 unrolls K-1 DDIM steps to TB_UNROLL_T_END first.
+# Unlike --unroll_steps, the state is NOT q_sample(x0_expert, t): it is one the
+# deployed sampler passed through, so there is no diffusion-state mismatch.
+# TB_GRAD_STEPS=1 means the update differentiates exactly one transition.
+# 0 weight = off, nothing stored, the run is bit-for-bit what it was.
+DFT_TB_WEIGHT="${DFT_TB_WEIGHT:-0.0}"
+DFT_TB_CAPACITY="${DFT_TB_CAPACITY:-8192}"
+DFT_TB_BATCH="${DFT_TB_BATCH:-32}"
+DFT_TB_STORE_PER_REPLAN="${DFT_TB_STORE_PER_REPLAN:-1}"
+DFT_TB_MAX_USES="${DFT_TB_MAX_USES:-0}"
+DFT_TB_MIN_SIZE="${DFT_TB_MIN_SIZE:-0}"
+DFT_TB_T_MIN="${DFT_TB_T_MIN:-0}"
+DFT_TB_T_MAX="${DFT_TB_T_MAX:--1}"
+DFT_TB_UNROLL_STEPS="${DFT_TB_UNROLL_STEPS:-1}"
+DFT_TB_UNROLL_T_END="${DFT_TB_UNROLL_T_END:-0}"
+DFT_TB_UNROLL_ETA="${DFT_TB_UNROLL_ETA:-0.0}"
+DFT_TB_GRAD_STEPS="${DFT_TB_GRAD_STEPS:-1}"
+DFT_TB_WINDOW="${DFT_TB_WINDOW:-0}"
 DFT_ANCHOR_WINDOW="${DFT_ANCHOR_WINDOW:--1}"
 
 # ---- where the gradient enters ----------------------------------------------
@@ -313,12 +351,18 @@ echo "margins edge=$DFT_EDGE_MARGIN agent=$DFT_AGENT_MARGIN geom=$DFT_AGENT_GEOM
      "tau edge=$DFT_EDGE_TAU agent=$DFT_AGENT_TAU"
 echo "windows safety=$DFT_SAFETY_WINDOW world-steps (0=executed, -1=full)" \
      "anchor=$DFT_ANCHOR_WINDOW model-steps (-1=full horizon, 0=executed)"
+echo "safety_rows=$DFT_SAFETY_ROWS preserve_weight=$DFT_PRESERVE_WEIGHT" \
+     "preserve_scenes=$DFT_PRESERVE_SCENES risk=${DFT_PRESERVE_RISK:-none}"
 echo "sigma_floor=$DFT_SIGMA_FLOOR replan=$DFT_REPLAN max_replans=$DFT_MAX_REPLANS"
 echo "collect_steps=$DFT_COLLECT_STEPS eval_steps=$DFT_EVAL_STEPS (0=full chain)"
 echo "grad_accum=$DFT_GRAD_ACCUM eval_seed=$DFT_EVAL_SEED" \
      "eval_repeats=$DFT_EVAL_REPEATS eval_base=$DFT_EVAL_BASE"
 echo "eval_splits cap=$DFT_SPLIT_CAP chunk=$DFT_EVAL_CHUNK every=$DFT_EVAL_EVERY"
 echo "reuse_prefix=$DFT_REUSE_PREFIX"
+echo "tb_weight=$DFT_TB_WEIGHT capacity=$DFT_TB_CAPACITY batch=$DFT_TB_BATCH" \
+     "store/replan=$DFT_TB_STORE_PER_REPLAN max_uses=$DFT_TB_MAX_USES" \
+     "t=[$DFT_TB_T_MIN,$DFT_TB_T_MAX] K=$DFT_TB_UNROLL_STEPS" \
+     "grad_steps=$DFT_TB_GRAD_STEPS"
 echo "iters=$DFT_ITERS save_every=$DFT_SAVE_EVERY keep_every=$DFT_KEEP_EVERY" \
      "resume=$DFT_RESUME"
 echo "train_pool=${DFT_TRAIN_SPLITS:-uniform-corpus} cap=$DFT_TRAIN_SPLIT_CAP" \
@@ -342,6 +386,13 @@ fi
 # The out_dir lives on a quota'd filesystem; job 27279 died 27 iterations in on
 # `OSError: [Errno 122] Disk quota exceeded`. Fail in seconds instead.
 mkdir -p "$DFT_OUT_DIR"
+# Gate: a repair arm whose search produced no verified repairs has nothing to learn.
+if [[ "$DFT_REPAIR_WEIGHT" != "0" && "$DFT_REPAIR_WEIGHT" != "0.0" ]] \
+   && ! compgen -G "$DFT_REPAIR_DATA" > /dev/null; then
+  echo "TRAINING NOT RUN: repair_weight=$DFT_REPAIR_WEIGHT but no repair data matches '$DFT_REPAIR_DATA'"
+  echo "  (either the repair search found no verified repair, or it did not run -- see its .out)"
+  exit 0
+fi
 if ! (dd if=/dev/zero of="$DFT_OUT_DIR/.probe" bs=1M count=8 status=none && \
       rm -f "$DFT_OUT_DIR/.probe"); then
   echo "FATAL: cannot write 8 MB to $DFT_OUT_DIR (quota?)" >&2; exit 1
@@ -363,6 +414,23 @@ ARGS=(--ckpt "$DFT_CKPT" --out_dir "$DFT_OUT_DIR"
       # `=` form: both take -1, and a bare `--flag -1` is what argparse misread
       # as an option string in job 43942.
       --safety_window="$DFT_SAFETY_WINDOW" --anchor_window="$DFT_ANCHOR_WINDOW"
+      --safety_rows "$DFT_SAFETY_ROWS" --preserve_weight "$DFT_PRESERVE_WEIGHT"
+      --preserve_scenes "$DFT_PRESERVE_SCENES" --preserve_window="$DFT_PRESERVE_WINDOW"
+      --preserve_risk "$DFT_PRESERVE_RISK"
+      --preserve_hard_frac "$DFT_PRESERVE_HARD_FRAC"
+      --preserve_hard_quantile "$DFT_PRESERVE_HARD_QUANTILE"
+      --preserve_replay "$DFT_PRESERVE_REPLAY"
+      --preserve_replay_per_iter "$DFT_PRESERVE_REPLAY_PER_ITER"
+      --preserve_replay_uses "$DFT_PRESERVE_REPLAY_USES"
+      --repair_data "$DFT_REPAIR_DATA" --repair_weight "$DFT_REPAIR_WEIGHT"
+      --repair_batch "$DFT_REPAIR_BATCH"
+      --tb_weight "$DFT_TB_WEIGHT" --tb_capacity "$DFT_TB_CAPACITY"
+      --tb_batch "$DFT_TB_BATCH" --tb_store_per_replan "$DFT_TB_STORE_PER_REPLAN"
+      --tb_max_uses "$DFT_TB_MAX_USES" --tb_min_size "$DFT_TB_MIN_SIZE"
+      --tb_t_min "$DFT_TB_T_MIN" --tb_t_max="$DFT_TB_T_MAX"
+      --tb_unroll_steps "$DFT_TB_UNROLL_STEPS"
+      --tb_unroll_t_end "$DFT_TB_UNROLL_T_END" --tb_unroll_eta "$DFT_TB_UNROLL_ETA"
+      --tb_grad_steps "$DFT_TB_GRAD_STEPS" --tb_window "$DFT_TB_WINDOW"
       --agent_geometry "$DFT_AGENT_GEOMETRY" --n_discs "$DFT_N_DISCS"
       --eval_every "$DFT_EVAL_EVERY" --save_every "$DFT_SAVE_EVERY"
       --keep_every "$DFT_KEEP_EVERY"

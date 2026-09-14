@@ -36,7 +36,10 @@ import numpy as np
 import optax
 from flax import nnx
 
-from rl.diffusion_ft.unrolled_prediction import teacher_forced_unroll
+from rl.diffusion_ft.unrolled_prediction import (
+    teacher_forced_unroll,
+    unrolled_clean_prediction,
+)
 
 
 def _clone_module(module: nnx.Module) -> nnx.Module:
@@ -393,6 +396,36 @@ class DiffusionRLActor:
                      / (jnp.maximum(jnp.sum(w), 1e-8) * sq.shape[1]))
         return jnp.sum(per_b * alive_b) / jnp.maximum(jnp.sum(alive_b), 1.0)
 
+    def late_denoise_loss(self, params, x0_bct, cond1, cond2, cond2_mask, w_b, rng,
+                          step_w_bt=None):
+        """x0-prediction MSE of the trainable copy at ``t ~ U[0, k_trainable)`` only.
+
+        The ordinary diffusion loss draws t over the whole schedule, but the
+        trainable copy only ever runs the last ``k_trainable`` reverse steps at
+        sampling time -- a target taught at t=60 is taught to a step the frozen
+        base drives. This is the loss for a TARGET that should come out of those
+        low-noise steps: a verified repair (``counterfactual --mode repair``),
+        whose coarse manoeuvre is already set by the frozen prefix. ``w_b`` weights
+        rows (0 = padding); ``step_w_bt`` weights model STEPS, since a repair target
+        is only recoverable where the world time base covered it (see
+        ``branching.model_step_valid``). ``rng`` must be split per gradient step,
+        never fixed.
+        """
+        kt, ke = jax.random.split(rng)
+        t = jax.random.randint(kt, (x0_bct.shape[0],), 0, int(self.k_trainable), dtype=jnp.int32)
+        x_t = self.diffusion.q_sample(x0_bct, t, jax.random.normal(ke, x0_bct.shape))
+        _, _, x0_pred = self.diffusion.p_mean_variance(
+            x_t, t, cond1, cond2, cond2_mask, denoise_fn=self._trainable_fn(params))
+        sq = (x0_pred - x0_bct) ** 2                                    # [B, C, T]
+        if step_w_bt is None:
+            per_b = jnp.mean(sq, axis=(1, 2))
+        else:
+            sw = jnp.asarray(step_w_bt, sq.dtype)[:, None, :]            # [B, 1, T]
+            per_b = (jnp.sum(sq * sw, axis=(1, 2))
+                     / (jnp.maximum(jnp.sum(sw, axis=(1, 2)), 1e-6) * sq.shape[1]))
+        w = jnp.asarray(w_b, per_b.dtype)
+        return jnp.sum(per_b * w) / jnp.maximum(jnp.sum(w), 1.0)
+
     @staticmethod
     def _wmean_kb(x_kb, w_b):
         """Mean of ``[K, B]`` over the alive samples (weight ``[B]``, broadcast over K)."""
@@ -656,14 +689,22 @@ class DiffusionRLActor:
         return self._sampler_for(bool(rl_mode))(params, cond1, cond2, cond2_mask, rng)[0]
 
     def _prefix_samplers(self):
-        """Jitted ``(with_prefix, late_only)`` pair for the current step count.
+        """Jitted ``(with_prefix, late_only, with_trace)`` for the current step count.
 
         ``with_prefix(params, c1, c2, m, rng) -> (x, (x_{k-1}, key_late))`` is the
         rl_mode sampler that also hands back the frozen prefix's output;
         ``late_only(params, c1, c2, m, x_{k-1}, key_late) -> x`` replays just the
         ``k_trainable`` late steps from it. The prefix runs the frozen base
         denoiser, so late_only reproduces with_prefix's trajectory for the same
-        params -- and is what a gradient pass differentiates."""
+        params -- and is what a gradient pass differentiates.
+
+        ``with_trace`` is ``with_prefix`` plus the late chain's own
+        ``(x_t, timestep)`` records, which ``sample_with_trace`` already computes
+        and the safety path otherwise throws away. It is a separate compiled
+        program only because returning the extra arrays changes the output
+        signature; the sampler math is identical, so a collection rollout can
+        harvest genuine diffusion states for
+        :mod:`rl.diffusion_ft.transition_buffer` at no extra denoiser cost."""
         key = ("prefix", self.num_sample_steps)
         cached = self._jit_samplers.get(key)
         if cached is not None:
@@ -692,13 +733,35 @@ class DiffusionRLActor:
                 x_prefix=x_prefix, key_late=key_late, **kw)
             return x
 
-        pair = (jax.jit(with_prefix), jax.jit(late_only))
+        def with_trace(params, cond1, cond2, cond2_mask, rng):
+            denoise = nnx.merge(tgdef, params, tnonparam)
+            x, trace, pre = diffusion.sample_with_trace(
+                (cond1.shape[0], in_ch, horizon), cond1, cond2, cond2_mask, rng=rng,
+                trainable_denoise_fn=denoise, return_prefix=True, **kw)
+            # Only the two arrays a replayable transition needs. `mean`/`std`/
+            # `log_prob` are DPPO's and are dropped inside the jit, so they are
+            # never transferred off the device.
+            return x, pre, trace["x_t"], trace["timestep"]
+
+        pair = (jax.jit(with_prefix), jax.jit(late_only), jax.jit(with_trace))
         self._jit_samplers[key] = pair
         return pair
 
     def sample_world_with_prefix(self, params, cond1, cond2, cond2_mask, rng):
         """:meth:`sample_world_for` (rl_mode) plus ``(x_{k-1}, key_late)``."""
         return self._prefix_samplers()[0](params, cond1, cond2, cond2_mask, rng)
+
+    def sample_world_with_prefix_trace(self, params, cond1, cond2, cond2_mask, rng):
+        """:meth:`sample_world_with_prefix` plus the late chain's transitions.
+
+        Returns ``(x, (x_prefix, key_late), x_t_kbct, t_kb)`` where ``x_t_kbct[j]``
+        is the sampler's own state entering late step ``j`` and ``t_kb[j]`` its
+        diffusion timestep, running ``k_trainable-1 .. 0``. These are the states
+        the deployed sampler actually passes through, which is what distinguishes
+        a stored transition from ``q_sample(x0_expert, t)``: same timestep,
+        different distribution.
+        """
+        return self._prefix_samplers()[2](params, cond1, cond2, cond2_mask, rng)
 
     def sample_late_for(self, params, cond1, cond2, cond2_mask, x_prefix, key_late):
         """Differentiable late chain from a stored prefix, ``[B, C, T]``."""
@@ -745,6 +808,51 @@ class DiffusionRLActor:
         k = int(t_grid_kb.shape[0])
         return self._unroll_for(k, grad_steps, eta)(
             params, cond1, cond2, cond2_mask, x0_bct, t_grid_kb, rng)
+
+    def _clean_from_xt_for(self, k_steps: int, grad_steps: int, eta: float):
+        """Jitted clean-prediction-from-``x_t``, one program per (K, G, eta)."""
+        key = ("from_xt", int(k_steps), int(grad_steps), float(eta))
+        cached = self._jit_unrolls.get(key)
+        if cached is not None:
+            return cached
+        diffusion = self.diffusion
+        tgdef, tnonparam = self._tgdef, self._tnonparam
+
+        def merge(p):
+            return nnx.merge(tgdef, p, tnonparam)
+
+        def run(params, cond1, cond2, cond2_mask, x_t, t_grid_kb, rng):
+            return unrolled_clean_prediction(
+                diffusion, merge, params, x_t=x_t, t_grid_kb=t_grid_kb,
+                cond1=cond1, cond2=cond2, cond2_mask=cond2_mask,
+                grad_steps=key[2], eta=key[3], rng=rng)
+
+        jitted = jax.jit(run)
+        self._jit_unrolls[key] = jitted
+        return jitted
+
+    def clean_prediction_from_xt(self, params, cond1, cond2, cond2_mask, x_t,
+                                 t_grid_kb, rng, *, grad_steps: int = 1,
+                                 eta: float = 0.0):
+        """Clean prediction ``x0_hat`` reached from an EXPLICIT ``x_t``, ``[B, C, T]``.
+
+        :meth:`unrolled_sample_for` without the teacher forcing: the caller
+        supplies the noised state instead of having it built as
+        ``q_sample(x0_expert, t)``. That is the entry point a stored sampler
+        transition uses -- the state is the one the policy's own chain passed
+        through, so the diffusion-state mismatch
+        :mod:`rl.diffusion_ft.unrolled_prediction` documents does not apply.
+
+        ``K = t_grid_kb.shape[0]``: ``K=1`` is the plain one-step clean prediction
+        at the stored timestep (no unroll, one network evaluation); ``K>1`` runs
+        ``K-1`` eta-DDIM steps down to ``t_grid_kb[-1]`` and returns the clean
+        prediction of the final evaluation. ``grad_steps`` bounds how many of the
+        final evaluations carry a gradient, so ``grad_steps=1`` differentiates
+        exactly one transition however long the unroll is.
+        """
+        k = int(t_grid_kb.shape[0])
+        return self._clean_from_xt_for(k, grad_steps, eta)(
+            params, cond1, cond2, cond2_mask, x_t, t_grid_kb, rng)
 
     def set_expert_kl_probe(self, cond1, cond2, cond2_mask, trace) -> None:
         """Give ``expert_update`` the batch to measure its KL-vs-behavior on.

@@ -59,8 +59,10 @@ def _tuner(*, bc_weight, anchor_weight, safety_weight=1.0, calls=None):
                              safety_weight=safety_weight)
     t.objcfg = SimpleNamespace(safety_weight=safety_weight)
     t.unroll_steps = 0
+    # Whole-horizon anchor window (None), as `_init_windows` resolves --anchor_window -1.
+    t._anchor_tw = None
 
-    def expert_loss(params, expert, alive_b):
+    def expert_loss(params, expert, alive_b, time_weight=None):
         target, c1, c2, mask, rng = expert
         calls.append({"tag": float(np.asarray(target).reshape(-1)[0]),
                       "alive": float(np.asarray(alive_b).sum()),

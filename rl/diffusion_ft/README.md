@@ -1226,6 +1226,491 @@ The one open direction: a fine-tune that protects **hard successes** specificall
 (e.g. a base-anchor weight that rises with scene risk). Retuning the current
 objective, its stopping point, or where it is deployed is bounded near zero.
 
+> Superseded 2026-09-14 by [the results below](#results-2026-09-14): protecting
+> hard successes (matched-sample preservation) does remove the damage but only
+> reaches parity, while making the base the DEFAULT and letting the fine-tune earn
+> each replan is +0.0033 with nothing broken.
+
 Scripts: `slurm/sweep_safety_{ablation,combo,stopping}.sh`,
 `slurm/submit_smoke_ablation.sh`, `slurm/submit_gate_analysis.sh`,
 `tools/gate_analysis.py`, `tools/plot_gate_curve.py`.
+
+## Selection and matched-sample preservation (2026-09-13 → 09-14)
+
+**Result: keeping the base as the default and letting the fine-tune earn each
+replan is +0.0033 corpus solve rate (+0.0077 on three strata), against +0.0005
+for the hardness gate and −0.0101 for deploying the fine-tune everywhere. It
+breaks no success at all. Read [the results](#results-2026-09-14) first; the
+sections below are how each piece works.**
+
+Two experiments follow from the gate result. **The base stays the default.** A
+second candidate has to earn each intervention, and training protects what the
+base actually drives when it succeeds. Code is in; no GPU job has run yet.
+
+### Experiment 1: training-free proposal selection (`proposal_select.py`)
+
+At every replan the base draws its candidate and keeps the frozen prefix
+`x_{k-1}` and its late key. The alternative is one of:
+
+| alt | what | extra compute |
+|---|---|---|
+| `ft` | fine-tuned late chain, **same prefix, same late noise** | k denoiser evals |
+| `base2` | base late chain, same prefix, fresh late key (**matched control**) | k evals |
+| `basefull` | an independent full base sample | 100 evals |
+
+Both candidates are scored on the exact clearances whose signs *are* waymax's
+offroad/overlap (min road-edge clearance, min agent box gap) over `window` world
+steps, plus progress toward the goal. The `cons` selector switches only if the
+base candidate is predicted to violate, the alternative is predicted clean, and
+the alternative gives up less than `tol` metres of progress. A clean base
+candidate is never touched (pinned by a test). The `margin` selector also acts
+on near-misses. There is no lookahead yet (execute, replan, then judge); that is
+the next selector if single-step geometry turns out not to capture the benefit.
+
+All arms run on the same scenes, seed and fixed chunks, so everything is paired
+draw for draw. The same holds across checkpoint tasks: chunks are fixed slices of
+the shard list, never of the not-yet-done remainder, because a scene's noise
+depends on its batch.
+
+**Third stratum.** `tools/add_intermittent_split.py` writes
+`verified_seed777/eval_splits_3strata.json` with `intermittent_heldout`: the
+expert-clean scenes the base solves 1-3 times out of 4. That is 223 of the 628
+failure candidates plus 54 of the 2564 verified successes, about twice the size
+of the verified-failure stratum, and none of them is in any training pool (the
+tool checks this). `population.strata` is copied unchanged, so the trainer's
+logged marginal stays comparable. The three-stratum weights are in `strata3`.
+
+`tools/select_analysis.py` reports, per arm and per checkpoint mean:
+
+* paired `recovered` / `broken` rates vs the base. Population-weighted,
+  recovered − broken *is* the delta;
+* `marginal2` and `marginal3` deltas with a stratified scene-bootstrap 95% CI;
+* the oracles `any(base, ft)` (same seed) and `any(base_r, base_r')` (two
+  independent base episodes), plus `selection_gap3` = oracle − selector. A large
+  gap means the selector is the bottleneck. A small oracle gain means the
+  proposals are.
+
+```bash
+DFT_SELECT_SMOKE=1 bash rl/diffusion_ft/slurm/submit_select_eval.sh   # 4 scenes/split first
+bash rl/diffusion_ft/slurm/submit_select_eval.sh    # stopping base_s{0,1,2}@110, seed 4242
+sbatch rl/diffusion_ft/slurm/select_analysis.sbatch <select_dir>/analyze.env   # redraw, CPU
+```
+
+Seed 4242 is the hardness gate's seed, so its base and ft rates should agree in
+distribution with `gate/20260913_140701_1214568`. If the selector thresholds are
+tuned on these results, the confirming run needs a fresh seed.
+
+### Experiment 2: preservation on sampled trajectories (`train_safety --preserve_weight`)
+
+The base anchor compares one-step posterior means on **noised human**
+trajectories, at t drawn from the whole schedule, on the **fine-tune's** visited
+states. Its logged share of the objective was about 1e-5 throughout the stopping
+sweep. The new term instead:
+
+1. rolls the **frozen base** out on 16 success-pool scenes per iteration: up to 8
+   successes the current policy recently broke (replay: capacity 256, 10 draws
+   each, re-breaking refreshes), half of the rest from the top risk quintile, the
+   remainder uniform;
+2. keeps each replan's prefix and late key, and only the rows where **the base
+   solved the episode**;
+3. penalizes the difference between the trainable late chain and the base late
+   chain from that same prefix and noise, in world space (position / 1 m,
+   wrapped heading / 0.1 rad, speed / 1 m/s) over the executed window. The term
+   is exactly zero at the base weights.
+
+`--safety_rows unsolved` removes the barrier from rows whose collection rollout
+succeeded. Otherwise the softplus still pushes a tight successful manoeuvre
+near its margin. Both flags default off, which is the old behaviour.
+
+New log keys: `preserve_rms_m` (metres the fine-tune's executed segment has
+moved off the base on base-solved rows, the number to read), `preserve_share`,
+`preserve_base_solved`, `replay_size`, `replay_added`, `safety_rows`.
+
+```bash
+DFT_ARMS="pres3_s0" DFT_ITERS=2 DFT_EVAL_EVERY=1 DFT_SPLIT_CAP=8 bash rl/diffusion_ft/slurm/sweep_preserve.sh  # smoke
+bash rl/diffusion_ft/slurm/sweep_preserve.sh    # srow / pres3 / pres30 x 3 seeds, stopping protocol
+```
+
+The control is the 09-11 stopping sweep's `base_s{0,1,2}`, run under the same
+protocol. Add `ctrl_s*` through `DFT_ARMS` to rerun it under the new code. To
+compare, read `marginal/delta_vs_base` at matched iterations, then score the
+chosen snapshot per scene with `DFT_SELECT_CKPTS=... submit_select_eval.sh` for
+the paired recovered/broken split.
+
+### Counterfactual branching: repair search, learned and look-ahead selectors (2026-09-13)
+
+`branching.py` snapshots a closed-loop episode at any replan and continues it
+with the base. A snapshot is a set of references to the env's immutable pytrees.
+Continuations reuse the original episode's per-replan sampler keys, so a row with
+no override replays the original bit for bit, because it has the same state,
+batch and noise tensor. Every repair search also runs an `id` branch and records
+whether it reproduced the base (`id_consistent`). **Read that first**: below
+1.0, the engine is not replaying the episode and nothing downstream is reliable.
+
+**Repair search** (`counterfactual.py --mode repair`, on `failure_train`):
+
+1. Take the base episode's first violating replan. A clean scene that never
+   reaches the goal is charged to its last replan.
+2. Rewind 0, 1, 2 replans before it. Execute a perturbed base candidate for
+   `hold` replans, then resume the base with the original keys.
+3. Keep a repair only if the whole continuation solves the scene. Per scene the
+   kept repair is the latest rewind that works, and within it the smallest edit.
+
+Candidate families:
+
+| family | token | what it tests |
+|---|---|---|
+| time warp | `tw0.7`, `tw1.3h2` | same path at a×speed, eased in over 1 s: yield or arrive later / go earlier. Neighbours are log-replayed, so timing alone can dissolve a conflict |
+| lateral | `lat±0.25`, `lat±0.5` | smoothstep shift of the line along its normal, continuous at the join |
+| re-noise | `rn20s0`, `rn50s1` | partially re-noise the base candidate to step t and denoise with the base: a different manoeuvre |
+
+The outputs are `repairs.jsonl`, plus `repair_data/*.npz` holding (frozen
+condition, executed candidate in normalized space, covered-step mask) per applied
+replan. `tools/repair_summary.py` reports the repaired rate by failure type, by
+family and by rewind depth.
+
+**The inverse is lossy past the scenario end, and that is not a bug to fix.**
+`preprocess` clamps `world_t_seconds` at the end of the scenario: every world
+sample beyond it repeats the last valid pose. The forward map can emit those
+samples; `world_to_norm` cannot recover the model steps behind them, because the
+information is gone. Measured on the first repair smoke (2026-09-13) as a **0.256
+normalized / 25.6 m** round-trip error, entirely in the tail. So
+`branching.model_step_valid` marks the covered model steps, targets carry the
+BASE proposal on the rest (never executed, and a sane thing to be taught), and
+`--repair_weight` weights the denoising loss by that mask. The job re-checks the
+round trip on covered steps at startup: it warns above 10 cm and refuses to write
+targets above 1 m. Measured on the fixed smoke: **2 cm** on covered steps (0.2563
+normalized on the masked tail, 85% of steps covered). That 2 cm is expected --
+`world_dt` is measured per scene and does not divide the 0.2 s model grid, so the
+inverse interpolates between world samples rather than landing on a breakpoint --
+and it is far below the 0.3 m edge margin. Repair data written before the mask existed has no `valid`
+array and the trainer rejects it.
+
+**Correction training** (`train_safety --repair_data --repair_weight`): the
+trainable late copy learns the verified repairs through
+`DiffusionRLActor.late_denoise_loss`, an x0-prediction loss at t < k_trainable
+only, the steps that copy actually drives. The copy starts equal to the base,
+so this is a zero residual at iteration 0. The trainer refuses repair data that
+contains a held-out scene.
+
+**Selector labels** (`--mode labels`): at each replan of a base episode, execute
+the fine-tune's candidate (same prefix and noise) at that replan only, then
+resume the base. Each (scene, replan) gets a label
+`solved(switch) − solved(base)` next to the selector features.
+`tools/fit_selector.py` fits a 3-class logistic regression with population
+weights (each stratum at its corpus weight, each scene equal within it) and
+picks the switch threshold θ ≥ 0 by scene-grouped cross-validation. It reports,
+out of fold, the mean single-decision effect of the learned rule, `cons`, and
+always-switch on the same rows. A single-decision effect is not a
+multi-switch episode delta; the selection eval measures that.
+
+**New selector arms** in `proposal_select`:
+
+* `look`: where either candidate is within 0.3 m of a hazard, run each one plus
+  `--look_replans − 1` base replans from a snapshot, restore, and switch only if
+  that removes a violation without ending farther than `tol` from the goal. Both
+  branches share their look-ahead keys.
+* `learned`: applies `selector.json` (from `--selector_json`).
+
+```bash
+DFT_CF_SMOKE=1 bash rl/diffusion_ft/slurm/submit_counterfactual.sh   # smoke: every stage, tiny
+bash rl/diffusion_ft/slurm/submit_counterfactual.sh
+#  repair (GPU) -> train repair / repair_pres x 3 seeds (GPU)
+#  labels (GPU) -> fit_selector (CPU) -> select base,bf_cons,bf_look,bf_learned (GPU) -> analyze (CPU)
+```
+
+First smoke (2026-09-13, 8 failure scenes): `id_consistent` 1.000 -- the
+do-nothing branch reproduced the base episode on every scene -- and 3 of 8
+repaired, one per failure mode and each by the family the mode predicts: a
+collision by arriving EARLIER (`tw1.3`, rewind 2), an off-road by a 0.5 m lateral
+shift, a never-reached goal by speeding up. Worth watching at full scale: that
+smoke's 113 one-switch labels were ALL zero (no single switch changed an
+episode's outcome on 16 scenes). If that holds on the full pool, the learned
+selector has nothing to fit, and the per-chunk `+1 / -1` counts say so early.
+
+Seeds: the counterfactual jobs refuse 777, 4242 and the eval seed, and use 2718.
+The selection stage reuses 4242 with the same shards and chunk as
+`submit_select_eval.sh`, so its `base` / `bf_cons` rows pair with an Experiment 1
+run on `base_s0@110`. Point `select_analysis --rows` at both directories to merge.
+
+CPU tests: `sbatch rl/diffusion_ft/slurm/test_proposal_select.sbatch` runs
+`test_proposal_select`, `test_branching` and the existing trainer suites.
+
+## Results (2026-09-14)
+
+Everything below is ONE overnight batch: `select/20260913_234334_1261057`,
+`counterfactual/20260913_234710_1263710`, `preserve/20260913_234938_1263938`.
+The CPU suites (147 checks, 7 files) pass.
+
+### 1. Selection beats the base, and nothing else here has
+
+Paired per scene at verify seed 4242, 4 repeats, 1450 held-out scenes, three
+fine-tuned checkpoints (stopping `base_s{0,1,2}` @110) averaged. `m2` is the
+two-stratum marginal every earlier run reports; `m3` adds the intermittent stratum.
+
+| arm | m2 Δ | m3 Δ (95% CI) | recovered | broken |
+|---|---|---|---|---|
+| **`bf_cons10`** base + ft, 1 s selector window | **+0.0033** | **+0.0077** [+0.0064, +0.0092] | 0.0077 | **0.0000** |
+| `bf_cons` same, 2 s window | +0.0022 | +0.0058 [+0.0048, +0.0070] | 0.0058 | 0.0000 |
+| `bf_margin` near-miss rule, 2 s | +0.0020 | +0.0051 | 0.0051 | 0.0000 |
+| `bb_cons` **second base sample** (matched compute) | +0.0018 | +0.0039 [+0.0026, +0.0055] | 0.0039 | 0.0001 |
+| `bfull_cons` independent base sample (2x compute) | +0.0015 | +0.0036 | 0.0037 | 0.0001 |
+| `ft` the fine-tune everywhere | −0.0101 | −0.0062 | 0.0128 | 0.0190 |
+
+Against the hardness gate's **+0.0005** (of a then-computed +0.0039 ceiling), the
+conservative selector is **+0.0033 on the same measure** — about 7x the gate, at
+what was thought to be the ceiling for routing this fine-tune.
+
+Three things carry:
+
+* **It breaks nothing.** `broken` is 0.0000 and the switch rate on the success
+  stratum is 0.000: the rule fires on 4.8% of failure-scene replans, 3.0% of
+  intermittent ones, and never on a clean base candidate. Do-no-harm — the
+  constraint that sank every arm from 09-02 to 09-13 — stops binding when the base
+  is the default and the burden of proof is on the intervention.
+* **The fine-tune's candidate really is better than another base draw**: +0.0077 vs
+  +0.0039, CIs disjoint. A full independent base sample at 2x the compute is no
+  better than the cheap late-chain redraw, so this is not "more samples".
+* **The intermittent stratum carries much of it**: 0.496 → 0.646, against
+  failure 0.046 → 0.182 and success 0.997 → 0.998. That is the 3% of the corpus
+  the two-stratum marginal excludes entirely, and it is where selection pays.
+
+A SHORTER selector window wins (1 s over 2 s): scoring 2 s ahead condemns
+violations the next replan would have removed, so the alternative looks dirty and
+the switch does not happen (switch rate 0.048 at w10 vs 0.030 at w20).
+
+### 2. Repair search: half of the failures are repairable, and timing is half the fix
+
+`failure_train`, 168 searched failures, `id_consistent` **1.0** (the do-nothing
+branch reproduced the base episode on every scene, so the rewind machinery is exact):
+
+| | repaired | rate |
+|---|---|---|
+| off-road | 41 / 76 | 0.54 |
+| collision | 33 / 62 | 0.53 |
+| never reached the goal | 11 / 30 | 0.37 |
+| **total** | **85 / 168** | **0.51** |
+
+Kept repairs by family: **timing 42, lateral 40, re-noise 3**. Rewind depth: 34 at
+the failing replan, 31 one back, 20 two back — rewinding earlier is worth a third
+of the repairs, so "fix it where it broke" would have missed them.
+
+That is the review's hypothesis, measured: a clearance gradient cannot express
+*arrive later*, and half of these fixes are exactly that. 100 training targets.
+
+### 3. Preservation removes the damage but does not buy a win
+
+3-seed means at matched iterations — the honest statistic, since per-seed bests
+select on noise and the seed spread is ~0.03:
+
+| config | best 3-seed mean margΔ | mean over all 16 eval points |
+|---|---|---|
+| `base` (09-11 stopping sweep) | −0.0093 | −0.0322 |
+| `srow` (safety on failed rollouts only) | −0.0024 | −0.0306 |
+| `pres3` | +0.0019 | −0.0104 |
+| **`pres30`** | **+0.0021** | **−0.0010** |
+| `repair` (safety OFF, learn verified repairs) | +0.0004 | −0.0016 |
+| `repair_pres` | +0.0009 | −0.0100 |
+
+Averaged across the curve `pres30` sits at −0.001 where the old centre sat at
+−0.032: **the preservation term removes essentially all of the success-split
+damage**, which is a change in kind. It does not produce a gain — +0.002 against a
+0.03 seed spread is not a win — and it costs failure recovery (`pres30` reaches
+0.18-0.21 on the failure split where `srow` reaches 0.27-0.28). Read it as: the
+do-no-harm problem is solvable in training, and solving it there buys parity, not
+profit. Selection buys the profit.
+
+`srow` alone is flat, so preservation is the active ingredient, not the row mask
+(the two-term discipline: zero the other weight to attribute).
+
+Learning from verified repairs (`repair`, safety term entirely off) is the first
+objective in this package that is neither a loss nor a wash — flat at −0.002 with
+success at 0.998-0.999 — but its failure split stays at 0.05-0.10. 100 targets from
+85 scenes is a small dataset; the repair search is cheap enough to grow it.
+
+### 4. The learned selector is worse than the hand-written one, and why
+
+| selector (ckpt `base_s0` only) | m3 Δ | recovered | broken |
+|---|---|---|---|
+| `bf_cons10` (hand-written, 1 s) | +0.0083 | 0.0083 | 0.0000 |
+| `bf_look` (execute + 1 base replan, then judge) | +0.0088 | 0.0088 | 0.0000 |
+| `bf_learned` (fit to 12201 one-switch labels) | +0.0085 | 0.0134 | **0.0049** |
+
+The labels are real (failure stratum +50/−4, success +21/−17 over 2173 scenes), but
+**the threshold selection is flawed**: `fit_selector` picks θ by maximizing the
+population-weighted mean *single-decision* effect, and that objective cannot
+penalize switching often — a switch with zero expected effect is free under it. It
+chose θ=0, which switches on **63% of decisions**, and in closed loop that damages
+successes (0.0049) for no net gain over the conservative rule. The fix is to score
+candidate θ by the closed-loop episode outcome (or to add an explicit switch-rate
+cost / a floor on predicted benefit), not by a per-decision sum. Until then prefer
+`cons`.
+
+`look` is within noise of `cons10` at several times the cost, so single-step
+geometry already captures the benefit and the look-ahead is not currently worth it.
+
+### Where this leaves it
+
+* **Deploy-time selection is the lever**, not the objective, not the stopping
+  point, not the gate. The base drives; the fine-tune proposes; a two-line
+  geometric rule decides; nothing regresses.
+* **The measurement that made it visible** is the intermittent stratum plus paired
+  per-scene scoring: the training curve's ~0.03 seed spread cannot resolve a 0.003
+  effect, and the paired selection eval resolves it with CIs an order of magnitude
+  tighter.
+### What runs next (queued 2026-09-14)
+
+**1. θ by episode outcome.** `theta` is now the 4th arm field
+(`ft:learned:20:0.35`), and `fit_selector` picks its default under
+`--max_switch_rate` (0.01) while reporting the whole curve and the unconstrained
+argmax it no longer trusts. The deployable value is swept in closed loop, where
+the objective is the episode outcome rather than a sum of per-decision effects:
+
+```bash
+CF=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/counterfactual/20260913_234710_1263710
+RUN=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
+DFT_SELECTOR_JSON=$CF/selector.json DFT_SELECT_CKPTS="$RUN/base_s0/iter_000110" \
+  DFT_BASE_ARMS=base \
+  DFT_FT_ARMS="bf_cons10=ft:cons:10,l01=ft:learned:20:0.1,l03=ft:learned:20:0.3,l05=ft:learned:20:0.5,l07=ft:learned:20:0.7" \
+  bash rl/diffusion_ft/slurm/submit_select_eval.sh
+```
+
+Read `broken` as well as the delta: the 09-14 learned arm found MORE recoveries
+than `cons` (0.0134 vs 0.0083) and lost it all to 0.0049 of broken successes. If
+no θ beats `cons10` on the marginal, the honest conclusion is that two lines of
+geometry are enough and the model buys nothing.
+
+**2. A bigger repair set.** The search keeps only what it can verifiably fix, so
+the cheap way to grow it is to point it at the SUCCESS pool as well — the base
+fails ~2% of those, and those failures are equally repairable and equally valid
+training data. `DFT_REPAIR_SPLITS` / `DFT_REPAIR_CAPS` / `DFT_CANDS` /
+`DFT_REWINDS` are now submitter knobs (held-out splits are still refused):
+
+```bash
+DFT_CF_PARTS=repair DFT_NUM_SHARDS=4 \
+  DFT_REPAIR_SPLITS=failure_train,success_train DFT_REPAIR_CAPS=-1,4000 \
+  DFT_CANDS="id,tw0.85,tw1.15,lat0.25,lat-0.25,tw0.7,tw1.3,lat0.5,lat-0.5,lat0.75,lat-0.75,tw0.6h2,tw1.4h2,tw0.5h2,tw1.6h2,rn20s0,rn20s1,rn50s0,rn50s1" \
+  bash rl/diffusion_ft/slurm/submit_counterfactual.sh
+```
+
+A chunk with no failure in it costs one base rollout and exits the rewind loop
+immediately, so scanning 4000 success scenes is far cheaper than 4000 searches.
+The repair-trained arms are chained behind it on the larger set.
+
+**3. Selection on the checkpoints these experiments produced.** Every selection
+number so far uses the 09-11 `base` checkpoints, trained before any of this. Two
+questions at once — does a preservation-trained alternative select better, and
+does the selector prefer the MOST aggressive fine-tune (`srow`, failure 0.28)
+because it filters the damage anyway?
+
+```bash
+P=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/preserve/20260913_234938_1263938
+DFT_SELECT_CKPTS="$P/pres30_s0/iter_000140 $P/srow_s0/iter_000110 $CF/train/repair_s0/iter_000120" \
+  DFT_FT_ARMS="ft,bf_cons10=ft:cons:10" bash rl/diffusion_ft/slurm/submit_select_eval.sh
+```
+
+Same seed, shards and chunking as the 09-13 run, so these pair scene-for-scene
+with the `base_s{0,1,2}` numbers above.
+
+## The ranking inverts under selection (2026-09-14, `select/20260914_094848_1315921`)
+
+**Training a fine-tune to do no harm makes it a WORSE proposal generator.** Same
+selector (`cons`, 1 s window), same scenes, seeds and pairing; only the checkpoint
+that supplies the alternative changes:
+
+| alternative comes from | alone (m3 Δ) | broken alone | under `cons10` (m3 Δ) | broken |
+|---|---|---|---|---|
+| `srow_s0@110` (safety on failed rows, no preservation) | **−0.0026** | 0.0151 | **+0.0086** [+0.0071, +0.0102] | 0.0000 |
+| `base_s0@110` (09-11 stopping centre) | −0.0062 | 0.0190 | +0.0083 [+0.0069, +0.0098] | 0.0000 |
+| `pres30_s0@140` (damage removed by preservation) | +0.0017 | 0.0043 | +0.0027 [+0.0017, +0.0038] | 0.0000 |
+| `repair_s0@120` (learned only from verified repairs) | +0.0021 | 0.0039 | +0.0006 [+0.0002, +0.0012] | 0.0000 |
+
+Read the first two columns against the last two: the standalone ranking is
+`repair > pres30 > srow > base`, and the ranking as a PROPOSAL GENERATOR is
+exactly reversed. `srow` is the worst policy in this package to deploy on its own
+(it breaks 1.5% of successes) and the best alternative to offer a selector.
+
+Why: every mechanism that removes damage does it by making the fine-tune more
+base-like, and an alternative that agrees with the base has nothing to contribute
+when the base is already the default. It shows up in the switch rate — `cons`
+fires on 5.5% of failure-scene replans with `srow`, 1.3% with `pres30` and 0.4%
+with `repair`, because the repair-trained policy so rarely proposes anything
+different that there is nothing to select. The failure split under selection
+tracks it directly: 0.215 / 0.182 / 0.071 / 0.051.
+
+**So do-no-harm training and good-alternative training are opposite objectives,
+and the selector already supplies the safety.** `pres30`'s +0.0017 standalone is
+the best any fine-tune has scored alone here, and it is still half of what the
+aggressive checkpoint buys through a selector. Preservation was solving a problem
+that deployment structure dissolves.
+
+Caveat on the summary's `ckpt_mean` row: this run scored three DIFFERENT configs,
+so that row averages apples with oranges (it is a seed mean only when the
+checkpoints are seeds of one config). The key was renamed from `seed_mean` for
+exactly this reason; read the per-policy rows here.
+
+Open: `srow` was never swept for seeds or stopping point as a *proposal
+generator* — it was only ever measured as a policy, where it looks bad. The axis
+worth sweeping now is how aggressive the alternative may be before the selector
+stops filtering it (`srow` at later iterations, or the unanchored arm).
+
+## Where the safety loss is evaluated (2026-09-14)
+
+Three proposals now exist for the trajectory the geometric loss is charged on.
+They differ in **which diffusion state the denoiser is corrected at**, and that
+is the only axis — the environment states are the policy's own in all three
+(`--anchor_states policy`, the default: reset, plan, execute, record the replan
+contexts, differentiate them afterwards).
+
+| flag | state the denoiser sees | cost/gradient | the defect |
+|---|---|---|---|
+| `--unroll_steps 0` (default) | free-running: 100 frozen+trainable steps from pure noise | 100 evals, 10 with gradient | none, and it is the expensive one |
+| `--unroll_steps K` | `q_sample(x0_expert, t)` — a noised **human** trajectory | K evals | diffusion-state mismatch: the sampler's own `x_t` is not drawn from this |
+| `--tb_weight w` | a stored `x_t` the sampler **actually passed through** | K evals (K=1 default) | staleness — an older policy produced it |
+
+`--reuse_prefix` (on by default) is orthogonal and applies to the first row only:
+the gradient replays the executed sample's late steps from its stored frozen
+prefix, so what is scored is what was driven.
+
+### Transition replay (`rl/diffusion_ft/transition_buffer.py`)
+
+`sample_with_trace` already records `(x_t, t)` for each of the `k_trainable` late
+steps on its way to the trajectory the env executes; the safety path had been
+throwing that trace away (only DPPO consumed it). Keeping it costs one
+device-to-host copy and no denoiser work, and each record is a genuine sampler
+state at a known low-noise timestep. One datum is one transition:
+
+    (scene_id, t0, x_t, t, cond1, cond2, cond2_mask, aux)
+
+Nothing in it depends on the weights, which is what makes it replayable. The
+geometry is recovered by reloading the scene by id — `candidate_safety` reads
+only `log_trajectory`, `object_metadata` and `roadgraph_points`, all constant for
+a whole episode — so a replayed minibatch mixes scenes and replan boundaries.
+That is what the per-row `t0` path in `safety_objective._window_slice` is for.
+
+Two ways to score a stored state, both reusing `unrolled_clean_prediction`:
+
+* `--tb_unroll_steps 1` — the one-step clean prediction `x0_hat(x_t, t)`, one
+  network evaluation, no unroll. The penalised object is a posterior **mean**, so
+  it carries the Jensen gap `unrolled_prediction`'s docstring argues about.
+* `--tb_unroll_steps K > 1` — unroll `K-1` eta-DDIM steps down to
+  `--tb_unroll_t_end`, score the final clean prediction. `--tb_grad_steps 1`
+  (default) keeps the gradient on exactly one transition however long the unroll.
+
+The buffer is host memory, FIFO, `--tb_capacity` slots (~40 KB/slot, dominated by
+`cond1`); `--tb_max_uses` caps draws per slot. It is **not** checkpointed — a
+resume starts it empty and refills at
+`scenes_per_iter x max_replans x tb_store_per_replan` per iteration. Watch
+`tb_age` in `train_log.jsonl`: it is how stale, in iterations, the states the
+gradient was taken at have become. `--safety_weight 0 --tb_weight 1` is the
+pure-replay arm (the rollout still runs — it is what fills the buffer).
+
+```bash
+bash rl/diffusion_ft/slurm/sweep_proposal.sh              # 15 arms: ctrl/tf1/tf4/tb1/tb4 x 3 seeds
+sbatch rl/diffusion_ft/slurm/test_transition_buffer.sbatch  # CPU gates first
+```
+
+`sweep_proposal.sh` also carries two arms outside the default set: `tbmix`
+(buffer **and** on-policy term) and `tbfresh` (capacity == batch, so every drawn
+transition is one this iteration produced — the on-policy control that isolates
+staleness from everything else).

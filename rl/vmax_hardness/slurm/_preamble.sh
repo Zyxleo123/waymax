@@ -20,6 +20,10 @@ for arg in "$@"; do
 done
 
 export PYTHON="${PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
+# V-Max's train.py is a hydra app and the mineuih env has no hydra-core; the
+# original raw-WOMD run used yixiz's own waymax env (hydra 1.3.3). rescore/refit
+# stay on $PYTHON (waymax, no hydra needed); only train uses this one.
+export VMH_TRAIN_PYTHON="${VMH_TRAIN_PYTHON:-/zfsauton/scratch/yixiz/miniconda3/envs/waymax/bin/python}"
 export PYTHONUNBUFFERED=1
 
 # --- Paths --------------------------------------------------------------- #

@@ -48,6 +48,7 @@ from rl.diffusion_ft.safety_loss import SafetyLossConfig, ego_box_5dof, safety_t
 __all__ = [
     "SafetyObjectiveConfig",
     "neighbor_window",
+    "_window_slice",
     "ego_window_boxes",
     "candidate_safety",
 ]
@@ -74,7 +75,26 @@ def _ego_index_b(state) -> jax.Array:
     return jnp.argmax(jnp.asarray(state.object_metadata.is_sdc).astype(jnp.int32), axis=1)
 
 
-def neighbor_window(state, t0: int, n_steps: int):
+def _window_slice(arr, t0, n_steps: int, axis: int):
+    """``arr`` sliced to ``n_steps`` steps starting at ``t0+1`` along ``axis``.
+
+    ``t0`` may be a scalar (one absolute timestep for the whole batch -- every
+    on-policy replan context, where the batch shares a replan boundary) or a
+    ``[B]`` array (a replayed minibatch, whose rows were recorded at different
+    replans of different episodes). The scalar path is the original
+    ``dynamic_slice_in_dim`` and stays bit-for-bit what it was; the per-row path
+    vmaps the same slice over the leading batch axis, which is why ``axis`` is
+    given relative to ``arr`` and decremented inside the map.
+    """
+    n = int(n_steps)
+    if jnp.ndim(t0) == 0:
+        return jax.lax.dynamic_slice_in_dim(jnp.asarray(arr), t0 + 1, n, axis=axis)
+    return jax.vmap(
+        lambda a, s: jax.lax.dynamic_slice_in_dim(a, s + 1, n, axis=axis - 1)
+    )(jnp.asarray(arr), jnp.asarray(t0))
+
+
+def neighbor_window(state, t0, n_steps: int):
     """Other agents' boxes over absolute world steps ``t0+1 .. t0+n_steps``.
 
     Read from ``log_trajectory``: every non-ego object is log-replayed by the
@@ -91,7 +111,7 @@ def neighbor_window(state, t0: int, n_steps: int):
     # gradient then serves every replan. Identical for a Python int because the
     # caller clips ``n_steps`` to the horizon (no start-index clamping kicks in).
     def to_btn(f):
-        w = jax.lax.dynamic_slice_in_dim(jnp.asarray(f), t0 + 1, int(n_steps), axis=2)
+        w = _window_slice(f, t0, n_steps, axis=2)
         return jnp.transpose(w, (0, 2, 1))                            # [B,N,t]->[B,t,N]
 
     not_ego = ~jax.nn.one_hot(ego_b, n_obj, dtype=bool)               # [B, N]
@@ -117,7 +137,7 @@ def candidate_safety(
     world_traj_bw5: jax.Array,
     *,
     state,
-    t0: int,
+    t0,
     n_steps: int,
     alive_b: jax.Array | None = None,
 ) -> dict[str, jax.Array]:
@@ -128,7 +148,10 @@ def candidate_safety(
         (the current state), so the scored window is ``1 .. n_steps``.
       state: the batched simulator state at ``t0`` (for the roadgraph, the ego
         extents and the log-replayed neighbours).
-      t0: current absolute world timestep -- ``state.timestep``.
+      t0: current absolute world timestep -- ``state.timestep``. A scalar (the
+        whole batch is at one replan boundary, which is every on-policy context)
+        or ``[B]`` (a replayed minibatch whose rows come from different replans
+        of different episodes; see :mod:`rl.diffusion_ft.transition_buffer`).
       n_steps: world steps to score (bounded by the candidate and the horizon).
       alive_b: ``[B]`` mask; a world that has already absorbed contributes no
         gradient, so a terminated scene cannot keep steering the update.
@@ -145,7 +168,7 @@ def candidate_safety(
     width_b = ego_row(log.width)[:, 0]
     # z only steers which roadgraph points are associated (z_stretch) and carries
     # no gradient; take it from the log over the same window.
-    z_bt = jax.lax.dynamic_slice_in_dim(ego_row(log.z), t0 + 1, int(n_steps), axis=1)
+    z_bt = _window_slice(ego_row(log.z), t0, n_steps, axis=1)
 
     window = world_traj_bw5[:, 1 : 1 + n_steps, :]
     ego_box = ego_window_boxes(window, length_b, width_b)
