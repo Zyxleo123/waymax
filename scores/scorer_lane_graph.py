@@ -24,7 +24,13 @@ class Scorer:
     (`left_neighbor_edges` / `right_neighbor_edges`) when lane graph data is available.
     """
 
-    def __init__(self, metrics=["collision", "offroad", "tl_violation"], weights=None):
+    def __init__(
+        self,
+        metrics=["collision", "offroad", "tl_violation"],
+        weights=None,
+        other_agent_forecast: str = "cv",
+        world_model_forecaster=None,
+    ):
         self._multiplicative_metrics = {
             metric for metric in metrics if metric in MULTIPLICATIVE_METRICS
         }
@@ -42,6 +48,8 @@ class Scorer:
         self.goal = None
         self.base_metrics = set(metrics)
         self.base_weights = weights
+        self.other_agent_forecast = str(other_agent_forecast).strip().lower()
+        self.world_model_forecaster = world_model_forecaster
 
         self._lane_graph: Optional[LaneGraphData] = None
         self._lane_graph_shard_store: Optional[LaneGraphShardStore] = None
@@ -660,6 +668,7 @@ class Scorer:
         return jnp.where(violation, 0.0, 1.0).astype(jnp.float32)
 
     def compute_score(self, trajectories, sim_state, timestep, world_idx=0):
+        """Score ego proposals; other agents via ``other_agent_forecast`` (``cv``/``gt``/``wm``)."""
         trajectories = jnp.asarray(trajectories)
         if trajectories.ndim != 3 or trajectories.shape[-1] != 5:
             raise ValueError(
@@ -670,40 +679,35 @@ class Scorer:
             scorer_helpers.update_lane_points(self, sim_state, world_idx)
 
         ego_mask = jnp.asarray(sim_state.object_metadata.is_sdc[world_idx]).astype(bool)
-        object_xy = sim_state.log_trajectory.xy[world_idx]
-        object_yaw = sim_state.log_trajectory.yaw[world_idx]
-        object_length = sim_state.log_trajectory.length[world_idx]
-        object_width = sim_state.log_trajectory.width[world_idx]
-        object_valid = sim_state.log_trajectory.valid[world_idx]
-
         if int(jnp.sum(ego_mask)) != 1:
             raise ValueError(f"Expected exactly one SDC object, got {int(jnp.sum(ego_mask))}.")
 
-        traj_length = trajectories.shape[1]
-        max_available = object_xy.shape[1] - int(timestep)
-        traj_length = min(int(traj_length), int(max_available))
-
-        object_xy = object_xy[:, timestep : timestep + traj_length, :]
-        object_yaw = object_yaw[:, timestep : timestep + traj_length]
-        object_length = object_length[:, timestep : timestep + traj_length]
-        object_width = object_width[:, timestep : timestep + traj_length]
-        object_masks = object_valid[:, timestep : timestep + traj_length]
-        object_trajectories = jnp.stack(
-            [object_xy[..., 0], object_xy[..., 1], object_yaw, object_length, object_width],
-            axis=-1,
+        requested_traj_length = int(trajectories.shape[1])
+        (
+            object_trajectories,
+            object_masks,
+            collision_object_trajectories,
+            collision_object_masks,
+        ) = scorer_helpers.forecast_other_agents(
+            sim_state,
+            timestep=int(timestep),
+            traj_length=requested_traj_length,
+            world_idx=world_idx,
+            mode=self.other_agent_forecast,
+            world_model_forecaster=self.world_model_forecaster,
         )
-        object_masks = (object_masks > 0) & (~ego_mask[:, None])
+        traj_length = int(object_trajectories.shape[1])
 
         ego_idx = int(jnp.argmax(ego_mask.astype(jnp.int32)))
-        ego_length_t = object_length[ego_idx]
-        ego_width_t = object_width[ego_idx]
+        # Length/width from current observation only (broadcast over horizon).
+        ego_length_nt = jnp.asarray(sim_state.log_trajectory.length[world_idx], dtype=jnp.float32)
+        ego_width_nt = jnp.asarray(sim_state.log_trajectory.width[world_idx], dtype=jnp.float32)
+        t = int(np.clip(int(timestep), 0, int(ego_length_nt.shape[1]) - 1))
+        ego_length_t = ego_length_nt[ego_idx, t]
+        ego_width_t = ego_width_nt[ego_idx, t]
         num_ego_trajectories = trajectories.shape[0]
-        ego_length = jnp.broadcast_to(
-            ego_length_t[None, :], (num_ego_trajectories, traj_length)
-        )
-        ego_width = jnp.broadcast_to(
-            ego_width_t[None, :], (num_ego_trajectories, traj_length)
-        )
+        ego_length = jnp.broadcast_to(ego_length_t, (num_ego_trajectories, traj_length))
+        ego_width = jnp.broadcast_to(ego_width_t, (num_ego_trajectories, traj_length))
         ego_trajectories = jnp.stack(
             [
                 trajectories[:, :traj_length, 0],
@@ -739,7 +743,9 @@ class Scorer:
                 score = score / total_weight
         if "collision" in self._multiplicative_metrics:
             collision_score = self.compute_collision_score(
-                ego_trajectories, object_trajectories, object_masks
+                ego_trajectories,
+                collision_object_trajectories,
+                collision_object_masks,
             )
             score = score * collision_score
         if "offroad" in self._multiplicative_metrics:

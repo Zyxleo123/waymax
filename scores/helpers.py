@@ -189,6 +189,270 @@ def get_pedestrian_mask(sim_state, world_idx):
     return pedestrian_mask
 
 
+# Match PDMObservation velocity-profile ensemble for collision checking.
+CV_VELOCITY_RATIOS: Tuple[float, ...] = (0.8, 1.0)
+DEFAULT_WORLD_DT_SECONDS: float = 0.1
+
+
+def get_dynamic_object_mask(sim_state, world_idx):
+    """Agents that should be constant-velocity forecast (vehicle/ped/cyclist)."""
+    object_types = jnp.asarray(sim_state.object_metadata.object_types[world_idx])
+    return (
+        (object_types == int(ObjectTypeIds.VEHICLE.value))
+        | (object_types == int(ObjectTypeIds.PEDESTRIAN.value))
+        | (object_types == int(ObjectTypeIds.CYCLIST.value))
+    )
+
+
+def _heading_aligned_velocity_xy(
+    yaw: jnp.ndarray,
+    vel_x: jnp.ndarray,
+    vel_y: jnp.ndarray,
+) -> jnp.ndarray:
+    """PDM-style velocity: magnitude along forward/back heading, not raw (vx, vy)."""
+    speed = jnp.sqrt(vel_x * vel_x + vel_y * vel_y)
+    vel_angle = jnp.arctan2(vel_y, vel_x)
+    heading_delta = jnp.arctan2(jnp.sin(yaw - vel_angle), jnp.cos(yaw - vel_angle))
+    drives_forward = jnp.abs(heading_delta) < (jnp.pi / 2.0)
+    track_heading = jnp.where(drives_forward, yaw, yaw + jnp.pi)
+    track_heading = jnp.arctan2(jnp.sin(track_heading), jnp.cos(track_heading))
+    return jnp.stack(
+        [jnp.cos(track_heading) * speed, jnp.sin(track_heading) * speed],
+        axis=-1,
+    )
+
+
+def forecast_other_agents_constant_velocity(
+    sim_state,
+    timestep: int,
+    traj_length: int,
+    world_idx: int = 0,
+    *,
+    dt: float = DEFAULT_WORLD_DT_SECONDS,
+    velocity_ratios: Tuple[float, ...] = CV_VELOCITY_RATIOS,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Forecast other agents without using logged GT futures (PDM-style CV).
+
+    Dynamic agents (vehicle / pedestrian / cyclist):
+      box(t) = box(0) + Δt · v_heading · ratio
+      with ratios matching PDMObservation (default 0.8 and 1.0).
+
+    Non-dynamic agents:
+      stay fixed at the current observed pose.
+
+    Only the current timestep of ``log_trajectory`` is used as the observation;
+    future logged states are never read.
+
+    Returns
+    -------
+    object_trajectories:
+        [num_objects, T, 5] (x, y, yaw, length, width) with primary ratio 1.0
+        (index-aligned with the original object list for metrics like overtake).
+    object_masks:
+        [num_objects, T] valid & not-ego mask for the primary forecast.
+    collision_object_trajectories:
+        [num_objects + extra, T, 5] primary forecast plus additional dynamic
+        copies for ratios != 1.0 (PDM multi-velocity collision ensemble).
+    collision_object_masks:
+        [num_objects + extra, T] masks for the collision ensemble.
+    """
+    traj = sim_state.log_trajectory
+    t = int(timestep)
+    horizon = int(traj_length)
+    if horizon <= 0:
+        raise ValueError(f"traj_length must be positive, got {horizon}")
+
+    # Waymax log_trajectory is batched as [B, num_objects, num_timesteps, ...].
+    xy_nt2 = jnp.asarray(traj.xy[world_idx], dtype=jnp.float32)
+    yaw_nt = jnp.asarray(traj.yaw[world_idx], dtype=jnp.float32)
+    length_nt = jnp.asarray(traj.length[world_idx], dtype=jnp.float32)
+    width_nt = jnp.asarray(traj.width[world_idx], dtype=jnp.float32)
+    valid_nt = jnp.asarray(traj.valid[world_idx]).astype(jnp.bool_)
+    vel_x_nt = jnp.asarray(traj.vel_x[world_idx], dtype=jnp.float32)
+    vel_y_nt = jnp.asarray(traj.vel_y[world_idx], dtype=jnp.float32)
+
+    if xy_nt2.ndim != 3 or xy_nt2.shape[-1] != 2:
+        raise ValueError(
+            "log_trajectory.xy[world_idx] must have shape [num_objects, num_timesteps, 2], "
+            f"got {xy_nt2.shape}"
+        )
+
+    max_t = int(xy_nt2.shape[1]) - 1
+    t = int(np.clip(t, 0, max_t))
+
+    xy0 = xy_nt2[:, t]
+    yaw0 = yaw_nt[:, t]
+    length0 = length_nt[:, t]
+    width0 = width_nt[:, t]
+    valid0 = valid_nt[:, t]
+    vel_x0 = vel_x_nt[:, t]
+    vel_y0 = vel_y_nt[:, t]
+
+    ego_mask = jnp.asarray(sim_state.object_metadata.is_sdc[world_idx]).astype(jnp.bool_)
+    dynamic_type_mask = jnp.asarray(get_dynamic_object_mask(sim_state, world_idx)).astype(
+        jnp.bool_
+    )
+
+    num_objects = int(xy0.shape[0])
+    delta_t = jnp.arange(horizon, dtype=jnp.float32) * float(dt)  # [T]
+    dxy = _heading_aligned_velocity_xy(yaw0, vel_x0, vel_y0)  # [N, 2]
+
+    # Static / non-agent: fixed pose. Dynamic: CV. Ego pose is unused (masked out).
+    xy_static = jnp.broadcast_to(xy0[:, None, :], (num_objects, horizon, 2))
+    yaw_bt = jnp.broadcast_to(yaw0[:, None], (num_objects, horizon))
+    length_bt = jnp.broadcast_to(length0[:, None], (num_objects, horizon))
+    width_bt = jnp.broadcast_to(width0[:, None], (num_objects, horizon))
+    valid_bt = jnp.broadcast_to(valid0[:, None], (num_objects, horizon))
+    not_ego_bt = jnp.broadcast_to((~ego_mask)[:, None], (num_objects, horizon))
+    primary_mask = valid_bt & not_ego_bt
+
+    ratios = tuple(float(r) for r in velocity_ratios)
+    if 1.0 not in ratios:
+        ratios = ratios + (1.0,)
+
+    def _xy_for_ratio(ratio: float) -> jnp.ndarray:
+        # [N, T, 2] = xy0 + Δt * dxy * ratio for dynamic; else xy0
+        displacement = (
+            delta_t[None, :, None] * dxy[:, None, :] * jnp.asarray(ratio, dtype=jnp.float32)
+        )
+        xy_dynamic = xy0[:, None, :] + displacement
+        dynamic_bt = jnp.broadcast_to(dynamic_type_mask[:, None, None], xy_dynamic.shape)
+        return jnp.where(dynamic_bt, xy_dynamic, xy_static)
+
+    primary_xy = _xy_for_ratio(1.0)
+    object_trajectories = jnp.stack(
+        [primary_xy[..., 0], primary_xy[..., 1], yaw_bt, length_bt, width_bt],
+        axis=-1,
+    )
+
+    collision_trajs = [object_trajectories]
+    collision_masks = [primary_mask]
+    for ratio in ratios:
+        if abs(ratio - 1.0) < 1e-8:
+            continue
+        # Extra copies only for dynamic agents (static already covered by primary).
+        xy_r = _xy_for_ratio(ratio)
+        traj_r = jnp.stack(
+            [xy_r[..., 0], xy_r[..., 1], yaw_bt, length_bt, width_bt],
+            axis=-1,
+        )
+        dynamic_valid_mask = primary_mask & jnp.broadcast_to(
+            dynamic_type_mask[:, None], primary_mask.shape
+        )
+        # Keep full [N, T, ...] layout so concatenation is simple; non-dynamic rows
+        # are masked out for the extra ratio copies.
+        collision_trajs.append(traj_r)
+        collision_masks.append(dynamic_valid_mask)
+
+    collision_object_trajectories = jnp.concatenate(collision_trajs, axis=0)
+    collision_object_masks = jnp.concatenate(collision_masks, axis=0)
+    return (
+        object_trajectories,
+        primary_mask,
+        collision_object_trajectories,
+        collision_object_masks,
+    )
+
+
+def forecast_other_agents_log_futures(
+    sim_state,
+    timestep: int,
+    traj_length: int,
+    world_idx: int = 0,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Privileged forecast: slice logged GT futures from the current timestep.
+
+    Returns the same 4-tuple layout as ``forecast_other_agents_constant_velocity``
+    so scorers can switch modes without changing call sites. Collision ensemble
+    is identical to the primary forecast (no multi-velocity copies).
+    """
+    traj = sim_state.log_trajectory
+    xy_nt2 = jnp.asarray(traj.xy[world_idx], dtype=jnp.float32)
+    yaw_nt = jnp.asarray(traj.yaw[world_idx], dtype=jnp.float32)
+    length_nt = jnp.asarray(traj.length[world_idx], dtype=jnp.float32)
+    width_nt = jnp.asarray(traj.width[world_idx], dtype=jnp.float32)
+    valid_nt = jnp.asarray(traj.valid[world_idx]).astype(jnp.bool_)
+
+    if xy_nt2.ndim != 3 or xy_nt2.shape[-1] != 2:
+        raise ValueError(
+            "log_trajectory.xy[world_idx] must have shape [num_objects, num_timesteps, 2], "
+            f"got {xy_nt2.shape}"
+        )
+
+    t = int(np.clip(int(timestep), 0, int(xy_nt2.shape[1]) - 1))
+    max_available = int(xy_nt2.shape[1]) - t
+    horizon = min(int(traj_length), max_available)
+    if horizon <= 0:
+        raise ValueError(
+            f"No future frames available at timestep={timestep} "
+            f"(log length={xy_nt2.shape[1]})"
+        )
+
+    ego_mask = jnp.asarray(sim_state.object_metadata.is_sdc[world_idx]).astype(jnp.bool_)
+    object_xy = xy_nt2[:, t : t + horizon, :]
+    object_yaw = yaw_nt[:, t : t + horizon]
+    object_length = length_nt[:, t : t + horizon]
+    object_width = width_nt[:, t : t + horizon]
+    object_masks = (valid_nt[:, t : t + horizon] > 0) & (~ego_mask[:, None])
+    object_trajectories = jnp.stack(
+        [
+            object_xy[..., 0],
+            object_xy[..., 1],
+            object_yaw,
+            object_length,
+            object_width,
+        ],
+        axis=-1,
+    )
+    return object_trajectories, object_masks, object_trajectories, object_masks
+
+
+def forecast_other_agents(
+    sim_state,
+    timestep: int,
+    traj_length: int,
+    world_idx: int = 0,
+    *,
+    mode: str = "cv",
+    dt: float = DEFAULT_WORLD_DT_SECONDS,
+    velocity_ratios: Tuple[float, ...] = CV_VELOCITY_RATIOS,
+    world_model_forecaster: Any = None,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Dispatch other-agent forecast: ``cv``, ``gt``, or learned ``wm``."""
+    mode_normalized = str(mode).strip().lower()
+    if mode_normalized in {"cv", "constant_velocity", "constant-velocity"}:
+        return forecast_other_agents_constant_velocity(
+            sim_state,
+            timestep=timestep,
+            traj_length=traj_length,
+            world_idx=world_idx,
+            dt=dt,
+            velocity_ratios=velocity_ratios,
+        )
+    if mode_normalized in {"gt", "log", "log_futures", "privileged"}:
+        return forecast_other_agents_log_futures(
+            sim_state,
+            timestep=timestep,
+            traj_length=traj_length,
+            world_idx=world_idx,
+        )
+    if mode_normalized in {"wm", "world_model", "world-model"}:
+        if world_model_forecaster is None:
+            raise ValueError(
+                "other_agent_forecast='wm' requires a world_model_forecaster instance."
+            )
+        return world_model_forecaster.forecast(
+            sim_state,
+            timestep=int(timestep),
+            traj_length=int(traj_length),
+            world_idx=int(world_idx),
+            dt=float(dt),
+        )
+    raise ValueError(
+        f"Unknown other-agent forecast mode {mode!r}; expected 'cv', 'gt', or 'wm'."
+    )
+
+
 def get_vehicle_current_lane_ids(
     scorer: Any,
     sim_state,

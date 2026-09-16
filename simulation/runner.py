@@ -87,6 +87,34 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
     target_scenario_cursor = 0
     reached_all, success_all = 0, 0
     tfrecord_paths = sorted(glob(str(Path(args.tfrecord_dir) / "*")))
+    if not tfrecord_paths:
+        raise FileNotFoundError(f"No tfrecords found under {args.tfrecord_dir}")
+
+    def _advance_tfrecord() -> bool:
+        """Move to next shard. Returns False when this split is exhausted (do not pop empty)."""
+        nonlocal tfrecord_path, curr_scenario_index, ds_cfg, target_scenario_cursor
+        if not tfrecord_paths:
+            print(
+                f"Scenarios in {os.path.basename(tfrecord_path)} are all tested; "
+                "no more tfrecords left — finishing this split."
+            )
+            return False
+        print(
+            f"Scenarios in {os.path.basename(tfrecord_path)} are all tested, "
+            "moving to next tfrecord."
+        )
+        tfrecord_path = tfrecord_paths.pop(0)
+        curr_scenario_index = 0
+        target_scenario_cursor = 0
+        ds_cfg = dataclasses.replace(
+            waymax_config.WOD_1_3_1_TRAINING,
+            path=str(tfrecord_path),
+            max_num_objects=int(args.max_num_objects),
+            batch_dims=(args.num_worlds,),
+            shuffle_seed=0,
+        )
+        return True
+
     tfrecord_path = tfrecord_paths.pop(0)
     # lane_graph_loader = LaneGraphLoader(args.lane_graph_dir)
     ds_cfg = dataclasses.replace(
@@ -104,40 +132,36 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
     lane_graph_zip_path = None
     while tested_scenarios < int(args.num_scenarios):
         if target_scenarios is not None:
-            scenario_indices = []
             scenario_base_name = os.path.basename(tfrecord_path)
-            while len(scenario_indices) < int(args.num_worlds) and target_scenario_cursor < len(target_scenarios[scenario_base_name]):
-                if scenario_base_name not in target_scenarios:
-                    scenario_indices = []
+            # Skip shards that are not in the target map (or have an empty list).
+            if scenario_base_name not in target_scenarios or not target_scenarios[scenario_base_name]:
+                if not _advance_tfrecord():
+                    break
+                continue
+            scenario_indices = []
+            while (
+                len(scenario_indices) < int(args.num_worlds)
+                and target_scenario_cursor < len(target_scenarios[scenario_base_name])
+            ):
                 scenario_idx = int(target_scenarios[scenario_base_name][target_scenario_cursor])
                 target_scenario_cursor += 1
+                if (scenario_base_name, scenario_idx) in completed_scenarios:
+                    continue
                 scenario_indices.append(scenario_idx)
-            if len(scenario_indices) == 0 or target_scenario_cursor >= len(target_scenarios[scenario_base_name]):
-                if len(tfrecord_paths) == 0:
-                    break
-                tfrecord_path = tfrecord_paths.pop(0)
-                curr_scenario_index = 0
-                ds_cfg = dataclasses.replace(
-                    waymax_config.WOD_1_3_1_TRAINING,
-                    path=str(tfrecord_path),
-                    max_num_objects=int(args.max_num_objects),
-                    batch_dims=(args.num_worlds,),
-                    shuffle_seed=0,
-                )
-                target_scenario_cursor = 0
-                continue
-
             if not scenario_indices:
-                tfrecord_path = tfrecord_paths.pop(0)
-                curr_scenario_index = 0
-                ds_cfg = dataclasses.replace(
-                    waymax_config.WOD_1_3_1_TRAINING,
-                    path=str(tfrecord_path),
-                    max_num_objects=int(args.max_num_objects),
-                    batch_dims=(args.num_worlds,),
-                    shuffle_seed=0,
+                # Finished all targets on this shard (or all remaining were already done).
+                if not _advance_tfrecord():
+                    break
+                continue
+            # Partial last batch on a shard: planner/batch_dims expect num_worlds.
+            # Drop leftovers rather than crash; prefer target lists divisible by num_worlds.
+            if len(scenario_indices) < int(args.num_worlds):
+                print(
+                    f"[target] dropping incomplete last batch of {len(scenario_indices)} "
+                    f"on {scenario_base_name} (need num_worlds={args.num_worlds})."
                 )
-                target_scenario_cursor = 0
+                if not _advance_tfrecord():
+                    break
                 continue
         elif target_scenario_indices is not None:
             scenario_indices = []
@@ -163,17 +187,8 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
             sim_state, _ = load_scenario_state_batch_fast(ds_cfg, scenario_indices)
         except Exception as e:
             print(f"Error loading scenarios {scenario_indices} from {os.path.basename(tfrecord_path)}: {e}")
-            print(f"Scenarios in {os.path.basename(tfrecord_path)} are all tested, moving to next tfrecord.")
-            tfrecord_path = tfrecord_paths.pop(0)
-            curr_scenario_index = 0
-            ds_cfg = dataclasses.replace(
-                waymax_config.WOD_1_3_1_TRAINING,
-                path=str(tfrecord_path),
-                max_num_objects=int(args.max_num_objects),
-                batch_dims=(args.num_worlds,),
-                shuffle_seed=0,
-            )
-            target_scenario_cursor = 0
+            if not _advance_tfrecord():
+                break
             continue
 
         print(f"Testing scenarios {scenario_indices} from {os.path.basename(tfrecord_path)}...")
@@ -192,7 +207,7 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
             target_lane_ids = [None for _ in range(len(scenario_indices))]
             target_lane_xys = [None for _ in range(len(scenario_indices))]
         else:
-            if args.planner == "es" or args.planner == "temporal-vla":
+            if args.planner in ("es", "es_fm", "temporal-vla"):
                 if args.lane_graph_dir:
                     requested_zip_path = lane_graph_zip_path_for_tfrecord(str(tfrecord_path), args.lane_graph_dir)
                     if lane_graph_zip_path != requested_zip_path:

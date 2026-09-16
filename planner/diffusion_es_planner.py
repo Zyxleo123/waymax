@@ -28,6 +28,8 @@ class DiffusionESPlanner(DiffusionPlanner):
         resample_timesteps: int = 3,
         elite_size: int = 4,
         num_iterations: int = 3,
+        other_agent_forecast: str = "cv",
+        world_model_forecaster: Any = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -39,7 +41,17 @@ class DiffusionESPlanner(DiffusionPlanner):
         self.resample_timesteps = resample_timesteps
         self.elite_size = elite_size
         self.num_iterations = num_iterations
-        self.scorers = [Scorer(metrics=metrics, weights=weights) for _ in range(num_worlds)]
+        self.other_agent_forecast = str(other_agent_forecast).strip().lower()
+        self.world_model_forecaster = world_model_forecaster
+        self.scorers = [
+            Scorer(
+                metrics=metrics,
+                weights=weights,
+                other_agent_forecast=self.other_agent_forecast,
+                world_model_forecaster=self.world_model_forecaster,
+            )
+            for _ in range(num_worlds)
+        ]
 
         self._resample_population_jit = jax.jit(
             lambda *, cond_bf, inst_cond_bf, inst_cond_mask_bf, proposals_bktd, rng: self._resample_population(
@@ -165,13 +177,34 @@ class DiffusionESPlanner(DiffusionPlanner):
         best_norm_bt1d = self._gather_population(current_norm_bktd, best_indices_b1)
         best_world_bt15 = self._gather_population(current_world_bkt5, best_indices_b1)
 
+        # these chnages are for plotting population only
+        elite_indices_bk, elite_scores_bk = self._select_topk_per_scenario(
+            current_scores_bk,
+            top_k=self.elite_size,
+        )
+        elite_world_bet5 = self._gather_population(current_world_bkt5, elite_indices_bk)
+        # Full scored pool after the last ES concat (typically elite_size + population_size).
+        pop_order_bk = jnp.argsort(-current_scores_bk, axis=-1)
+        pop_world_bkt5 = jnp.take_along_axis(
+            current_world_bkt5,
+            pop_order_bk[:, :, None, None],
+            axis=1,
+        )
+        pop_scores_bk = jnp.take_along_axis(current_scores_bk, pop_order_bk, axis=-1)
+        aux = dict(pre_batch.aux)
+        aux["es_elite_world_bet5"] = elite_world_bet5
+        aux["es_elite_scores_be"] = elite_scores_bk
+        aux["es_pop_world_bkt5"] = pop_world_bkt5
+        aux["es_pop_scores_bk"] = pop_scores_bk
+        aux["es_best_score_b"] = jnp.squeeze(best_scores_b1, axis=1)
+
         return PlannerResult(
             start_t_b=pre_batch.aux["anchor_step"].astype(jnp.int32),
             trajectory_norm_btd=jnp.squeeze(best_norm_bt1d, axis=1),
             trajectory_world_bt5=jnp.squeeze(best_world_bt15, axis=1),
             world_t_seconds_bt=world_t_seconds_bt,
             world_t_valid_bt=world_t_valid_bt,
-            aux=pre_batch.aux,
+            aux=aux,
         )
 
     def _resample_population(

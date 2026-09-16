@@ -59,7 +59,7 @@ def _parse_args() -> argparse.Namespace:
         default="/zfsauton/scratch/mineuih/waymax_rs/exp"
     )
     parser.add_argument("--planner", type=str, default="diffusion",
-                         choices=["diffusion", "es", "vla", "log-replay", "temporal-vla", "fm"])
+                         choices=["diffusion", "es", "es_fm", "vla", "log-replay", "temporal-vla", "fm"])
     parser.add_argument("--start_timestep", type=int, default=10)
     parser.add_argument("--mask_goal", action="store_true", default=False)
     parser.add_argument("--use_ema", action="store_true", default=True)
@@ -80,10 +80,83 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--resample_timesteps", type=int, default=5)
     parser.add_argument("--elite_size", type=int, default=8)
     parser.add_argument("--num_es_iterations", type=int, default=4)
+    parser.add_argument("--resample_t_start", type=float, default=0.2,
+                        help="FM-ES only: flow time to restart resampling from (0=data, 1=noise).")
+    parser.add_argument("--resample_num_steps", type=int, default=None,
+                        help="FM-ES only: ODE steps during resample (default: policy flow_num_steps).")
+    parser.add_argument("--fm_solver", type=str, default="euler", choices=["euler", "heun"])
+    parser.add_argument(
+        "--other_agent_forecast",
+        type=str,
+        default="cv",
+        choices=["cv", "gt", "wm"],
+        help="ES scorers only: 'cv' = PDM constant-velocity; "
+        "'gt' = privileged logged futures; "
+        "'wm' = learned world-model forecast.",
+    )
+    parser.add_argument(
+        "--world_model_ckpt",
+        type=str,
+        default=None,
+        help="Checkpoint for --other_agent_forecast wm "
+        "(e.g. .../epoch_0500.pt or a directory containing latest.pt).",
+    )
+    parser.add_argument(
+        "--world_model_device",
+        type=str,
+        default="auto",
+        help="Torch device for the world model: auto|cpu|cuda|cuda:N. "
+        "'auto' prefers CUDA when available.",
+    )
+    parser.add_argument(
+        "--wm_refresh_steps",
+        type=int,
+        default=10,
+        help="WM absolute-sim-step refresh interval. "
+        "50 = Exp1 (0,50,...), 20 = Exp2, 10 = Exp3 / every replan. "
+        "Shortfall always re-queries at the current timestep.",
+    )
     parser.add_argument("--save_cache", type=str, default="none", choices=["none", "all", "success", "failure"])
     parser.add_argument("--start_from", type=str, default=None)
     parser.add_argument("--target_scenario_path", type=str, default=None)
     return parser.parse_args()
+
+
+def _resolve_world_model_device(device_arg: str) -> str:
+    value = str(device_arg).strip().lower()
+    if value in {"auto", ""}:
+        try:
+            import torch
+
+            return "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:
+            return "cpu"
+    return str(device_arg).strip()
+
+
+def _load_world_model_forecaster(args: argparse.Namespace):
+    if str(args.other_agent_forecast).strip().lower() != "wm":
+        return None
+    if not args.world_model_ckpt:
+        raise ValueError("--world_model_ckpt is required when --other_agent_forecast wm.")
+
+    device = _resolve_world_model_device(args.world_model_device)
+    # Torch WM + JAX planner often share one GPU; avoid JAX grabbing all memory.
+    if device.startswith("cuda"):
+        os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+
+    from model.world_model.inference import ScheduledWorldModelForecaster
+
+    forecaster = ScheduledWorldModelForecaster.from_checkpoint(
+        args.world_model_ckpt,
+        device=device,
+        refresh_steps=int(args.wm_refresh_steps),
+    )
+    print(
+        f"[wm] loaded {args.world_model_ckpt} on {device}; "
+        f"wm_refresh_steps={int(args.wm_refresh_steps)}"
+    )
+    return forecaster
 
 
 def _load_fm_model_for_inference(
@@ -230,6 +303,8 @@ def main(args: argparse.Namespace) -> None:
             num_iterations=args.num_es_iterations,
             num_worlds=args.num_worlds,
             metrics=["collision", "offroad"],
+            other_agent_forecast=args.other_agent_forecast,
+            world_model_forecaster=_load_world_model_forecaster(args),
         )
     elif args.planner == "fm":
         fm_ckpt_path = args.fm_ckpt_path or args.diffusion_ckpt_path
@@ -252,7 +327,37 @@ def main(args: argparse.Namespace) -> None:
             population_size=args.population_size,
             num_worlds=args.num_worlds,
             num_steps=None,
-            solver="euler",
+            solver=args.fm_solver,
+        )
+    elif args.planner == "es_fm":
+        fm_ckpt_path = args.fm_ckpt_path or args.diffusion_ckpt_path
+        if fm_ckpt_path is None:
+            raise ValueError("--fm_ckpt_path is required when --planner es_fm is selected.")
+
+        policy, preprocess_cfg = _load_fm_model_for_inference(
+            checkpoint_path=fm_ckpt_path,
+            use_ema=args.use_ema,
+            metadata_path=None,
+            seed=args.seed,
+            skip_checkpoint_load=False,
+        )
+
+        from planner.fm_es_planner import FMESPlanner
+
+        planner = FMESPlanner(
+            policy=policy,
+            preprocess_cfg=preprocess_cfg,
+            population_size=args.population_size,
+            elite_size=args.elite_size,
+            num_iterations=args.num_es_iterations,
+            num_worlds=args.num_worlds,
+            metrics=["collision", "offroad"],
+            resample_t_start=args.resample_t_start,
+            resample_num_steps=args.resample_num_steps,
+            num_steps=None,
+            solver=args.fm_solver,
+            other_agent_forecast=args.other_agent_forecast,
+            world_model_forecaster=_load_world_model_forecaster(args),
         )
     elif args.planner == "vla":
         inference = load_model_for_inference(
