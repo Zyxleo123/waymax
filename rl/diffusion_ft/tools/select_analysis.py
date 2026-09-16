@@ -116,7 +116,7 @@ def any_cross(a, b):
     return np.mean(vals, axis=0)
 
 
-def analyze(rows, spec, *, repeats, base_key=("base", ""), n_boot=2000):
+def analyze(rows, spec, *, repeats, base_key=("base", ""), n_boot=2000, alt_of=None):
     pop = spec["population"]
     w2 = {k: float(pop["strata"][k]["weight"]) for k in STRATA2}
     w3 = ({k: float(v["weight"]) for k, v in pop["strata3"].items()}
@@ -216,14 +216,22 @@ def analyze(rows, spec, *, repeats, base_key=("base", ""), n_boot=2000):
                                                  n_boot=n_boot)}
         return o
 
+    alt_of = dict(alt_of or {})
     out["oracle"]["base_x2_independent"] = oracle([], "base2", False)
     if "ft" in by_arm:
         out["oracle"]["base_or_ft_same_seed"] = oracle(by_arm["ft"], "ft", True)
         out["oracle"]["base_or_ft_independent"] = oracle(by_arm["ft"], "ft", False)
         # Selection gap: how much of the same-seed oracle the selectors capture.
+        # ONLY for arms whose alternative IS the fine-tune -- this oracle is
+        # any(base, ft), so subtracting an arm that selects over a different
+        # candidate set (e.g. the repair bank) from it reports a gap against a
+        # ceiling that arm was never offered. `alt_of` comes from the arm meta;
+        # arms whose alt is unknown are left without a gap rather than given a
+        # wrong one.
         orc = out["oracle"]["base_or_ft_same_seed"]
         for arm, sm in out["ckpt_mean"].items():
-            if arm != "ft" and orc and "marginal3" in sm and "marginal3" in orc:
+            if (alt_of.get(arm) == "ft" and orc
+                    and "marginal3" in sm and "marginal3" in orc):
                 sm["selection_gap3"] = orc["marginal3"]["gain"] - sm["marginal3"]["delta"]
     return out
 
@@ -242,7 +250,17 @@ def main():
         raise SystemExit(f"no rows match {a.rows}")
     rows = load_rows(paths)
     spec = json.loads(Path(a.splits_json).read_text())
-    res = analyze(rows, spec, repeats=a.repeats, n_boot=a.n_boot)
+    # arm -> its alternative, read from the runner's own meta. Needed so the
+    # selection gap is only reported against an oracle the arm was offered.
+    alt_of = {}
+    for pth in paths:
+        for m in sorted(Path(pth).parent.glob("meta_shard*.json")):
+            try:
+                for arm in json.loads(m.read_text()).get("arms", []):
+                    alt_of.setdefault(arm["name"], arm.get("alt"))
+            except Exception:
+                continue
+    res = analyze(rows, spec, repeats=a.repeats, n_boot=a.n_boot, alt_of=alt_of)
     res["rows"] = paths
     Path(a.out).write_text(json.dumps(res, indent=1))
 

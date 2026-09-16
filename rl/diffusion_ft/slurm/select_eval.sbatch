@@ -64,6 +64,9 @@ DFT_EVAL_CHUNK="${DFT_EVAL_CHUNK:-32}"
 DFT_SELECT_CAP="${DFT_SELECT_CAP:--1}"
 DFT_SELECTOR_JSON="${DFT_SELECTOR_JSON:-}"
 DFT_LOOK_REPLANS="${DFT_LOOK_REPLANS:-2}"
+DFT_SELECT_BANK="${DFT_SELECT_BANK:-tw0.85,tw1.15,lat0.25,lat-0.25,tw0.7,tw1.3,lat0.5,lat-0.5}"
+DFT_SELECT_RAMP="${DFT_SELECT_RAMP:-10}"
+DFT_SELECT_BANKS="${DFT_SELECT_BANKS:-}"
 # Rollout shape MUST match the eval the fine-tunes were selected under.
 DFT_K_TRAINABLE="${DFT_K_TRAINABLE:-10}"
 DFT_PREFIX_LEN="${DFT_PREFIX_LEN:-5}"
@@ -78,6 +81,10 @@ echo "host=${SLURMD_NODENAME:-unknown} gpu=${CUDA_VISIBLE_DEVICES:-unset}"
 echo "arms=$DFT_ARMS"
 echo "ft_ckpt=${DFT_FT_CKPT:-<none>} shard=$DFT_SHARD_INDEX/$DFT_NUM_SHARDS chunk=$DFT_EVAL_CHUNK"
 echo "splits=$DFT_SELECT_SPLITS seed=$DFT_SELECT_SEED repeats=$DFT_SELECT_REPEATS"
+if [[ "$DFT_ARMS" == *"bank"* ]]; then
+  echo "bank=$DFT_SELECT_BANK ramp=$DFT_SELECT_RAMP"
+  if [[ -n "$DFT_SELECT_BANKS" ]]; then echo "banks=$DFT_SELECT_BANKS"; fi
+fi
 mkdir -p "$DFT_OUT_DIR"
 # Gate: a 'learned' arm with no selector means the fit job gated out (no labels).
 # Say so and exit 0 so nothing downstream strands on DependencyNeverSatisfied.
@@ -98,6 +105,8 @@ srun "$PY" -u -m rl.diffusion_ft.proposal_select \
   --shard_index "$DFT_SHARD_INDEX" --num_shards "$DFT_NUM_SHARDS" \
   --select_cap="$DFT_SELECT_CAP" \
   --selector_json "$DFT_SELECTOR_JSON" --look_replans "$DFT_LOOK_REPLANS" \
+  --select_bank "$DFT_SELECT_BANK" --select_ramp_steps "$DFT_SELECT_RAMP" \
+  --select_banks "$DFT_SELECT_BANKS" \
   --eval_chunk "$DFT_EVAL_CHUNK" --eval_scenes 0 --prefetch 0 --probe_per_split 0 \
   --k_trainable "$DFT_K_TRAINABLE" --prefix_len "$DFT_PREFIX_LEN" \
   --sigma_floor "$DFT_SIGMA_FLOOR" \

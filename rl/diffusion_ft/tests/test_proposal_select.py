@@ -5,6 +5,10 @@ No model, no corpus, no GPU. What each block pins, and how it would lie if wrong
 1. the arm grammar -- a typo silently becoming a different arm;
 2. the selector -- `cons` must NEVER touch a clean base candidate, however
    tight, or it is not conservative;
+2b. the candidate BANK -- `cons`'s do-no-harm property must survive a bank of
+   K (a clean base candidate is untouchable however many alternatives are on
+   the table), the winner must be the SMALLEST admissible perturbation, and
+   the perturbations must be continuous at the anchor or the car teleports;
 3. `preserve_loss` -- zero with zero gradient at the base, heading wrapped (a
    +pi/-pi pair is the same heading, not a 2pi error), zero-weight rows inert;
 4. the intermittent stratum -- the two existing strata's counts are reused, not
@@ -30,7 +34,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from rl.diffusion_ft.proposal_select import parse_arms, select_switch
+from rl.diffusion_ft.branching import lateral_shift, time_warp
+from rl.diffusion_ft.proposal_select import (bank_choice, make_bank, make_banks,
+                                             parse_arms, select_switch)
 from rl.diffusion_ft.tools.add_intermittent_split import intermittent_strata
 from rl.diffusion_ft.tools.select_analysis import analyze
 from rl.diffusion_ft.train_safety import SafetyFineTuner, preserve_loss
@@ -87,6 +93,82 @@ def t_selector():
     sw = select_switch("cons", clear_p=cp, clear_a=ca, prog_p=np.zeros(1000),
                        prog_a=np.full(1000, 50.0), **kw)
     check(not sw.any(), "2 cons never switches away from a clean base candidate")
+
+
+def t_bank():
+    kw = dict(tol_m=1.0, margin_m=0.3, delta_m=0.2)
+    mag = [0.5, 1.0, 2.0]                       # ascending: smallest edit first
+    # scene 0: only the LARGEST candidate is clean -> it must still be chosen;
+    # scene 1: candidates 1 and 2 are both clean -> the smaller magnitude wins;
+    # scene 2: base is clean -> nothing may fire, however clean the candidates;
+    # scene 3: every candidate violates -> keep the base.
+    cp = np.array([-0.3, -0.3, 0.9, -0.3])
+    ck = np.array([[-0.1, -0.1, 5.0, -0.2],      # cand 0 (mag 0.5)
+                   [-0.1, 0.4, 5.0, -0.2],       # cand 1 (mag 1.0)
+                   [0.6, 0.4, 5.0, -0.2]])       # cand 2 (mag 2.0)
+    pp = np.full(4, 10.0); pk = np.full((3, 4), 10.0)
+    ch = bank_choice("cons", clear_p=cp, prog_p=pp, clear_k=ck, prog_k=pk,
+                     magnitude=mag, **kw)
+    check(ch.tolist() == [2, 1, -1, -1], f"2b bank picks smallest admissible {ch.tolist()}")
+    # The do-no-harm property is the whole reason `broken` was 0.0000; a bank must
+    # not weaken it by offering more chances to fire on a clean base candidate.
+    rng = np.random.default_rng(3)
+    n, K = 2000, 8
+    ch = bank_choice("cons", clear_p=rng.uniform(0.001, 5, n), prog_p=np.zeros(n),
+                     clear_k=rng.uniform(-5, 5, (K, n)), prog_k=np.full((K, n), 50.0),
+                     magnitude=np.arange(K, dtype=float), **kw)
+    check((ch < 0).all(), "2b bank never switches away from a clean base candidate")
+    # A candidate that gives up too much progress is inadmissible even when clean.
+    ch = bank_choice("cons", clear_p=np.array([-0.3]), prog_p=np.array([10.0]),
+                     clear_k=np.array([[5.0]]), prog_k=np.array([[2.0]]),
+                     magnitude=[0.5], **kw)
+    check(ch.tolist() == [-1], "2b progress tolerance still binds inside a bank")
+    # Ranking is by magnitude, NOT by clearance: the bank is a minimal
+    # intervention, not a licence to take the most aggressive edit that scores well.
+    ch = bank_choice("cons", clear_p=np.array([-0.3]), prog_p=np.array([10.0]),
+                     clear_k=np.array([[0.1], [9.0]]), prog_k=np.full((2, 1), 10.0),
+                     magnitude=[0.5, 1.0], **kw)
+    check(ch.tolist() == [0], "2b smallest edit beats the clearest one")
+
+    b = make_bank("tw0.85,lat-0.25")
+    check([c.family for c in b] == ["tw", "lat"], "2b bank spec parsed")
+    check(raises(lambda: make_bank("id")), "2b id refused (it IS the base proposal)")
+    check(raises(lambda: make_bank("rn20s0")), "2b rn refused (costs a denoiser eval)")
+    check(raises(lambda: make_bank("tw0.7h2")), "2b hold refused (selector re-decides)")
+    check(raises(lambda: parse_arms("x=bank:learned:20:0.3")), "2b bank+learned refused")
+    check(raises(lambda: parse_arms("x=bank:look")), "2b bank+look refused")
+    check(parse_arms("x=bank:cons:10")[0].alt == "bank", "2b bank arm parses")
+
+    # Named banks: the lateral-only / timing-only ablation must be able to run as
+    # two arms of ONE job, or it is compared across submissions instead of paired.
+    a = parse_arms("all=bank:cons:20,lo=bank@lat:cons:20,to=bank@tw:cons:20")
+    check([x.alt for x in a] == ["bank"] * 3, "2b bank@name keeps alt 'bank'")
+    check([x.bank for x in a] == ["", "lat", "tw"], f"2b bank names {[x.bank for x in a]}")
+    check(raises(lambda: parse_arms("x=bank@:cons")), "2b empty bank name refused")
+    bs = make_banks("tw0.85,lat0.25", "lat=lat0.25,lat-0.5;tw=tw0.85,tw1.3")
+    check(sorted(bs) == ["", "lat", "tw"], f"2b make_banks keys {sorted(bs)}")
+    check([c.name for c in bs["lat"]] == ["lat0.25", "lat-0.5"], "2b named bank parsed")
+    check(all(c.family == "tw" for c in bs["tw"]), "2b timing-only bank is timing-only")
+    check(raises(lambda: make_banks("tw0.85", "lat0.25")), "2b bank without a name refused")
+    check(raises(lambda: make_banks("tw0.85", "lat=lat0.25;lat=lat0.5")),
+          "2b duplicate bank name refused")
+    # Every named bank faces the same family restriction as the default one.
+    check(raises(lambda: make_banks("tw0.85", "bad=rn20s0")), "2b rn refused in a named bank")
+
+    # Continuity at the anchor: index 0 is the CURRENT pose and both families must
+    # leave it untouched, or the switch teleports the car at the join.
+    rng = np.random.default_rng(4)
+    w = np.zeros((2, 16, 5), np.float32)
+    w[..., 0] = np.cumsum(rng.uniform(0.4, 0.6, (2, 16)), axis=1)
+    w[..., 3] = 5.0
+    w = jnp.asarray(w)
+    for name, out in (("time_warp", time_warp(w, 0.7, ramp_steps=10, dt=0.1)),
+                      ("lateral_shift", lateral_shift(w, 0.5, ramp_steps=10, dt=0.1))):
+        d = float(jnp.max(jnp.abs(out[:, 0] - w[:, 0])))
+        check(d < 1e-5, f"2b {name} leaves the anchor pose fixed ({d:.2e})")
+    tw1 = time_warp(w, 1.0, ramp_steps=10, dt=0.1)
+    check(float(jnp.max(jnp.abs(tw1[..., :3] - w[..., :3]))) < 1e-4,
+          "2b time_warp(alpha=1) is the identity on the path")
 
 
 def t_preserve():
@@ -208,7 +290,7 @@ def t_replay():
 
 
 def main():
-    for fn in (t_arms, t_selector, t_preserve, t_intermittent, t_analysis, t_replay):
+    for fn in (t_arms, t_selector, t_bank, t_preserve, t_intermittent, t_analysis, t_replay):
         fn()
     print(f"\n{'ALL PASS' if not FAILED else f'{len(FAILED)} FAILED'}")
     sys.exit(1 if FAILED else 0)

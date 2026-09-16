@@ -19,6 +19,13 @@
 #   ft-dependent  : ft | bf_cons=ft:cons:20 | bf_cons10=ft:cons:10 | bf_margin=ft:margin:20
 #   base-only (1x): base | bb_cons=base2:cons:20 (matched compute) | bfull_cons=basefull:cons:20
 #
+# THE REPAIR BANK (DFT_SELECT_BANK, alt 'bank'). Alternatives are time warps and
+# lateral shifts of the BASE's own proposal -- the two families that account for
+# 82 of the 85 repairs `counterfactual --mode repair` verified, offered at
+# decision time instead of distilled into weights (which did not transfer). They
+# cost NO denoiser evaluations, so a bank arm is cheaper than bb_cons and needs
+# no checkpoint at all; it is placed in DFT_BASE_ARMS for that reason.
+#
 # COST (a6000, 1450 scenes x 4 repeats; one plain-eval arm ~37 min): first
 # checkpoint ~7.5 arm-units, the others ~4.3; at 2 shards that is ~2.3 h / ~1.3 h
 # per task, 6 tasks at 3-wide ~4-5 h wall.
@@ -31,6 +38,15 @@
 #     DFT_FT_ARMS="bf_cons10=ft:cons:10,l02=ft:learned:20:0.2,l05=ft:learned:20:0.5" \
 #     DFT_SELECT_CKPTS=".../base_s0/iter_000110" bash ...
 #   DFT_SELECT_SMOKE=1 bash ...    # 4 scenes/split, 1 repeat, 1 checkpoint (~20 min)
+#   # attribution: lateral-only vs timing-only vs both, PAIRED in one job. Named
+#   # banks (DFT_SELECT_BANKS, 'name=spec;name=spec') are referenced as 'bank@name'.
+#   DFT_SELECT_CKPTS=".../base_s0/iter_000110" DFT_FT_ARMS="bf_cons10=ft:cons:10" \
+#     DFT_BASE_ARMS="base,bank_all=bank:cons:20,bank_lat=bank@lat:cons:20,bank_tw=bank@tw:cons:20" \
+#     DFT_SELECT_BANKS="lat=lat0.25,lat-0.25,lat0.5,lat-0.5;tw=tw0.85,tw1.15,tw0.7,tw1.3" \
+#     bash rl/diffusion_ft/slurm/submit_select_eval.sh
+#   # repair bank only, no fine-tune needed at all:
+#   DFT_FT_ARMS=ft DFT_BASE_ARMS="base,bank_cons10=bank:cons:10" \
+#     DFT_SELECT_BANK="tw0.85,tw0.7,lat0.25,lat-0.25" bash ...
 #   # re-analyze only:
 #   sbatch rl/diffusion_ft/slurm/select_analysis.sbatch <select_dir>/analyze.env
 set -euo pipefail
@@ -42,7 +58,7 @@ SPLITS3="${DFT_SPLITS3_JSON:-$VDIR/eval_splits_3strata.json}"
 RUN=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
 CKPTS="${DFT_SELECT_CKPTS:-$RUN/base_s0/iter_000110 $RUN/base_s1/iter_000110 $RUN/base_s2/iter_000110}"
 FT_ARMS="${DFT_FT_ARMS:-ft,bf_cons=ft:cons:20,bf_cons10=ft:cons:10,bf_margin=ft:margin:20}"
-BASE_ARMS="${DFT_BASE_ARMS:-base,bb_cons=base2:cons:20,bfull_cons=basefull:cons:20}"
+BASE_ARMS="${DFT_BASE_ARMS:-base,bb_cons=base2:cons:20,bfull_cons=basefull:cons:20,bank_cons10=bank:cons:10,bank_cons=bank:cons:20}"
 SEED="${DFT_SELECT_SEED:-4242}"
 REPEATS="${DFT_SELECT_REPEATS:-4}"
 SHARDS="${DFT_NUM_SHARDS:-2}"
@@ -93,6 +109,9 @@ for c in $CKPTS; do
       echo "DFT_SELECT_CAP=$CAP"
       echo "DFT_SELECTOR_JSON=${DFT_SELECTOR_JSON:-}"
       echo "DFT_LOOK_REPLANS=${DFT_LOOK_REPLANS:-2}"
+      echo "DFT_SELECT_BANK=${DFT_SELECT_BANK:-tw0.85,tw1.15,lat0.25,lat-0.25,tw0.7,tw1.3,lat0.5,lat-0.5}"
+      echo "DFT_SELECT_RAMP=${DFT_SELECT_RAMP:-10}"
+      echo "DFT_SELECT_BANKS=${DFT_SELECT_BANKS:-}"
       echo "DFT_SELECT_TOL_M=${DFT_SELECT_TOL_M:-1.0}"
       echo "DFT_SELECT_MARGIN_M=${DFT_SELECT_MARGIN_M:-0.3}"
       echo "DFT_SELECT_DELTA_M=${DFT_SELECT_DELTA_M:-0.2}"

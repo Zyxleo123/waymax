@@ -1558,33 +1558,48 @@ geometry already captures the benefit and the look-ahead is not currently worth 
   per-scene scoring: the training curve's ~0.03 seed spread cannot resolve a 0.003
   effect, and the paired selection eval resolves it with CIs an order of magnitude
   tighter.
-### What runs next (queued 2026-09-14)
+### The three follow-ups, run 2026-09-14
 
-**1. θ by episode outcome.** `theta` is now the 4th arm field
-(`ft:learned:20:0.35`), and `fit_selector` picks its default under
+**1. θ by episode outcome -> the learned selector is dead.** `theta` is now the
+4th arm field (`ft:learned:20:0.35`) and `fit_selector` picks its default under
 `--max_switch_rate` (0.01) while reporting the whole curve and the unconstrained
-argmax it no longer trusts. The deployable value is swept in closed loop, where
-the objective is the episode outcome rather than a sum of per-decision effects:
+argmax it no longer trusts. Two measurements killed the learned rule:
 
-```bash
-CF=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/counterfactual/20260913_234710_1263710
-RUN=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
-DFT_SELECTOR_JSON=$CF/selector.json DFT_SELECT_CKPTS="$RUN/base_s0/iter_000110" \
-  DFT_BASE_ARMS=base \
-  DFT_FT_ARMS="bf_cons10=ft:cons:10,l01=ft:learned:20:0.1,l03=ft:learned:20:0.3,l05=ft:learned:20:0.5,l07=ft:learned:20:0.7" \
-  bash rl/diffusion_ft/slurm/submit_select_eval.sh
-```
+| θ | switch rate | per-decision effect (OOF) | closed loop (m3 Δ) |
+|---|---|---|---|
+| 0.00 | 63% | +0.00083 | +0.0085, **broke 0.0049** |
+| 0.01 | 0.95% | +0.00026 | — |
+| 0.02 | 0.30% | +0.00011 | — |
+| 0.04 | 0.10% | +0.00005 | — |
+| 0.10 | — | — | +0.0004 |
+| >= 0.30 | ~0 | ~0 | **+0.0000** (never fires) |
+| **`cons`** | **0.12%** | **+0.00046** | **+0.0083** |
 
-Read `broken` as well as the delta: the 09-14 learned arm found MORE recoveries
-than `cons` (0.0134 vs 0.0083) and lost it all to 0.0049 of broken successes. If
-no θ beats `cons10` on the marginal, the honest conclusion is that two lines of
-geometry are enough and the model buys nothing.
+At a MATCHED switch rate the two-line geometric rule beats the fitted score nine
+to one on the fit's own metric (0.12% -> +0.00046 vs 0.10% -> +0.00005). The
+learned selector only looked competitive at θ=0, where it switches constantly and
+pays for it in broken successes. It is not ranking decisions better than
+`clear_p < 0 and clear_a >= 0`; a better feature set would have to come first.
+`look` (execute + 1 base replan, then judge) matched `cons10` at several times the
+cost, so single-step geometry already captures the benefit.
 
-**2. A bigger repair set.** The search keeps only what it can verifiably fix, so
-the cheap way to grow it is to point it at the SUCCESS pool as well — the base
-fails ~2% of those, and those failures are equally repairable and equally valid
-training data. `DFT_REPAIR_SPLITS` / `DFT_REPAIR_CAPS` / `DFT_CANDS` /
-`DFT_REWINDS` are now submitter knobs (held-out splits are still refused):
+**2. A bigger repair set -> more data does not move the correction arm.**
+`DFT_REPAIR_SPLITS` / `DFT_REPAIR_CAPS` / `DFT_CANDS` / `DFT_REWINDS` are
+submitter knobs now (held-out splits still refused). Pointing the search at the
+success pool as well, with 19 candidates instead of 15:
+
+| pool | scanned | base failures | repaired | rate |
+|---|---|---|---|---|
+| `failure_train` | 173 | 166 | 100 | 0.60 (was 0.51 at 15 candidates) |
+| `success_train` | 4000 | 44 | 40 | **0.91** |
+| total | 4173 | 210 | 140 | 0.67 |
+
+160 targets, up from 100. The base's own failures inside the SUCCESS pool are
+rare (1.1%) and easy -- 91% repairable -- which says they are marginal rather
+than structural. But the arms trained on 160 targets land at best 3-seed mean
+**−0.0001** (curve average −0.0022) against +0.0004 / −0.0016 on 100: unchanged.
+**The correction objective is not dataset-size-limited**, so the next question is
+what it IS limited by, not how to collect more.
 
 ```bash
 DFT_CF_PARTS=repair DFT_NUM_SHARDS=4 \
@@ -1593,24 +1608,11 @@ DFT_CF_PARTS=repair DFT_NUM_SHARDS=4 \
   bash rl/diffusion_ft/slurm/submit_counterfactual.sh
 ```
 
-A chunk with no failure in it costs one base rollout and exits the rewind loop
-immediately, so scanning 4000 success scenes is far cheaper than 4000 searches.
-The repair-trained arms are chained behind it on the larger set.
+A chunk with no failure costs one base rollout and exits the rewind loop at once,
+so scanning 4000 success scenes is far cheaper than 4000 searches.
 
-**3. Selection on the checkpoints these experiments produced.** Every selection
-number so far uses the 09-11 `base` checkpoints, trained before any of this. Two
-questions at once — does a preservation-trained alternative select better, and
-does the selector prefer the MOST aggressive fine-tune (`srow`, failure 0.28)
-because it filters the damage anyway?
-
-```bash
-P=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/preserve/20260913_234938_1263938
-DFT_SELECT_CKPTS="$P/pres30_s0/iter_000140 $P/srow_s0/iter_000110 $CF/train/repair_s0/iter_000120" \
-  DFT_FT_ARMS="ft,bf_cons10=ft:cons:10" bash rl/diffusion_ft/slurm/submit_select_eval.sh
-```
-
-Same seed, shards and chunking as the 09-13 run, so these pair scene-for-scene
-with the `base_s{0,1,2}` numbers above.
+**3. Selection on the checkpoints these experiments produced** -- the result is
+the section below, and it is the most surprising thing here.
 
 ## The ranking inverts under selection (2026-09-14, `select/20260914_094848_1315921`)
 
@@ -1653,6 +1655,132 @@ Open: `srow` was never swept for seeds or stopping point as a *proposal
 generator* — it was only ever measured as a policy, where it looks bad. The axis
 worth sweeping now is how aggressive the alternative may be before the selector
 stops filtering it (`srow` at later iterations, or the unanchored arm).
+
+## The repair bank as a selector alternative (2026-09-15)
+
+**The asset the correction objective could not use.** `counterfactual --mode
+repair` verifies 140/210 failures repairable, and the kept repairs are **timing
+42, lateral 40, re-noise 3** — 82 of 85 are two geometric edit families. Training
+on them does not transfer (best 3-seed mean +0.0004 at 100 targets, −0.0001 at
+160: *not* dataset-size-limited). The ranking inversion above says why that is not
+the end of it: the checkpoint is valuable as a **proposal generator**, not as a
+policy, and a repair is a *decision* ("slow down at replan 3 here") whose
+condition a denoising loss at `t ~ U[0, k_trainable)` throws away while it
+imitates the shape.
+
+So offer the same interventions at decision time. `proposal_select` gains a
+fourth alternative, `bank`:
+
+| alt | where the alternative comes from | denoiser evals per replan |
+|---|---|---|
+| `ft` | fine-tuned late chain, same prefix and late noise | `k_trainable` |
+| `base2` | base late chain, fresh late key | `k_trainable` |
+| `basefull` | independent full base sample | 100 |
+| **`bank`** | **`tw`/`lat` edits of the base's OWN proposal** | **0** |
+
+`time_warp` and `lateral_shift` are pure functions of a trajectory already drawn,
+so a bank of K costs K jitted scorer calls and **no network**. A bank arm is
+therefore cheaper than `bb_cons` and needs no checkpoint at all — it lives in
+`DFT_BASE_ARMS`.
+
+**What preserves the do-no-harm property.** Every candidate faces the *same*
+per-candidate rule as a single alternative (`select_switch`), so if the base
+proposal is predicted clean no candidate is eligible, however large the bank —
+this is the property that made `broken` 0.0000, and `test_proposal_select`
+pins it over 2000 random rows x 8 candidates. Among the eligible, the winner is
+the **smallest** perturbation by `Candidate.magnitude`, the repair search's own
+ordering. Ranking by magnitude rather than by clearance is deliberate: it makes
+the bank a minimal intervention instead of a licence to take the most aggressive
+edit that happens to score well (pinned: "smallest edit beats the clearest one").
+
+**Scope cuts, and why.** `id` is refused (it *is* the base proposal — a switch
+that changes nothing); `h<n>` is refused (the selector re-decides every replan,
+so holding has no meaning); `rn` is refused (a denoiser eval per candidate, which
+is the whole property this alternative has — and it was 3 of 85 kept repairs, so
+it is not what the search says is worth buying). `bank` + `learned`/`look` is
+also refused: neither has a defined meaning over K candidates, and silently
+scoring only the chosen one would make the arm a different experiment than its
+name says.
+
+**Data kept for a re-rank.** The npz stores `choice` (which candidate fired, −1
+= base) and `clear_k` (every candidate's clearance, `[B, R, K]`), so the bank can
+be re-ranked or a selector fit offline without re-rolling anything.
+
+**One analysis fix this forced.** `selection_gap3` was computed for every arm
+against the `any(base, ft)` oracle. A bank arm selects over a different candidate
+set, so that would report a gap against a ceiling it was never offered; the gap
+is now emitted only for arms whose alt IS `ft`, read from the runner's own meta
+(`analyze(..., alt_of=)`).
+
+```bash
+# default: two bank arms added to the base-only (checkpoint-free) set
+bash rl/diffusion_ft/slurm/submit_select_eval.sh
+# bank only, no fine-tune involved anywhere:
+DFT_FT_ARMS=ft DFT_BASE_ARMS="base,bank_cons10=bank:cons:10" \
+  DFT_SELECT_BANK="tw0.85,tw0.7,lat0.25,lat-0.25" bash rl/diffusion_ft/slurm/submit_select_eval.sh
+DFT_SELECT_SMOKE=1 bash rl/diffusion_ft/slurm/submit_select_eval.sh   # 4 scenes/split first
+```
+
+### Result (`select/20260915_130443_1678068`, complete)
+
+Same protocol as the 09-13 batch: verify seed 4242, 4 repeats, paired per scene,
+stratified scene-bootstrap CIs. `bf_cons10` reproduces its published
++0.0033 / +0.0077 to the third decimal, so this is the same measurement.
+
+| policy | m2 Δ | m3 Δ (95% CI) | recovered | broken |
+|---|---|---|---|---|
+| **`bank_cons`** (w20) | **+0.0069** | **+0.0178 [+0.0157, +0.0202]** | 0.0181 | 0.0003 |
+| `bank_cons10` (w10) | +0.0055 | +0.0137 [+0.0117, +0.0160] | 0.0137 | **0.0000** |
+| `bf_cons10` — the 09-14 winner | +0.0035 | +0.0083 [+0.0068, +0.0099] | 0.0083 | 0.0000 |
+| `bb_cons` | +0.0018 | +0.0039 | 0.0039 | 0.0001 |
+| `ft` alone | −0.0119 | −0.0082 | 0.0130 | 0.0212 |
+
+Per split, `bank_cons`: failure 0.046 → **0.361**, intermittent 0.583 → **0.914**,
+success 0.9968 → **0.9990** — it gains on all three, so it never spends the
+66:1 budget at all. **2.1x the previous best, CIs disjoint, no checkpoint, no
+gradient and no denoiser evaluation anywhere in the arm.**
+
+**It clears the oracle every earlier selection result was measured against:**
+
+```
+any(base, ft) same seed    +0.0128
+any(base, ft) independent  +0.0149
+bank_cons                  +0.0178
+```
+
+Not a paradox — the bank offers candidates outside the fine-tune's set — but
+`selection_gap3` against the ft oracle is no longer the right bound for this line,
+which is why it is now emitted only for arms whose alt IS `ft`. Against the m3
+ceiling for a perfect fixer (~+0.032) this is ~56%.
+
+**The runtime invariant held on all 1490 switches: zero fired on a clean base
+candidate.** Switch rate 2.9% (`bank_cons`) against `bf_cons10`'s 1.1%.
+
+### Two things this does NOT establish
+
+**1. The mechanism is not the one the bank was built on.** The candidate mix is
+**88% lateral / 12% timing** (1316 / 174), against the repair search's verified
+50/50. So "half the fixes are arrive-later, which a clearance gradient cannot
+express" — the argument for building this — is *not* what produced the gain. The
+cause is the magnitude ladder mixing units (`lat0.25` = 0.35 ranks below
+`tw1.15` = 0.38), combined with an admissibility test far weaker than the repair
+search's: a one-step geometric prediction admits many more candidates than
+"the whole continuation solves the scene", so the magnitude tie-break binds much
+harder and the cheapest lateral almost always wins.
+
+`--select_banks` exists for exactly this ablation: named banks referenced as
+`bank@lat` / `bank@tw`, so lateral-only and timing-only run as arms of ONE job and
+are paired draw for draw rather than compared across submissions.
+
+**2. The window result inverts, unexplained.** For the `ft` alternative the
+SHORTER window won (`cons10` > `cons`: scoring 2 s ahead condemns violations the
+next replan would have removed). For the bank the LONGER window wins, and clearly
+(0.361 vs 0.282 on failures) — and it is also where the only damage appears
+(`broken` 0.0003 vs 0.0000). Different mechanism, no account of it yet.
+
+Also open: the bank arms have **no seed replication**. They are checkpoint-free,
+so they ran once on `select_seed` 4242 with 4 repeats; the CI is a scene
+bootstrap, not a seed spread. The ft arms got three checkpoint seeds.
 
 ## Where the safety loss is evaluated (2026-09-14)
 
@@ -1714,3 +1842,224 @@ sbatch rl/diffusion_ft/slurm/test_transition_buffer.sbatch  # CPU gates first
 (buffer **and** on-policy term) and `tbfresh` (capacity == batch, so every drawn
 transition is one this iteration produced — the on-policy control that isolates
 staleness from everything else).
+
+### Traps found building this (2026-09-13/14)
+
+All four were silent in the sense that matters: nothing crashed at the point of
+the mistake, and three of them would have produced plausible-looking numbers.
+
+* **The world->normalized inverse is lossy past the scenario end.** 25.6 m of
+  tail error in every repair target, because `preprocess` clamps
+  `world_t_seconds` and the forward map's samples there are a frozen pose. Caught
+  by a round-trip check written before any target was consumed; now masked
+  (`branching.model_step_valid`), the mask ships WITH the data, and the trainer
+  refuses repair data that predates it. The check warns above 10 cm and refuses
+  above 1 m; ~2 cm is the expected discretization residual.
+* **`env.batch_size` before the first reset is 0.** The env learns its batch size
+  in `reset`, so sizing per-scene arrays on the line above the rollout gave empty
+  arrays; the first repair job died on the first broadcast. Now taken from the
+  finished episode.
+* **`seed_mean` was a mean over whatever checkpoints were scored.** Fine for
+  three seeds of one config, wrong for the three DIFFERENT configs of the
+  checkpoint comparison. Renamed `ckpt_mean`, with the distinction in the
+  docstring.
+* **`test_bc_term` was already broken at `d640540`** -- its fake trainer predates
+  the 09-09 anchor-window change and never set `_anchor_tw`. Unrelated to this
+  work, found because the new suite runs the old tests alongside the new ones.
+
+The pattern worth keeping: every new data path here (repair targets, labels,
+branch replays) got a cheap invariant checked at runtime -- the round trip, the
+`id` branch's `id_consistent`, the held-out-scene guard on `--repair_data`. Two
+of the four above were caught by those, not by tests.
+
+### The teacher-forced unroll was never actually cheap (fixed 2026-09-14)
+
+Measured on the first proposal sweep, per-iteration wall time after the
+first-iteration compile:
+
+| arm | s/iter |
+|---|---|
+| `ctrl` — free-running, 100 evals under gradient | **5.96** |
+| `tb1` / `tb4` — replayed transition | 6.3 – 7.9 |
+| `tf1` / `tf4` — teacher-forced, 1–4 evals | **34.5** |
+
+The proposal whose entire claim is `K` network evaluations instead of 100 ran 6x
+SLOWER than the thing it was meant to undercut. Not a property of the method:
+`_grads_for` routed `unroll_steps > 0` to `_loss_for`'s un-jitted closure, which
+re-traced the unrolled sampler + geometry graph once per context per iteration
+(8x), while `unroll_steps == 0` went through the cached `_jit_free_grad`. The
+unroll now shares `_free_core` behind a static `has_unroll` branch;
+`--unroll_eager` keeps the old closure as the equivalence reference, and
+`tests/test_unroll_jit.py` pins the two key streams equal under every combination
+of the terms that consume the stream ahead of the proposal (anchor / bc / base).
+The paths are numerically equivalent, not bit-identical — XLA fusion reassociates
+floats — so a `tf` arm from before the fix is still comparable to one after it.
+
+**The second finding is the one that matters, and it survives the fix:** `tb`
+costs the same as `ctrl` despite doing 1 network evaluation under gradient
+instead of 8x100. **Collection dominates** — the 100-step sampler x 8 replans
+runs in every arm, because policy-visited states require it. So a cheaper
+gradient buys much less than `unrolled_prediction`'s docstring implies, whichever
+cheap proposal you pick. If iteration cost is the target, the thing to attack is
+collection (`--collect_steps`, the DDIM-strided prefix), not the gradient.
+
+### Proposal sweep result (15 arms x 150 iters, 3 seeds, complete 2026-09-15)
+
+Seed means at matched iterations; `base_marginal = 0.98234`. "best" is the eval
+point with the best SEED-MEAN delta, so it still selects a stopping point but not
+a lucky seed.
+
+| arm | fail_held @149 | succ_held @149 | delta @149 | best delta (iter) | seeds > 0 |
+|---|---|---|---|---|---|
+| `ctrl` free-running | 0.341 ±0.012 | 0.951 ±0.005 | −0.0408 | −0.0057 (110) | 0/3 |
+| `tf1` teacher-forced, x0_hat | 0.239 ±0.022 | 0.991 ±0.004 | **−0.0026** | **−0.0007 (100)** | 0/3 |
+| `tf4` teacher-forced, unroll | 0.333 ±0.010 | 0.940 ±0.034 | −0.0518 | −0.0091 (110) | 0/3 |
+| `tb1` replayed, x0_hat | 0.197 ±0.025 | 0.983 ±0.015 | −0.0108 | **+0.0007 (140)** | **3/3** |
+| `tb4` replayed, unroll | 0.291 ±0.022 | 0.980 ±0.006 | −0.0123 | −0.0122 (140) | 0/3 |
+
+**Three findings, in decreasing order of confidence.**
+
+1. **`K=4` buys ~+0.09 failure-split gain over `K=1` in BOTH families** (tf 0.333 vs
+   0.239, tb 0.291 vs 0.197) — comfortably outside the ±0.02 seed spread. That is
+   the Jensen-gap prediction in `unrolled_prediction`'s docstring, made in advance
+   and confirmed independently on teacher-forced and replayed states. **It does
+   not convert into corpus value:** both `K=4` arms are worse at the margin than
+   their `K=1` counterparts (−0.0091 vs −0.0007, −0.0122 vs +0.0007). `K=4` is not
+   better, it is *more aggressive*, and it lands on the same failure↔success
+   tradeoff every other knob does.
+2. **`tf1` is the best proposal on this protocol.** It reaches 0.256 failure-split
+   at its best point against `tb1`'s 0.198 — a +0.058 difference, outside the
+   spread — for a corpus delta (−0.0007 vs +0.0007) that is not. More gain at
+   indistinguishable cost.
+3. **Transition replay works mechanically and does not win.** Removing the
+   diffusion-state mismatch (the one defect teacher forcing admits to) changed the
+   trade point but did not beat teacher forcing. `tb1` is the only arm positive in
+   all 3 seeds, but at +0.0007 ±0.0003 that is *parity*, not a gain — and it is
+   parity bought by being the weakest update in the sweep.
+
+**No arm beats the frozen base at the corpus level.** Every family's seed-mean
+delta is ≤ 0 at every one of the 16 eval points except `tb1`'s +0.0007. Read
+together with the geometry and stopping sweeps, the proposal axis joins the list
+of things that move the failure/success trade point without moving the margin.
+
+## Does the barrier fire where nothing is wrong? (2026-09-15, built, not yet run)
+
+Every number in this file about *where* the safety loss bites came from
+`calibrate_expert.py`, which reports **clearance percentiles** — how close the
+human gets. Percentiles cannot see the complementary question: how much of the
+loss comes from geometry that is *already clear of the margin*, i.e. from terms
+the barrier was supposed to have switched off.
+
+The mechanism is structural, not a rounding error. The barrier
+
+```
+tau * softplus((margin - c) / tau)
+```
+
+has **infinite support**: at `c = margin + k*tau` it is still `~tau*exp(-k)`,
+and its gradient is still `~exp(-k)`. Per term that is negligible — but the
+barrier is *summed*, deliberately (`safety_loss.py` docstring: "applied per
+corner and per disc pair and summed, rather than to an aggregated minimum"),
+over 4 ego corners, over every valid other agent, and over every step. A 91-step
+scene with 40 agents sums 364 edge terms and 3,640 agent terms, so a per-term
+epsilon is multiplied by a factor that grows with **how crowded and how long the
+scene is** — not with anything the policy did. An empty straight road and a
+dense but perfectly safe queue of traffic are then not scored the same, and the
+whole difference is traffic density. On the agent term the exposure is the
+larger one: `agent_tau` is 0.25 m and WOMD's median expert gap is 1.90 m, only
+~4.6 tau out.
+
+### The probe: `tests/probe_barrier_tail.py` (`submit_probe_barrier_tail.sh`)
+
+Splits every scene's loss **and its gradient** exactly two ways —
+
+* **bite**, contributed by corners/pairs actually inside the margin (`c < margin`);
+* **tail**, contributed by corners/pairs at or beyond it (`c >= margin`);
+
+— because the loss split alone is cosmetic: a tail that is 30% of the loss but
+3% of the gradient does not move the policy, and a tail that is 30% of the
+*gradient* is a second, unintended objective ("stay away from everything,
+always") riding along with the safety term. Scenes are then bucketed by whether
+anything in them is even close:
+
+* **trivial** — the expert log never comes within either margin at any step. The
+  loss on these should be 0; whatever it is, is misfire, with no legitimate part
+  to net off. This bucket is the answer to the question.
+* **bites** — something is inside a margin at some step.
+* **dirty** — the log is itself off-road, excluded as everywhere else.
+
+It also correlates the trivial bucket's loss against the scene's mean agent
+count (a safe scene charged for its traffic is exactly what that correlation
+is), and re-scores the identical clearances under every barrier shape, so the
+size of the fix is read off the same numbers rather than a second run.
+
+Pure geometry over `log_trajectory`: no env, no checkpoint, no GPU, CPU
+partition — same shape of job as `calibrate_expert`. Submitted against **both**
+corpora as siblings: `failures.tfrecord` says how much of a *hard* scene's loss
+is tail, and a WOMD shard — ordinary driving, where the trivial scene is the
+common case and where the corpus-level regression is measured — says whether the
+term misfires.
+
+### The fix, wired behind a flag: `--barrier_shape` / `DFT_BARRIER_SHAPE`
+
+| shape | value at margin | past the margin | deep ramp | smooth? |
+|---|---|---|---|---|
+| `softplus` (default) | `tau*ln2` | decays as `exp(-(c-m)/tau)`, never 0 | `m - c` | C^∞ |
+| `hinge2` | **0** | **exactly 0, value and gradient** | `m - c - tau/2` | C^1 |
+| `hinge` | 0 | exactly 0 | `m - c` | kink (reference only) |
+
+`hinge2` is the quadratic-smoothed hinge: `z**2/(2*tau)` on the knee, linear
+beyond it. It keeps everything the softplus was chosen for — `tau` still means
+knee width, the ramp is still unbounded with gradient saturating at 1 so a
+trajectory deep in violation is still pushed out, and it is still C^1 so there
+is no `max` kink to differentiate through — and drops only the tail. The
+quadratic branch clips its argument before squaring, so a broken record at
+`c = -1e6` gives a finite value and a saturated gradient instead of a NaN
+(asserted in `test_safety_loss.py::test_compact_barrier`).
+
+**Default is unchanged.** Every margin in `safety_loss.py` and every run on
+record was measured under `softplus`, and `hinge2` moves what a margin *means*
+by removing ~2.7 tau of reach — the same reason `edge_geometry` and
+`agent_geometry` are selectable rather than one silently replacing the other.
+Run the probe, then re-run `calibrate_expert.py` under the new shape, before
+flipping it.
+
+### Taking it to a training arm: `sweep_barrier_shape.sh`
+
+The A/B runs on the two arms with the best record under the current protocol,
+with everything else at the preserve/stopping/proposal settings so the curves
+compare across sweeps: `tf1` (teacher-forced K=1 — the proposal sweep's winner,
+failure 0.239, marginal −0.0026) and `ctrl` (free-running — what every
+geometry/stopping sweep used). 2 shapes × 2 proposals × 3 seeds = 12 tasks,
+150 iters, eval+keep every 10, eval seed 12345.
+
+Both proposals are in the default set because they put the safety term at very
+different states. `tf1` scores a noised **human** trajectory, which is mostly
+clear of both margins, so `hinge2` can zero far more of its loss there than on
+the policy's own visited states. A result on one proposal alone could not
+separate a barrier effect from a proposal interaction.
+
+**`tail_share` is the deciding number, and it arrives at iter 0.** New
+per-iteration metric (console line, `train_log.jsonl` and W&B): the fraction of
+the safety loss charged to corners/agents already clear of their margin.
+`safety_terms` now returns `edge_tail_loss` / `agent_tail_loss` / `tail_loss`
+alongside the existing terms — reported, never differentiated. On a `hinge2`
+arm it must read exactly `0.000`; that is the flag taking. On a `softplus` arm:
+
+* ~0.02 → the two shapes are the same objective on this data, a null A/B is the
+  *expected* result rather than a failed experiment, and the run is over after
+  one iteration;
+* 0.2+ → a fifth of the term is traffic density, and the arms should separate.
+
+Note that `hinge2`'s `safety_last` is strictly lower than `softplus`'s by
+construction — that is a different constant, not an improvement. Only the split
+rates, read per seed at matched iterations against their own `base_*` rows,
+settle it.
+
+**The honest prior, recorded before the run.** Every geometry knob tried so far
+(tau, margin, both windows) moved the marginal by ≤0.01, inside the noise, while
+the stopping point moved it by 0.03 — and `barrier_shape` is a knob of that same
+family. What makes it worth the GPU anyway is that it is not a
+re-parameterisation of the same objective: it deletes a term that is present in
+every scene whether or not anything is wrong. And either way the run returns a
+measured `tail_share`, which no previous sweep reported.

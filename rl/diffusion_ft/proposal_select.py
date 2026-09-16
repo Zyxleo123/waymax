@@ -23,6 +23,19 @@ the frozen prefix output ``x_{k-1}`` and its late-chain key are kept
   choose".
 * ``basefull`` -- an independent full base sample (2x compute): the extra-sample
   control with its own coarse manoeuvre.
+* ``bank``     -- the repair search's own candidate families applied to the BASE's
+  proposal: a time warp along its path (arrive later / earlier) or a smooth
+  lateral shift of its line (:mod:`rl.diffusion_ft.branching`). ZERO denoiser
+  evaluations -- these are geometric edits of a trajectory already drawn -- so a
+  bank of K costs K scorer calls and no network. WHY: ``counterfactual --mode
+  repair`` verified that 82 of 85 kept repairs are exactly these two families
+  (timing 42, lateral 40, re-noise 3), and that half the fixes are "arrive
+  later", which no clearance gradient can express. Training on those repairs did
+  not transfer (best 3-seed mean +0.0004, and growing the set 100 -> 160 targets
+  moved it to -0.0001), so this offers the same interventions at DECISION time,
+  where the geometric test evaluates the condition instead of a gradient having
+  to learn it. Among the candidates the rule admits, the SMALLEST perturbation
+  wins -- the repair search's own ordering (``Candidate.magnitude``).
 
 Both candidates are scored on geometry only -- min road-edge clearance and min
 agent gap over the next ``window`` world steps (the same exact clearances whose
@@ -66,7 +79,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import numpy as np
 
-ALTS = ("ft", "base2", "basefull")
+ALTS = ("ft", "base2", "basefull", "bank")
 SELECTORS = ("cons", "margin", "always", "learned", "look")
 # Per-replan feature columns stored for every arm (alt columns NaN when the arm
 # has no alternative). Kept as data so a learned selector can be fit on CPU
@@ -90,6 +103,11 @@ class Arm:
     # over-switching (see tools/fit_selector.py), so theta is swept HERE, where
     # the objective is the episode outcome the deployment cares about.
     theta: float | None = None
+    # `bank` alts only: which named bank supplies the candidates. "" = the
+    # default bank (--select_bank). Named banks (--select_banks) let a lateral-only
+    # and a timing-only arm run in the SAME job, so the ablation is paired draw for
+    # draw rather than compared across submissions.
+    bank: str = ""
 
     @property
     def needs_ft(self) -> bool:
@@ -102,6 +120,10 @@ def parse_arms(spec: str, default_window: int = 20) -> list[Arm]:
     ``base`` and ``ft`` are the single-policy arms. Anything else is
     ``name=alt:selector[:window[:theta]]`` with the base as primary; ``theta``
     overrides a ``learned`` selector's fitted switch threshold.
+
+    The alt ``bank`` uses the default bank; ``bank@<name>`` uses a named one from
+    ``--select_banks`` (``@`` rather than ``:``, which is the field separator, and
+    the bank specs themselves are comma-separated so they cannot live here).
     """
     arms: list[Arm] = []
     for tok in [t.strip() for t in spec.split(",") if t.strip()]:
@@ -115,6 +137,11 @@ def parse_arms(spec: str, default_window: int = 20) -> list[Arm]:
         if len(parts) not in (2, 3, 4):
             raise SystemExit(f"--arms: '{tok}' needs alt:selector[:window[:theta]]")
         alt, sel = parts[0], parts[1]
+        bank = ""
+        if alt.startswith("bank@"):
+            alt, bank = "bank", alt[len("bank@"):]
+            if not bank:
+                raise SystemExit(f"--arms: '{tok}' has an empty bank name after 'bank@'")
         win = int(parts[2]) if len(parts) >= 3 else int(default_window)
         theta = float(parts[3]) if len(parts) == 4 else None
         if theta is not None and sel != "learned":
@@ -126,7 +153,14 @@ def parse_arms(spec: str, default_window: int = 20) -> list[Arm]:
             raise SystemExit(f"--arms: selector '{sel}' not in {SELECTORS}")
         if win < 1:
             raise SystemExit(f"--arms: window must be >= 1 world step, got {win}")
-        arms.append(Arm(name, "base", alt, sel, win, theta))
+        # `learned` scores ONE alternative's feature row and `look` branches the
+        # env per candidate; neither has a defined meaning over a bank of K, and
+        # silently scoring only the chosen one would make the arm a different
+        # experiment than its name says.
+        if alt == "bank" and sel in ("learned", "look"):
+            raise SystemExit(f"--arms: alt 'bank' does not support selector '{sel}' "
+                             f"(it ranks K candidates; use cons/margin/always)")
+        arms.append(Arm(name, "base", alt, sel, win, theta, bank))
     names = [a.name for a in arms]
     if len(set(names)) != len(names):
         raise SystemExit(f"--arms: duplicate arm names {names}")
@@ -166,6 +200,88 @@ def select_switch(sel: str, *, clear_p, clear_a, prog_p, prog_a,
     raise ValueError(f"unknown selector {sel!r}")
 
 
+def bank_choice(sel: str, *, clear_p, prog_p, clear_k, prog_k, magnitude,
+                tol_m: float, margin_m: float, delta_m: float):
+    """[B] int32: index into the bank of the candidate to execute, ``-1`` = keep
+    the base.
+
+    Every candidate faces the SAME per-candidate rule as a single alternative
+    (:func:`select_switch`), so ``cons``'s do-no-harm property is preserved
+    verbatim: if the base proposal is predicted clean, no candidate is eligible
+    and nothing is touched, however large the bank. Among the eligible ones the
+    winner is the SMALLEST perturbation by ``Candidate.magnitude`` -- the repair
+    search's own ordering (identity < time warp / lateral shift by size <
+    re-noise), which is what makes a bank a minimal intervention rather than a
+    licence to pick the most aggressive edit that happens to score well.
+
+    Ties in magnitude go to the earlier bank entry, so the arm is a deterministic
+    function of the candidate spec's order. Pure numpy: unit-testable on CPU.
+
+    ``clear_k`` / ``prog_k`` are ``[K, B]``; ``magnitude`` is ``[K]``.
+    """
+    clear_k = np.asarray(clear_k, np.float64)
+    prog_k = np.asarray(prog_k, np.float64)
+    if clear_k.ndim != 2 or clear_k.shape != prog_k.shape:
+        raise ValueError(f"clear_k/prog_k must both be [K, B], got {clear_k.shape} {prog_k.shape}")
+    K, B = clear_k.shape
+    if len(magnitude) != K:
+        raise ValueError(f"magnitude has {len(magnitude)} entries for {K} candidates")
+    elig = np.stack([
+        select_switch(sel, clear_p=clear_p, clear_a=clear_k[k], prog_p=prog_p,
+                      prog_a=prog_k[k], tol_m=tol_m, margin_m=margin_m, delta_m=delta_m)
+        for k in range(K)])                                          # [K, B]
+    cost = np.where(elig, np.asarray(magnitude, np.float64)[:, None], np.inf)
+    best = np.argmin(cost, axis=0)
+    return np.where(np.isfinite(cost[best, np.arange(B)]), best, -1).astype(np.int32)
+
+
+def make_bank(spec: str):
+    """Parse a bank spec into candidates the selector can apply to a drawn proposal.
+
+    Only ``tw`` and ``lat`` are admitted. ``id`` IS the base proposal (keeping it
+    would be a switch that changes nothing), ``h<n>`` holds a perturbation across
+    replans -- meaningless here because the selector re-decides at every replan --
+    and ``rn`` would cost a denoiser evaluation per candidate, which is the whole
+    property this alternative has over ``ft``/``base2``. ``rn`` was also 3 of 85
+    kept repairs, so it is not what the search says is worth buying.
+    """
+    from rl.diffusion_ft.branching import parse_candidates
+
+    cands = parse_candidates(spec)
+    for c in cands:
+        if c.family not in ("tw", "lat"):
+            raise SystemExit(f"--select_bank: candidate '{c.name}' is family "
+                             f"'{c.family}'; only tw/lat are supported "
+                             f"(id is the base proposal, rn costs a denoiser eval)")
+        if c.hold != 1:
+            raise SystemExit(f"--select_bank: '{c.name}' sets hold={c.hold}; the "
+                             f"selector re-decides every replan, so hold has no meaning")
+    if not cands:
+        raise SystemExit("--select_bank is empty but an arm uses alt 'bank'")
+    return cands
+
+
+def make_banks(default_spec: str, named_spec: str = "") -> dict[str, list]:
+    """``{"": [...], "lat": [...], "tw": [...]}`` from the two bank flags.
+
+    ``named_spec`` is ``name=spec;name=spec``, the spec itself comma-separated
+    (``lat=lat0.25,lat-0.25;tw=tw0.85,tw1.15``). Each is validated by
+    :func:`make_bank`, so the tw/lat-only restrictions apply to every one.
+    """
+    banks = {"": make_bank(default_spec)} if default_spec else {}
+    for tok in [t.strip() for t in named_spec.split(";") if t.strip()]:
+        if "=" not in tok:
+            raise SystemExit(f"--select_banks: '{tok}' is not name=spec")
+        name, spec = tok.split("=", 1)
+        name = name.strip()
+        if not name:
+            raise SystemExit(f"--select_banks: '{tok}' has an empty name")
+        if name in banks:
+            raise SystemExit(f"--select_banks: duplicate bank name '{name}'")
+        banks[name] = make_bank(spec)
+    return banks
+
+
 def make_scorer(objcfg):
     """Jitted ``score(world, state, t0, goal_xy, n) -> (clear, edge, agent, prog)``, [B] each.
 
@@ -198,7 +314,8 @@ class ProposalSelectEval:
 
     def __init__(self, tuner, *, ft_ckpt: str, arms: list[Arm], tol_m: float,
                  margin_m: float, delta_m: float, selector_json: str = "",
-                 look_replans: int = 2):
+                 look_replans: int = 2, bank_spec: str = "", banks_spec: str = "",
+                 ramp_steps: int = 10):
         import jax
         import jax.numpy as jnp
 
@@ -224,6 +341,27 @@ class ProposalSelectEval:
                 raise SystemExit("a 'learned' arm needs --selector_json (tools/fit_selector.py)")
             self.selector_model = json.loads(Path(selector_json).read_text())
         self.look_replans = int(look_replans)
+        # Repair-family bank: jit one closure per candidate so the perturbation is
+        # a single fused kernel per replan rather than a pile of eager ops. The
+        # candidate's parameter and the ramp are Python floats, hence static.
+        self.banks, self._perturb = {}, {}
+        self.ramp_steps = int(ramp_steps)
+        want = {a.bank for a in arms if a.alt == "bank"}
+        if want:
+            from rl.diffusion_ft.branching import lateral_shift, time_warp
+            self.banks = make_banks(bank_spec, banks_spec)
+            missing = want - set(self.banks)
+            if missing:
+                raise SystemExit(f"--arms reference bank(s) {sorted(missing)} that "
+                                 f"--select_bank/--select_banks do not define "
+                                 f"(have {sorted(self.banks)})")
+            self.banks = {k: v for k, v in self.banks.items() if k in want}
+            dt = float(tuner.ckpt.preprocess_cfg.world_dt_fallback)
+            for name, cands in self.banks.items():
+                self._perturb[name] = [
+                    jax.jit(lambda w, _f=(time_warp if c.family == "tw" else lateral_shift),
+                            _a=float(c.param): _f(w, _a, ramp_steps=int(ramp_steps), dt=dt))
+                    for c in cands]
         self.br = None
         if any(a.selector == "look" for a in arms):
             from rl.diffusion_ft.branching import Brancher
@@ -276,7 +414,10 @@ class ProposalSelectEval:
         alive = clean_b
         B = env.batch_size
         offroad = np.zeros(B); overlap = np.zeros(B); reached = np.zeros(B)
-        feats, switches, alives = [], [], []
+        feats, switches, alives, choices, clears_k = [], [], [], [], []
+        cands = self.banks.get(arm.bank, []) if arm.alt == "bank" else []
+        perturb = self._perturb.get(arm.bank, []) if arm.alt == "bank" else []
+        nb = len(cands)
         key = rng
         for r in range(args.max_replans):
             if float(jnp.sum(alive)) <= 0.0:
@@ -301,7 +442,29 @@ class ProposalSelectEval:
             row[:, 0], row[:, 1], row[:, 2], row[:, 3] = cp, ep, ap, pp
             sw = np.zeros(B, dtype=bool)
             world = world_p
-            if arm.alt is not None:
+            if arm.alt == "bank":
+                # K geometric edits of the base's OWN proposal -- no denoiser call.
+                ws = [f(world_p) for f in perturb]
+                sc = [tuple(np.asarray(v) for v in
+                            self._score(w, env.sim_state, jnp.asarray(t0, jnp.int32), goal, n))
+                      for w in ws]
+                ck = np.stack([x[0] for x in sc]); pk = np.stack([x[3] for x in sc])
+                ch = bank_choice(arm.selector, clear_p=cp, prog_p=pp, clear_k=ck, prog_k=pk,
+                                 magnitude=[c.magnitude for c in cands],
+                                 tol_m=self.tol_m, margin_m=self.margin_m, delta_m=self.delta_m)
+                sw = ch >= 0
+                bi = np.arange(B)
+                # The `_a` columns report the CHOSEN candidate where one fired and
+                # the clearest one otherwise, so they always describe the best
+                # alternative that was on the table.
+                rep = np.where(sw, ch, np.argmax(ck, axis=0))
+                for j, col in enumerate((4, 5, 6, 7)):
+                    row[:, col] = np.stack([x[j] for x in sc])[rep, bi]
+                world = jnp.where(jnp.asarray(sw)[:, None, None],
+                                  jnp.stack(ws, 0)[np.maximum(ch, 0), bi], world_p)
+                choices.append(ch)
+                clears_k.append(np.ascontiguousarray(ck.T, np.float32))
+            elif arm.alt is not None:
                 if arm.alt == "ft":
                     x_a = actor.sample_late_for(self.ft_params, cond1, cond2, mask,
                                                 x_prefix, key_late)
@@ -344,10 +507,15 @@ class ProposalSelectEval:
         F = (np.stack(feats, 1) if R else np.zeros((B, 0, len(FEAT_COLS)), np.float32))
         S = np.stack(switches, 1) if R else np.zeros((B, 0), bool)
         A = np.stack(alives, 1) if R else np.zeros((B, 0), bool)
+        # WHICH candidate fired, and every candidate's clearance -- kept as data so
+        # the bank can be re-ranked or a selector fit offline without re-rolling.
+        C = (np.stack(choices, 1) if choices else np.zeros((B, R), np.int32) - 1)
+        CK = (np.stack(clears_k, 1) if clears_k
+              else np.zeros((B, R, nb), np.float32))
         solved = (reached > 0.5) & (offroad < 0.5) & (overlap < 0.5)
         return {"solved": solved, "offroad": offroad > 0.5, "overlap": overlap > 0.5,
                 "reached": reached > 0.5, "clean": np.asarray(clean_b) > 0.5,
-                "feat": F, "switch": S, "alive": A}
+                "feat": F, "switch": S, "alive": A, "choice": C, "clear_k": CK}
 
     # ------------------------------------------------------------------ #
     def run(self, out_dir: Path, *, names, repeats: int, seed: int, chunk: int,
@@ -373,6 +541,8 @@ class ProposalSelectEval:
                 "ft_ckpt": self.ft_ckpt, "tol_m": self.tol_m, "margin_m": self.margin_m,
                 "delta_m": self.delta_m, "feat_cols": list(FEAT_COLS),
                 "look_replans": self.look_replans,
+                "banks": {k: [c.name for c in v] for k, v in self.banks.items()},
+                "ramp_steps": self.ramp_steps,
                 "selector_theta": (self.selector_model or {}).get("theta"),
                 "shard": [shard_index, num_shards], "cap": int(cap), "splits": list(names),
                 "splits_json": str(t.args.splits_json)}
@@ -404,6 +574,9 @@ class ProposalSelectEval:
                         npz[f"{arm.name}/r{r}/feat"] = o["feat"]
                         npz[f"{arm.name}/r{r}/switch"] = o["switch"]
                         npz[f"{arm.name}/r{r}/alive"] = o["alive"]
+                        if arm.alt == "bank":
+                            npz[f"{arm.name}/r{r}/choice"] = o["choice"].astype(np.int8)
+                            npz[f"{arm.name}/r{r}/clear_k"] = o["clear_k"]
                         tally.setdefault(arm.name, []).append(float(o["solved"].mean()))
                         for j, sid in enumerate(sub):
                             recs.append({
@@ -444,6 +617,15 @@ def main():
     p.add_argument("--select_margin_m", type=float, default=0.3)
     p.add_argument("--select_delta_m", type=float, default=0.2)
     p.add_argument("--selector_json", default="", help="tools/fit_selector.py output, for 'learned' arms")
+    p.add_argument("--select_bank", default="tw0.85,tw1.15,lat0.25,lat-0.25,tw0.7,tw1.3,lat0.5,lat-0.5",
+                   help="candidate bank for alt 'bank' (branching.Candidate specs, tw/lat only). "
+                        "The default is the repair search's tw/lat families at the sizes it kept")
+    p.add_argument("--select_banks", default="",
+                   help="extra NAMED banks, 'name=spec;name=spec', referenced by an arm "
+                        "as alt 'bank@name'. Lets a lateral-only and a timing-only arm "
+                        "run in one job, paired draw for draw")
+    p.add_argument("--select_ramp_steps", type=int, default=10,
+                   help="perturbation ease-in, world steps (counterfactual --ramp_steps)")
     p.add_argument("--look_replans", type=int, default=2,
                    help="'look' arms: replans simulated per candidate (1 = just the executed window)")
     p.add_argument("--select_cap", type=int, default=-1,
@@ -468,9 +650,15 @@ def main():
     runner = ProposalSelectEval(tuner, ft_ckpt=args.ft_ckpt, arms=arms,
                                 tol_m=args.select_tol_m, margin_m=args.select_margin_m,
                                 delta_m=args.select_delta_m, selector_json=args.selector_json,
-                                look_replans=args.look_replans)
+                                look_replans=args.look_replans, bank_spec=args.select_bank,
+                                banks_spec=args.select_banks,
+                                ramp_steps=args.select_ramp_steps)
+    for name, cands in runner.banks.items():
+        print(f"[select] bank {name or '(default)'} ({len(cands)}, 0 denoiser evals): "
+              + "  ".join(f"{c.name}(m={c.magnitude:.2f})" for c in cands), flush=True)
     print("[select] arms: " + "  ".join(
-        a.name if a.alt is None else f"{a.name}=({a.primary}|{a.alt}:{a.selector}:w{a.window})"
+        a.name if a.alt is None else
+        f"{a.name}=({a.primary}|{a.alt}{'@' + a.bank if a.bank else ''}:{a.selector}:w{a.window})"
         for a in arms), flush=True)
     runner.run(Path(args.select_out or args.out_dir), names=names,
                repeats=int(args.select_repeats), seed=int(args.select_seed),
