@@ -1756,6 +1756,49 @@ ceiling for a perfect fixer (~+0.032) this is ~56%.
 **The runtime invariant held on all 1490 switches: zero fired on a clean base
 candidate.** Switch rate 2.9% (`bank_cons`) against `bf_cons10`'s 1.1%.
 
+### Trap: a `;` in an env-file value is a shell statement separator (2026-09-16)
+
+The submitter writes one env file per task and the batch script **sources** it, so
+a bare `KEY=value` line is a shell assignment. `--select_banks` uses `;` between
+named banks, and an unquoted `;` **ends the assignment**:
+
+```
+DFT_SELECT_BANKS=lat=lat0.25,lat-0.25;tw=tw0.85,tw1.15
+  -> DFT_SELECT_BANKS='lat=lat0.25,lat-0.25'   and   tw='tw0.85,tw1.15'
+```
+
+The timing half was silently dropped into a stray variable, so the `tw` ablation
+arm referenced a bank that did not exist. Jobs 55580 / 55642. Two things to keep:
+
+* **The runner's startup guard is what caught it** -- `--arms reference bank(s)
+  ['tw'] that --select_bank/--select_banks do not define (have ['', 'lat'])`,
+  30 s in, before a scene was scored. Without it the run would have completed with
+  `bank_tw` quietly scoring an empty bank (never switching, therefore identical to
+  `base`) and the ablation would have "shown" that timing contributes nothing.
+* **Inspecting the env FILE is not the check.** `grep` showed the full line,
+  because the truncation happens in `source`, not on disk. The check is to source
+  it in a clean shell and compare.
+
+Fixed both ways: values are written single-quoted (`kv`), and the submitter now
+sources each env file in an `env -i` shell and requires every `DFT_*` key to come
+back byte-identical **before** any `sbatch`. This is the same family as the
+`--export` trap in the root CLAUDE.md -- configuration that travels through a
+shell needs its round trip tested, not assumed.
+
+### Seed replicate (`select/20260916_175340`, seed 5150)
+
+The bank arms had no seed replication in the first run. A second `select_seed`
+on one checkpoint:
+
+| policy | m2 Δ (4242 → 5150) | m3 Δ (4242 → 5150) |
+|---|---|---|
+| `bank_cons` | +0.0069 → **+0.0073** | +0.0178 → **+0.0187** |
+| `bank_cons10` | +0.0055 → +0.0049 | +0.0137 → +0.0133 |
+| `bf_cons10` | +0.0035 → +0.0036 | +0.0083 → +0.0082 |
+
+Seed spread is ~0.001 on m3, an order of magnitude below the effect, and the
+2.1x ratio over `bf_cons10` reproduces at 2.3x. The result is not one seed's luck.
+
 ### Two things this does NOT establish
 
 **1. The mechanism is not the one the bank was built on.** The candidate mix is

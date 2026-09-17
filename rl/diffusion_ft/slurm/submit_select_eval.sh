@@ -79,6 +79,14 @@ if [[ -n "${DFT_SELECT_SMOKE:-}" ]]; then
 fi
 
 sb() { env -i HOME="$HOME" PATH="$PATH" USER="${USER:-}" sbatch "$@"; }
+
+# Env files are SOURCED by the batch script, so a bare `KEY=value` line is a shell
+# assignment: an unquoted `;` in the value ends it and the rest becomes a separate
+# variable. That is not hypothetical -- `DFT_SELECT_BANKS="lat=...;tw=..."` was
+# silently truncated to the `lat` half (job 55580/55642, 2026-09-16), which the
+# runner's own arm/bank guard caught at startup. Single-quote every value, with
+# embedded single quotes escaped, so any value round-trips verbatim.
+kv() { printf "%s='%s'\n" "$1" "${2//\'/\'\\\'\'}"; }
 SB_FLAGS=()
 [[ -n "$EXCLUDE" ]] && SB_FLAGS+=(--exclude="$EXCLUDE")
 
@@ -96,29 +104,39 @@ for c in $CKPTS; do
   for ((s = 0; s < SHARDS; s++)); do
     d="$SEL_DIR/tasks/${tag}_shard${s}"; mkdir -p "$d"
     {
-      echo "DFT_OUT_DIR=$d"
-      echo "DFT_SPLITS_JSON=$SPLITS3"
-      echo "DFT_SELECT_SPLITS=${DFT_SELECT_SPLITS:-failure_heldout,success_heldout,intermittent_heldout}"
-      echo "DFT_FT_CKPT=$c"
-      echo "DFT_ARMS=$arms"
-      echo "DFT_SELECT_SEED=$SEED"
-      echo "DFT_SELECT_REPEATS=$REPEATS"
-      echo "DFT_SHARD_INDEX=$s"
-      echo "DFT_NUM_SHARDS=$SHARDS"
-      echo "DFT_EVAL_CHUNK=$CHUNK"
-      echo "DFT_SELECT_CAP=$CAP"
-      echo "DFT_SELECTOR_JSON=${DFT_SELECTOR_JSON:-}"
-      echo "DFT_LOOK_REPLANS=${DFT_LOOK_REPLANS:-2}"
-      echo "DFT_SELECT_BANK=${DFT_SELECT_BANK:-tw0.85,tw1.15,lat0.25,lat-0.25,tw0.7,tw1.3,lat0.5,lat-0.5}"
-      echo "DFT_SELECT_RAMP=${DFT_SELECT_RAMP:-10}"
-      echo "DFT_SELECT_BANKS=${DFT_SELECT_BANKS:-}"
-      echo "DFT_SELECT_TOL_M=${DFT_SELECT_TOL_M:-1.0}"
-      echo "DFT_SELECT_MARGIN_M=${DFT_SELECT_MARGIN_M:-0.3}"
-      echo "DFT_SELECT_DELTA_M=${DFT_SELECT_DELTA_M:-0.2}"
+      kv DFT_OUT_DIR "$d"
+      kv DFT_SPLITS_JSON "$SPLITS3"
+      kv DFT_SELECT_SPLITS "${DFT_SELECT_SPLITS:-failure_heldout,success_heldout,intermittent_heldout}"
+      kv DFT_FT_CKPT "$c"
+      kv DFT_ARMS "$arms"
+      kv DFT_SELECT_SEED "$SEED"
+      kv DFT_SELECT_REPEATS "$REPEATS"
+      kv DFT_SHARD_INDEX "$s"
+      kv DFT_NUM_SHARDS "$SHARDS"
+      kv DFT_EVAL_CHUNK "$CHUNK"
+      kv DFT_SELECT_CAP "$CAP"
+      kv DFT_SELECTOR_JSON "${DFT_SELECTOR_JSON:-}"
+      kv DFT_LOOK_REPLANS "${DFT_LOOK_REPLANS:-2}"
+      kv DFT_SELECT_BANK "${DFT_SELECT_BANK:-tw0.85,tw1.15,lat0.25,lat-0.25,tw0.7,tw1.3,lat0.5,lat-0.5}"
+      kv DFT_SELECT_RAMP "${DFT_SELECT_RAMP:-10}"
+      kv DFT_SELECT_BANKS "${DFT_SELECT_BANKS:-}"
+      kv DFT_SELECT_TOL_M "${DFT_SELECT_TOL_M:-1.0}"
+      kv DFT_SELECT_MARGIN_M "${DFT_SELECT_MARGIN_M:-0.3}"
+      kv DFT_SELECT_DELTA_M "${DFT_SELECT_DELTA_M:-0.2}"
       # rollout shape = the stopping sweep's eval exactly
-      echo "DFT_K_TRAINABLE=10"; echo "DFT_PREFIX_LEN=5"; echo "DFT_SIGMA_FLOOR=1e-4"
-      echo "DFT_REPLAN=10"; echo "DFT_MAX_REPLANS=8"
+      kv DFT_K_TRAINABLE 10; kv DFT_PREFIX_LEN 5; kv DFT_SIGMA_FLOOR 1e-4
+      kv DFT_REPLAN 10; kv DFT_MAX_REPLANS 8
     } > "$ENV_DIR/$i.env"
+    # Cheap invariant: source what we just wrote in a CLEAN shell and require
+    # every key to come back byte-identical. Catches any value that needs quoting
+    # before a GPU is spent on it, not after.
+    while IFS= read -r k; do
+      want="$(sed -n "s/^${k}='\(.*\)'$/\1/p" "$ENV_DIR/$i.env")"
+      got="$(env -i bash -c 'source "$1" >/dev/null 2>&1; printf "%s" "${!2}"' _ "$ENV_DIR/$i.env" "$k")"
+      [[ "$want" == "$got" ]] || {
+        echo "FATAL: $ENV_DIR/$i.env does not round-trip through 'source':" >&2
+        echo "  $k  wrote [$want]  read back [$got]" >&2; exit 1; }
+    done < <(sed -n 's/^\(DFT_[A-Z_]*\)=.*/\1/p' "$ENV_DIR/$i.env")
     printf '%2d  %-28s shard %d/%d  %s\n' "$i" "$tag" "$s" "$SHARDS" "$arms"
     i=$((i + 1))
   done
