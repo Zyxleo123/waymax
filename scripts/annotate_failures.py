@@ -20,7 +20,6 @@ REPO_ROOT = _find_repo_root(Path(__file__).resolve())
 if str(REPO_ROOT) not in sys.path:
 	sys.path.insert(0, str(REPO_ROOT))
 
-from waymax.datatypes.object_state import ObjectTypeIds
 from waymax.datatypes.roadgraph import MapElementIds
 
 
@@ -28,7 +27,7 @@ ROAD_EDGE_TYPE_IDS = {
 	int(MapElementIds.ROAD_EDGE_BOUNDARY.value),
 	int(MapElementIds.ROAD_EDGE_MEDIAN.value),
 }
-VEHICLE_TYPE_ID = int(ObjectTypeIds.VEHICLE.value)
+DEFAULT_START_TIMESTEP = 10
 
 
 def _parse_args() -> argparse.Namespace:
@@ -38,6 +37,12 @@ def _parse_args() -> argparse.Namespace:
 		type=str,
 		default="/zfsauton/scratch/mineuih/waymax_rs/exp",
 		help="Experiment directory containing per-scenario JSON files and a sim_state_cache subdirectory.",
+	)
+	parser.add_argument(
+		"--start_timestep",
+		type=int,
+		default=DEFAULT_START_TIMESTEP,
+		help="First timestep to scan for offroad/collision (matches simulation start_timestep).",
 	)
 	parser.add_argument(
 		"--overwrite",
@@ -125,7 +130,10 @@ def _polygons_intersect(poly_a_xy: np.ndarray, poly_b_xy: np.ndarray) -> bool:
 	return True
 
 
-def _extract_offroad_details(cache_npz: np.lib.npyio.NpzFile) -> dict[str, Any] | None:
+def _extract_offroad_details(
+	cache_npz: np.lib.npyio.NpzFile,
+	start_timestep: int = DEFAULT_START_TIMESTEP,
+) -> dict[str, Any] | None:
 	object_is_sdc = _to_numpy(cache_npz["object_metadata_is_sdc"])
 	ego_idx = _ego_index_from_metadata(object_is_sdc)
 
@@ -153,7 +161,7 @@ def _extract_offroad_details(cache_npz: np.lib.npyio.NpzFile) -> dict[str, Any] 
 	sampled_ids = roadgraph_ids[road_edge_mask].astype(np.int64)
 
 	num_timesteps = int(log_x.shape[1])
-	for timestep in range(num_timesteps):
+	for timestep in range(max(0, int(start_timestep)), num_timesteps):
 		if not bool(log_valid[ego_idx, timestep]):
 			continue
 		corners = _polygon_corners_xy(
@@ -189,9 +197,9 @@ def _extract_offroad_details(cache_npz: np.lib.npyio.NpzFile) -> dict[str, Any] 
 
 def _extract_collision_details(
 	cache_npz: np.lib.npyio.NpzFile,
+	start_timestep: int = DEFAULT_START_TIMESTEP,
 ) -> dict[str, Any] | None:
 	object_is_sdc = _to_numpy(cache_npz["object_metadata_is_sdc"])
-	object_types = _to_numpy(cache_npz["object_metadata_object_types"]).astype(np.int32)
 	ego_idx = _ego_index_from_metadata(object_is_sdc)
 
 	log_x = _to_numpy(cache_npz["log_trajectory_x"])
@@ -201,15 +209,15 @@ def _extract_collision_details(
 	log_width = _to_numpy(cache_npz["log_trajectory_width"])
 	log_valid = _to_numpy(cache_npz["log_trajectory_valid"]).astype(bool)
 
-	vehicle_mask = object_types == VEHICLE_TYPE_ID
-	vehicle_mask[ego_idx] = False
-	if not np.any(vehicle_mask):
+	object_mask = np.ones((log_x.shape[0],), dtype=bool)
+	object_mask[ego_idx] = False
+	if not np.any(object_mask):
 		return None
 
-	vehicle_indices = np.flatnonzero(vehicle_mask)
+	object_indices = np.flatnonzero(object_mask)
 
 	num_timesteps = int(log_x.shape[1])
-	for timestep in range(num_timesteps):
+	for timestep in range(max(0, int(start_timestep)), num_timesteps):
 		if not bool(log_valid[ego_idx, timestep]):
 			continue
 		ego_polygon = _polygon_corners_xy(
@@ -219,27 +227,27 @@ def _extract_collision_details(
 			float(log_length[ego_idx, timestep]),
 			float(log_width[ego_idx, timestep]),
 		)
-		colliding_vehicle_indices: list[int] = []
-		for vehicle_idx in vehicle_indices:
-			if not bool(log_valid[vehicle_idx, timestep]):
+		colliding_object_indices: list[int] = []
+		for object_idx in object_indices:
+			if not bool(log_valid[object_idx, timestep]):
 				continue
-			vehicle_polygon = _polygon_corners_xy(
-				float(log_x[vehicle_idx, timestep]),
-				float(log_y[vehicle_idx, timestep]),
-				float(log_yaw[vehicle_idx, timestep]),
-				float(log_length[vehicle_idx, timestep]),
-				float(log_width[vehicle_idx, timestep]),
+			object_polygon = _polygon_corners_xy(
+				float(log_x[object_idx, timestep]),
+				float(log_y[object_idx, timestep]),
+				float(log_yaw[object_idx, timestep]),
+				float(log_length[object_idx, timestep]),
+				float(log_width[object_idx, timestep]),
 			)
-			if _polygons_intersect(ego_polygon, vehicle_polygon):
-				colliding_vehicle_indices.append(int(vehicle_idx))
-		if not colliding_vehicle_indices:
+			if _polygons_intersect(ego_polygon, object_polygon):
+				colliding_object_indices.append(int(object_idx))
+		if not colliding_object_indices:
 			continue
 
-		selected_vehicle_id = int(colliding_vehicle_indices[0])
+		selected_object_id = int(colliding_object_indices[0])
 
 		return {
 			"collision_first_timestep": int(timestep),
-			"collision_vehicle_id": int(selected_vehicle_id),
+			"collision_vehicle_id": int(selected_object_id),
 		}
 
 	return None
@@ -248,6 +256,7 @@ def _extract_collision_details(
 def _annotate_result_json(
 	result_path: Path,
 	overwrite: bool,
+	start_timestep: int = DEFAULT_START_TIMESTEP,
 ) -> bool:
 	record = _load_json(result_path)
 	if bool(record.get("success", True)):
@@ -277,13 +286,11 @@ def _annotate_result_json(
 	updates: dict[str, Any] = {}
 	with np.load(cache_path, allow_pickle=False) as cache_npz:
 		if offroad_flag:
-			offroad_details = _extract_offroad_details(cache_npz)
+			offroad_details = _extract_offroad_details(cache_npz, start_timestep=start_timestep)
 			if offroad_details is not None:
 				updates.update(offroad_details)
 		if collision_flag:
-			collision_details = _extract_collision_details(
-					cache_npz,
-			)
+			collision_details = _extract_collision_details(cache_npz, start_timestep=start_timestep)
 			if collision_details is not None:
 				updates.update(collision_details)
 
@@ -304,7 +311,11 @@ def run(args: argparse.Namespace) -> list[Path]:
 	updated_paths: list[Path] = []
 	for result_path in tqdm(_iter_result_json_paths(exp_dir), desc="Annotating results"):
 		try:
-			if _annotate_result_json(result_path, overwrite=bool(args.overwrite)):
+			if _annotate_result_json(
+				result_path,
+				overwrite=bool(args.overwrite),
+				start_timestep=int(args.start_timestep),
+			):
 				updated_paths.append(result_path)
 		except Exception as exc:
 			print(f"Failed to annotate {result_path}: {exc}")

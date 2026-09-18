@@ -60,7 +60,6 @@ class FailureDetectionVLA(nn.Module):
 		self.num_attn_layers = int(num_attn_layers)
 		self.num_object_types = int(num_object_types)
 		self.num_map_type_classes = int(num_map_type_classes)
-		self.vehicle_type_id = 1
 		self.road_edge_type_ids = (15, 16)
 
 		self.processor = AutoProcessor.from_pretrained(
@@ -360,17 +359,12 @@ class FailureDetectionVLA(nn.Module):
 		scene_tokens = self.scene_token_self_attention(scene_tokens)
 		return scene_tokens
 
-	def _other_vehicle_mask(self, input_features: Mapping[str, torch.Tensor]) -> torch.Tensor:
+	def _other_object_mask(self, input_features: Mapping[str, torch.Tensor]) -> torch.Tensor:
 		other_states = self._to_torch(input_features["other_states"], device=self._module_device())
 		other_valid = self._to_torch(input_features["other_valid"], device=other_states.device)
 		if other_states.ndim != 3:
 			raise ValueError(f"other_states must have shape [B, N, D], got {tuple(other_states.shape)}")
-		type_start = other_states.shape[-1] - self.num_object_types
-		if type_start < 0:
-			return other_valid.to(dtype=torch.bool)
-		object_types = other_states[..., type_start:]
-		vehicle_mask = object_types.argmax(dim=-1) == int(self.vehicle_type_id)
-		return other_valid.to(dtype=torch.bool) & vehicle_mask
+		return other_valid.to(dtype=torch.bool)
 
 	def _road_edge_mask(self, input_features: Mapping[str, torch.Tensor]) -> torch.Tensor:
 		map_features = self._to_torch(input_features["map_features"], device=self._module_device())
@@ -402,7 +396,7 @@ class FailureDetectionVLA(nn.Module):
 			context_mask_bn=torch.ones(scene_tokens.shape[:2], dtype=torch.bool, device=scene_tokens.device),
 		)
 		object_logits = self.object_id_head(object_context).squeeze(-1)
-		object_mask = self._other_vehicle_mask(input_features)
+		object_mask = self._other_object_mask(input_features)
 		return object_logits.masked_fill(~object_mask, torch.finfo(object_logits.dtype).min)
 
 	def _predict_road_segment_logits(
@@ -542,7 +536,7 @@ class FailureDetectionVLA(nn.Module):
 		object_logits = self._predict_object_logits(scene_tokens, input_features)
 		road_segment_logits = self._predict_road_segment_logits(scene_tokens, input_features)
 
-		object_candidate_mask = self._other_vehicle_mask(input_features)
+		object_candidate_mask = self._other_object_mask(input_features)
 		road_segment_candidate_mask = self._road_edge_mask(input_features)
 		object_ids = input_features.get("other_ids")
 		if object_ids is None:
@@ -625,7 +619,7 @@ class FailureDetectionVLA(nn.Module):
 
 		object_logits = self._predict_object_logits(scene_tokens, input_features)
 		road_segment_logits = self._predict_road_segment_logits(scene_tokens, input_features)
-		object_candidate_mask = self._other_vehicle_mask(input_features)
+		object_candidate_mask = self._other_object_mask(input_features)
 		road_segment_candidate_mask = self._road_edge_mask(input_features)
 
 		object_valid_pred = object_candidate_mask.any(dim=-1)

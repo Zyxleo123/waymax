@@ -86,12 +86,12 @@ class FMPlanner(AbstractPlanner):
 		features["subgoal_xy"] = jnp.zeros((self.num_worlds, 2), dtype=jnp.float32)
 		features["subgoal_valid"] = jnp.zeros((self.num_worlds,), dtype=jnp.float32)
 
-		cond_bf, inst_cond_bf = self._compute_condition_jit(features)
+		cond_bf, inst_cond_bf, inst_cond_mask_bf = self._compute_condition_jit(features)
 
 		current_norm_bktd = self._sample_population_jit(
 			cond_bf=cond_bf,
 			inst_cond_bf=inst_cond_bf,
-			inst_cond_mask_bf=instruction_mask,
+			inst_cond_mask_bf=inst_cond_mask_bf,
 			rng=key_sample,
 		)
 		current_world_bkt5, world_t_seconds_bt, world_t_valid_bt = self._postprocess_population(

@@ -201,7 +201,7 @@ def make_train_step(
 
         features = m._as_features(feats)
 
-        cond, inst_cond = m.compute_condition(
+        cond, inst_cond, inst_cond_mask = m.compute_condition(
             features
         )
 
@@ -210,11 +210,6 @@ def make_train_step(
             : m.predict_horizon,
             :,
         ]
-
-        inst_cond_mask = jnp.asarray(
-            features.inst_valid,
-            dtype=bool,
-        )
 
         loss = m.loss_from_condition(
             target,
@@ -261,7 +256,7 @@ def make_train_step(
                 feats_local
             )
 
-            cond_local, inst_cond_local = (
+            cond_local, inst_cond_local, inst_cond_mask_local = (
                 m.compute_condition(features_local)
             )
 
@@ -271,11 +266,6 @@ def make_train_step(
                     : m.predict_horizon,
                     :,
                 ]
-            )
-
-            inst_cond_mask_local = jnp.asarray(
-                features_local.inst_valid,
-                dtype=bool,
             )
 
             loss_local = m.loss_from_condition(

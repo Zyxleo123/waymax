@@ -75,6 +75,44 @@ def save_checkpoint(
         _save_checkpoint_tag(save_dir, train_state, config_dict, tag=f"epoch_{epoch:04d}")
 
 
+def _is_orbax_checkpoint_dir(path: str) -> bool:
+    if not os.path.isdir(path):
+        return False
+    names = set(os.listdir(path))
+    if names & {"checkpoint", "manifest.ocdbt", "_METADATA", "_CHECKPOINT_METADATA"}:
+        return True
+    return any(
+        name.startswith("_CHECKPOINT")
+        or name.startswith("ocdbt")
+        or name.endswith(".zarray")
+        for name in names
+    )
+
+
+def resolve_orbax_checkpoint_path(path: str) -> str:
+    """Accept a run directory or an Orbax step directory."""
+    resolved = os.path.abspath(os.path.expanduser(path))
+    if not os.path.exists(resolved):
+        raise FileNotFoundError(f"Checkpoint path does not exist: {path}")
+    if os.path.isfile(resolved):
+        resolved = os.path.dirname(resolved)
+    if _is_orbax_checkpoint_dir(resolved):
+        return resolved
+
+    latest = os.path.join(resolved, "latest")
+    if _is_orbax_checkpoint_dir(latest):
+        return latest
+
+    epoch_dirs = sorted(
+        os.path.join(resolved, name)
+        for name in os.listdir(resolved)
+        if name.startswith("epoch_") and _is_orbax_checkpoint_dir(os.path.join(resolved, name))
+    )
+    if epoch_dirs:
+        return epoch_dirs[-1]
+    return resolved
+
+
 def restore_checkpoint(
     path: str,
     *,
@@ -83,6 +121,7 @@ def restore_checkpoint(
     tx: Any | None = None,
     coerce_tree_like_fn=None,
 ) -> Any:
+    path = resolve_orbax_checkpoint_path(path)
     checkpointer = ocp.PyTreeCheckpointer()
     restored = checkpointer.restore(path)
 

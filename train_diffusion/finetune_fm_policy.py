@@ -395,7 +395,7 @@ def _make_train_step(
                 batch_features
             )
 
-            cond, inst_cond = (
+            cond, inst_cond, inst_cond_mask = (
                 model.compute_condition(
                     features
                 )
@@ -407,11 +407,6 @@ def _make_train_step(
                     : model.predict_horizon,
                     :,
                 ]
-            )
-
-            inst_cond_mask = jnp.asarray(
-                features.inst_valid,
-                dtype=bool,
             )
 
             loss = model.loss_from_condition(

@@ -59,14 +59,19 @@ def _parse_args() -> argparse.Namespace:
         default="/zfsauton/scratch/mineuih/waymax_rs/exp"
     )
     parser.add_argument("--planner", type=str, default="diffusion",
-                         choices=["diffusion", "es", "vla", "log-replay", "temporal-vla", "fm"])
+                         choices=["diffusion", "es", "vla", "log-replay", "temporal-vla", "fm", "fm-fd"])
+    parser.add_argument("--fd_vla_ckpt_path", type=str, default=None)
+    parser.add_argument("--guidance_scale", type=float, default=2.0)
+    parser.add_argument("--cfg_t_start", type=float, default=0.2)
+    parser.add_argument("--cfg_correction_mode", type=str, default="resample", choices=["resample", "sample"])
+    parser.add_argument("--fd_torch_device", type=str, default=None)
     parser.add_argument("--start_timestep", type=int, default=10)
     parser.add_argument("--mask_goal", action="store_true", default=False)
     parser.add_argument("--use_ema", action="store_true", default=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max_num_objects", type=int, default=128)
     parser.add_argument("--num_worlds", type=int, default=5)
-    parser.add_argument("--num_scenarios", type=int, default=100000000)
+    parser.add_argument("--num_scenarios", type=int, default=10000000)
     parser.add_argument("--replan_interval_steps", type=int, default=10)
     parser.add_argument("--instruction_interval_steps", type=int, default=10)
     parser.add_argument("--visualize_mode", type=str, default="none", choices=["all", "success", "failure", "none"])
@@ -253,6 +258,36 @@ def main(args: argparse.Namespace) -> None:
             num_worlds=args.num_worlds,
             num_steps=None,
             solver="euler",
+        )
+    elif args.planner == "fm-fd":
+        fm_ckpt_path = args.fm_ckpt_path or args.diffusion_ckpt_path
+        if fm_ckpt_path is None:
+            raise ValueError("--fm_ckpt_path is required when --planner fm-fd is selected.")
+        if args.fd_vla_ckpt_path is None:
+            raise ValueError("--fd_vla_ckpt_path is required when --planner fm-fd is selected.")
+
+        policy, preprocess_cfg = _load_fm_model_for_inference(
+            checkpoint_path=fm_ckpt_path,
+            use_ema=args.use_ema,
+            metadata_path=None,
+            seed=args.seed,
+            skip_checkpoint_load=False,
+        )
+
+        from planner.fm_fd_planner import FMFDPlanner
+
+        planner = FMFDPlanner(
+            policy=policy,
+            fd_vla=args.fd_vla_ckpt_path,
+            preprocess_cfg=preprocess_cfg,
+            population_size=1,
+            num_worlds=args.num_worlds,
+            num_steps=None,
+            solver="euler",
+            guidance_scale=args.guidance_scale,
+            cfg_t_start=args.cfg_t_start,
+            correction_mode=args.cfg_correction_mode,
+            torch_device=args.fd_torch_device,
         )
     elif args.planner == "vla":
         inference = load_model_for_inference(

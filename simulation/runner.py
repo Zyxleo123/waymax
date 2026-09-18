@@ -178,6 +178,13 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
 
         print(f"Testing scenarios {scenario_indices} from {os.path.basename(tfrecord_path)}...")
 
+        if hasattr(planner, "set_episode_context"):
+            planner.set_episode_context(
+                output_dir=output_dir,
+                tfrecord_path=tfrecord_path,
+                scenario_indices=scenario_indices,
+            )
+
         # lane_graphs = lane_graph_loader.get_lane_graph_for_scenarios(tfrecord_path, scenario_indices)
         rng_key = jax.random.PRNGKey(int(args.seed))
         goal_xy_b2, goal_t_b, ego_idx_b = infer_goals_from_sim_state(sim_state)

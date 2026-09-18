@@ -36,7 +36,7 @@ class FailureDetectionLoaderConfig:
 	backend: str = "torch"
 	include_inst_features: bool = False
 	drop_last: bool = False
-	success_anchor_steps: tuple[int, ...] = (0, 10, 20, 30, 40, 50, 60, 70, 80)
+	success_anchor_steps: tuple[int, ...] = (0, 10, 20, 30, 40)
 	failure_max_anchor_offset: int = 50
 	goal_step_override: int | None = None
 	prompt: str = DEFAULT_FAILURE_PROMPT

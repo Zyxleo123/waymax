@@ -11,6 +11,13 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from model.diffusion.flow_matching import UNet1DConditioned
 from model.diffusion.modules.scene_tokenizer import SceneTokenizer
 from model.diffusion.modules.mlp import MLP
+from model.diffusion.modules.point_net import PointNet
+
+
+FAILURE_REASON_NONE = 0
+FAILURE_REASON_COLLISION = 1
+FAILURE_REASON_OFFROAD = 2
+FAILURE_REASON_GOAL_NOT_REACHED = 3
 
 
 # ======================================================================
@@ -145,6 +152,47 @@ class FlowMatching(nnx.Module):
             cond2_mask,
         )
 
+    def predict_guided_velocity(
+        self,
+        x_t: jnp.ndarray,
+        t: jnp.ndarray,
+        cond1: jnp.ndarray,
+        cond2: jnp.ndarray,
+        cond2_mask: jnp.ndarray,
+        guidance_scale: float | jnp.ndarray = 1.0,
+    ) -> jnp.ndarray:
+        """Classifier-free guidance on the failure/gold FiLM condition.
+
+        ``cond1`` (scene) stays on. The unconditional pass zeroes ``cond2_mask``
+        so FiLM is identity. The guided field is
+
+            v = v_uncond + w * (v_cond - v_uncond)
+
+        ``guidance_scale`` may be a scalar or a per-sample ``[B]`` array.
+        ``w = 1`` is exactly the conditional field; ``w = 0`` is unconditional.
+        """
+        v_cond = self.predict_velocity(
+            x_t=x_t,
+            t=t,
+            cond1=cond1,
+            cond2=cond2,
+            cond2_mask=cond2_mask,
+        )
+        if isinstance(guidance_scale, (int, float, np.integer, np.floating)) and float(guidance_scale) == 1.0:
+            return v_cond
+
+        v_uncond = self.predict_velocity(
+            x_t=x_t,
+            t=t,
+            cond1=cond1,
+            cond2=cond2,
+            cond2_mask=jnp.zeros_like(cond2_mask),
+        )
+        scale = jnp.asarray(guidance_scale, dtype=x_t.dtype)
+        if scale.ndim != 0:
+            scale = scale.reshape((x_t.shape[0],) + (1,) * (x_t.ndim - 1))
+        return v_uncond + scale * (v_cond - v_uncond)
+
     # ------------------------------------------------------------------
     # Training
     # ------------------------------------------------------------------
@@ -233,6 +281,7 @@ class FlowMatching(nnx.Module):
         cond1: jnp.ndarray,
         cond2: jnp.ndarray,
         cond2_mask: jnp.ndarray,
+        guidance_scale: float | jnp.ndarray = 1.0,
     ) -> jnp.ndarray:
         """One backward Euler step.
 
@@ -243,12 +292,13 @@ class FlowMatching(nnx.Module):
             x(t - dt) = x(t) - dt * v_theta(x(t), t)
         """
 
-        v = self.predict_velocity(
+        v = self.predict_guided_velocity(
             x_t=x,
             t=t,
             cond1=cond1,
             cond2=cond2,
             cond2_mask=cond2_mask,
+            guidance_scale=guidance_scale,
         )
 
         return x - dt * v
@@ -261,15 +311,17 @@ class FlowMatching(nnx.Module):
         cond1: jnp.ndarray,
         cond2: jnp.ndarray,
         cond2_mask: jnp.ndarray,
+        guidance_scale: float | jnp.ndarray = 1.0,
     ) -> jnp.ndarray:
         """Second-order Heun ODE step."""
 
-        v1 = self.predict_velocity(
+        v1 = self.predict_guided_velocity(
             x_t=x,
             t=t,
             cond1=cond1,
             cond2=cond2,
             cond2_mask=cond2_mask,
+            guidance_scale=guidance_scale,
         )
 
         x_euler = x - dt * v1
@@ -279,12 +331,13 @@ class FlowMatching(nnx.Module):
             0.0,
         )
 
-        v2 = self.predict_velocity(
+        v2 = self.predict_guided_velocity(
             x_t=x_euler,
             t=t_next,
             cond1=cond1,
             cond2=cond2,
             cond2_mask=cond2_mask,
+            guidance_scale=guidance_scale,
         )
 
         return x - dt * 0.5 * (v1 + v2)
@@ -298,6 +351,7 @@ class FlowMatching(nnx.Module):
         cond2: jnp.ndarray,
         cond2_mask: jnp.ndarray,
         solver: str,
+        guidance_scale: float | jnp.ndarray = 1.0,
     ) -> jnp.ndarray:
         """Integrate vector field from start_t to 0."""
 
@@ -344,6 +398,7 @@ class FlowMatching(nnx.Module):
                     cond1=cond1,
                     cond2=cond2,
                     cond2_mask=cond2_mask,
+                    guidance_scale=guidance_scale,
                 )
 
             return self._heun_step(
@@ -353,6 +408,7 @@ class FlowMatching(nnx.Module):
                 cond1=cond1,
                 cond2=cond2,
                 cond2_mask=cond2_mask,
+                guidance_scale=guidance_scale,
             )
 
         x_final = jax.lax.fori_loop(
@@ -385,6 +441,7 @@ class FlowMatching(nnx.Module):
         rng: jax.Array,
         num_steps: Optional[int] = None,
         solver: str = "euler",
+        guidance_scale: float | jnp.ndarray = 1.0,
     ) -> jnp.ndarray:
         """Generate trajectories from the standard Gaussian prior.
 
@@ -398,6 +455,12 @@ class FlowMatching(nnx.Module):
 
         solver:
             "euler" or "heun".
+
+        guidance_scale:
+            CFG weight on the failure/gold FiLM condition. ``1`` is
+            conditional (existing behavior), ``0`` is unconditional,
+            ``> 1`` amplifies gold conditioning. A per-sample ``[B]``
+            array is allowed.
         """
 
         if num_steps is None:
@@ -417,6 +480,7 @@ class FlowMatching(nnx.Module):
             cond2=cond2,
             cond2_mask=cond2_mask,
             solver=solver,
+            guidance_scale=guidance_scale,
         )
 
     # ------------------------------------------------------------------
@@ -434,6 +498,7 @@ class FlowMatching(nnx.Module):
         t_start: float = 0.2,
         num_steps: Optional[int] = None,
         solver: str = "euler",
+        guidance_scale: float | jnp.ndarray = 1.0,
     ) -> jnp.ndarray:
         """Corrupt proposals to t_start and integrate back to data.
 
@@ -498,6 +563,7 @@ class FlowMatching(nnx.Module):
             cond2=cond2,
             cond2_mask=cond2_mask,
             solver=solver,
+            guidance_scale=guidance_scale,
         )
 
 
@@ -510,7 +576,6 @@ class FlowMatching(nnx.Module):
 class PolicyFeatures:
     ego_state: jnp.ndarray
     goal_xy: jnp.ndarray
-    subgoal_xy: jnp.ndarray
     remaining_timesteps: jnp.ndarray
 
     other_states: jnp.ndarray
@@ -522,11 +587,28 @@ class PolicyFeatures:
     traffic_light_features: jnp.ndarray
     traffic_light_valid: jnp.ndarray
 
+    object_ids: jnp.ndarray
+    map_ids: jnp.ndarray
+    critical_object_ids: jnp.ndarray
+    critical_road_segment_ids: jnp.ndarray
+    failure_reason: jnp.ndarray
+
+    subgoal_xy: Optional[jnp.ndarray] = None
+    subgoal_valid: Optional[jnp.ndarray] = None
     inst_features: Optional[jnp.ndarray] = None
     inst_valid: Optional[jnp.ndarray] = None
-
-    subgoal_valid: Optional[jnp.ndarray] = None
     ego_trajectory: Optional[jnp.ndarray] = None
+
+    @staticmethod
+    def _as_int32(value: Any, shape: tuple[int, ...], fill: int) -> jnp.ndarray:
+        if value is None:
+            return jnp.full(shape, fill, dtype=jnp.int32)
+        array = jnp.asarray(value).reshape(-1)
+        if array.size == 0:
+            return jnp.full(shape, fill, dtype=jnp.int32)
+        if array.size == 1 and int(np.prod(shape)) > 1:
+            return jnp.full(shape, array[0], dtype=jnp.int32)
+        return jnp.reshape(array, shape).astype(jnp.int32)
 
     @staticmethod
     def from_mapping(
@@ -536,8 +618,6 @@ class PolicyFeatures:
         required = (
             "ego_state",
             "goal_xy",
-            "subgoal_xy",
-            "subgoal_valid",
             "remaining_timesteps",
             "other_states",
             "other_valid",
@@ -545,8 +625,6 @@ class PolicyFeatures:
             "map_valid",
             "traffic_light_features",
             "traffic_light_valid",
-            "inst_features",
-            "inst_valid",
         )
 
         missing = [
@@ -560,31 +638,60 @@ class PolicyFeatures:
                 f"Missing required feature keys: {missing}"
             )
 
+        batch_size = int(jnp.asarray(features["ego_state"]).shape[0])
+        num_objects = int(jnp.asarray(features["other_states"]).shape[1])
+        num_map_segments = int(jnp.asarray(features["map_features"]).shape[1])
+
+        object_ids = features.get("object_ids", features.get("other_ids"))
+        if object_ids is None:
+            object_ids = jnp.broadcast_to(
+                jnp.arange(num_objects, dtype=jnp.int32)[None, :],
+                (batch_size, num_objects),
+            )
+        else:
+            object_ids = jnp.asarray(object_ids).astype(jnp.int32)
+
+        map_ids = features.get("map_ids")
+        if map_ids is None:
+            map_ids = jnp.broadcast_to(
+                jnp.arange(num_map_segments, dtype=jnp.int32)[None, :],
+                (batch_size, num_map_segments),
+            )
+        else:
+            map_ids = jnp.asarray(map_ids).astype(jnp.int32)
+
         return PolicyFeatures(
             ego_state=features["ego_state"],
             goal_xy=features["goal_xy"],
-            subgoal_xy=features["subgoal_xy"],
-            subgoal_valid=features["subgoal_valid"],
             remaining_timesteps=features["remaining_timesteps"],
             other_states=features["other_states"],
             other_valid=features["other_valid"],
             map_features=features["map_features"],
             map_valid=features["map_valid"],
-            traffic_light_features=features[
-                "traffic_light_features"
-            ],
-            traffic_light_valid=features[
-                "traffic_light_valid"
-            ],
-            inst_features=features.get(
-                "inst_features"
+            traffic_light_features=features["traffic_light_features"],
+            traffic_light_valid=features["traffic_light_valid"],
+            object_ids=object_ids,
+            map_ids=map_ids,
+            critical_object_ids=PolicyFeatures._as_int32(
+                features.get("critical_object_ids"),
+                (batch_size,),
+                -1,
             ),
-            inst_valid=features.get(
-                "inst_valid"
+            critical_road_segment_ids=PolicyFeatures._as_int32(
+                features.get("critical_road_segment_ids"),
+                (batch_size,),
+                -1,
             ),
-            ego_trajectory=features.get(
-                "ego_trajectory"
+            failure_reason=PolicyFeatures._as_int32(
+                features.get("failure_reason"),
+                (batch_size,),
+                FAILURE_REASON_NONE,
             ),
+            subgoal_xy=features.get("subgoal_xy"),
+            subgoal_valid=features.get("subgoal_valid"),
+            inst_features=features.get("inst_features"),
+            inst_valid=features.get("inst_valid"),
+            ego_trajectory=features.get("ego_trajectory"),
         )
 
 
@@ -603,7 +710,7 @@ class FlowMatchingPolicy(nnx.Module):
         cond_dim: int,
         map_attr_dim: int,
         tl_attr_dim: int,
-        inst_attr_dim: int,
+        inst_attr_dim: int = 768,
         ego_dim: int = 5,
         other_dim: int = 15,
         predict_horizon: int = 25,
@@ -611,11 +718,11 @@ class FlowMatchingPolicy(nnx.Module):
         default_num_steps: int = 100,
         **kwargs: Any,
     ) -> None:
-        del kwargs
+        del inst_attr_dim, subgoal_conditioned, kwargs
 
         self.target_dim = target_dim
         self.predict_horizon = predict_horizon
-        self.subgoal_conditioned = subgoal_conditioned
+        self.cond_dim = cond_dim
 
         # --------------------------------------------------------------
         # Scene conditioning
@@ -633,29 +740,22 @@ class FlowMatchingPolicy(nnx.Module):
         )
 
         # --------------------------------------------------------------
-        # Instruction conditioning
+        # Failure-reason / gold-id conditioning
         # --------------------------------------------------------------
 
-        self.instruction_encoder = MLP(
-            [
-                inst_attr_dim,
-                hidden_dim,
-                hidden_dim,
-                cond_dim,
-            ],
+        self.collision_object_encoder = MLP(
+            [other_dim, hidden_dim, hidden_dim, cond_dim],
             rngs=rngs,
         )
-
-        if subgoal_conditioned:
-            self.subgoal_encoder = MLP(
-                [
-                    2,
-                    hidden_dim,
-                    hidden_dim,
-                    cond_dim,
-                ],
-                rngs=rngs,
-            )
+        self.offroad_segment_encoder = PointNet(
+            map_attr_dim,
+            cond_dim,
+            rngs=rngs,
+        )
+        self.goal_encoder = MLP(
+            [3, hidden_dim, hidden_dim, cond_dim],
+            rngs=rngs,
+        )
 
         # --------------------------------------------------------------
         # Velocity field
@@ -801,40 +901,116 @@ class FlowMatchingPolicy(nnx.Module):
         features: PolicyFeatures,
     ) -> jnp.ndarray:
 
-        return (
-            self.scene_tokenizer
-            ._tokenize_scene_features(
-                input_features=features.__dict__,
-                deterministic=True,
-            )
-        )
-
-    def _instruction_condition_impl(
-        self,
-        features: PolicyFeatures,
-    ) -> jnp.ndarray:
-
-        x_inst = self.instruction_encoder(
-            features.inst_features,
+        return self.scene_tokenizer._tokenize_scene_features(
+            input_features={
+                "ego_state": features.ego_state,
+                "goal_xy": features.goal_xy,
+                "remaining_timesteps": features.remaining_timesteps,
+                "other_states": features.other_states,
+                "other_valid": features.other_valid,
+                "map_features": features.map_features,
+                "map_valid": features.map_valid,
+                "traffic_light_features": features.traffic_light_features,
+                "traffic_light_valid": features.traffic_light_valid,
+            },
             deterministic=True,
         )
 
-        if self.subgoal_conditioned:
+    @staticmethod
+    def _gather_by_id(
+        values: jnp.ndarray,
+        candidate_ids: jnp.ndarray,
+        target_ids: jnp.ndarray,
+        candidate_valid: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        """Gather values whose candidate id matches target_ids.
 
-            x_subgoal = self.subgoal_encoder(
-                features.subgoal_xy,
-                deterministic=True,
-            )
+        values: [B, N, ...]
+        candidate_ids: [B, N]
+        target_ids: [B]
+        candidate_valid: [B, N]
+        """
+        target_ids = jnp.asarray(target_ids).reshape(-1).astype(candidate_ids.dtype)
+        match = (
+            (candidate_ids == target_ids[:, None])
+            & candidate_valid
+            & (target_ids[:, None] >= 0)
+        )
+        gather_index = jnp.argmax(match, axis=1)
+        has_match = jnp.any(match, axis=1)
+        index = gather_index.reshape((values.shape[0], 1) + (1,) * (values.ndim - 2))
+        index = jnp.broadcast_to(index, (values.shape[0], 1) + values.shape[2:])
+        gathered = jnp.take_along_axis(values, index, axis=1)[:, 0]
+        gathered = jnp.where(has_match.reshape((-1,) + (1,) * (gathered.ndim - 1)), gathered, jnp.zeros_like(gathered))
+        return gathered, has_match, gather_index
 
-            x_subgoal = (
-                x_subgoal
-                * features.subgoal_valid[..., None]
-            )
+    def _resolve_failure_reason(
+        self,
+        features: PolicyFeatures,
+    ) -> jnp.ndarray:
+        reason = jnp.asarray(features.failure_reason).reshape(-1).astype(jnp.int32)
+        inferred = jnp.where(
+            features.critical_object_ids.reshape(-1) >= 0,
+            jnp.full_like(reason, FAILURE_REASON_COLLISION),
+            jnp.where(
+                features.critical_road_segment_ids.reshape(-1) >= 0,
+                jnp.full_like(reason, FAILURE_REASON_OFFROAD),
+                reason,
+            ),
+        )
+        return jnp.where(reason > FAILURE_REASON_NONE, reason, inferred)
 
-        else:
-            x_subgoal = 0.0
+    def _failure_condition_impl(
+        self,
+        features: PolicyFeatures,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        reason = self._resolve_failure_reason(features)
+        is_collision = reason == FAILURE_REASON_COLLISION
+        is_offroad = reason == FAILURE_REASON_OFFROAD
+        is_goal = reason == FAILURE_REASON_GOAL_NOT_REACHED
 
-        return x_inst + x_subgoal
+        object_valid = jnp.asarray(features.other_valid).astype(bool)
+        gathered_object, object_match, _ = self._gather_by_id(
+            features.other_states,
+            features.object_ids,
+            features.critical_object_ids,
+            object_valid,
+        )
+        object_emb = self.collision_object_encoder(gathered_object, deterministic=True)
+        object_emb = object_emb * (is_collision & object_match)[:, None]
+
+        map_valid = jnp.asarray(features.map_valid).astype(bool)
+        map_segment_valid = jnp.any(map_valid, axis=-1)
+        gathered_segment, segment_match, segment_index = self._gather_by_id(
+            features.map_features,
+            features.map_ids,
+            features.critical_road_segment_ids,
+            map_segment_valid,
+        )
+        point_index = segment_index.reshape((map_valid.shape[0], 1, 1))
+        point_index = jnp.broadcast_to(point_index, (map_valid.shape[0], 1, map_valid.shape[-1]))
+        point_valid = jnp.take_along_axis(map_valid, point_index, axis=1)[:, 0]
+        point_valid = point_valid & segment_match[:, None]
+        segment_emb = self.offroad_segment_encoder(
+            gathered_segment,
+            point_valid,
+            deterministic=True,
+        )
+        segment_emb = segment_emb * (is_offroad & segment_match)[:, None]
+
+        remaining = jnp.asarray(features.remaining_timesteps)
+        if remaining.ndim == 1:
+            remaining = remaining[:, None]
+        goal_input = jnp.concatenate(
+            [jnp.asarray(features.goal_xy), remaining],
+            axis=-1,
+        )
+        goal_emb = self.goal_encoder(goal_input, deterministic=True)
+        goal_emb = goal_emb * is_goal[:, None]
+
+        failure_cond = object_emb + segment_emb + goal_emb
+        failure_mask = is_collision | is_offroad | is_goal
+        return failure_cond, failure_mask
 
     def compute_condition(
         self,
@@ -842,17 +1018,17 @@ class FlowMatchingPolicy(nnx.Module):
             PolicyFeatures
             | Mapping[str, jnp.ndarray]
         ),
-    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
 
         features = self._as_features(
             input_features
         )
+        failure_cond, failure_mask = self._failure_condition_impl(features)
 
         return (
             self._condition_impl(features),
-            self._instruction_condition_impl(
-                features
-            ),
+            failure_cond,
+            failure_mask,
         )
 
     def input_features_projection(
@@ -861,7 +1037,7 @@ class FlowMatchingPolicy(nnx.Module):
             PolicyFeatures
             | Mapping[str, jnp.ndarray]
         ),
-    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
 
         return self.compute_condition(
             input_features
@@ -879,6 +1055,7 @@ class FlowMatchingPolicy(nnx.Module):
         rng: jax.Array,
         num_steps: Optional[int],
         solver: str,
+        guidance_scale: float | jnp.ndarray,
     ) -> jnp.ndarray:
 
         batch_size = cond.shape[0]
@@ -895,6 +1072,7 @@ class FlowMatchingPolicy(nnx.Module):
             rng=rng,
             num_steps=num_steps,
             solver=solver,
+            guidance_scale=guidance_scale,
         )
 
         # [B, D, T] -> [B, T, D]
@@ -913,6 +1091,7 @@ class FlowMatchingPolicy(nnx.Module):
         data_parallel: bool = False,
         num_steps: Optional[int] = None,
         solver: str = "euler",
+        guidance_scale: float | jnp.ndarray = 1.0,
     ) -> jnp.ndarray:
 
         if data_parallel:
@@ -931,6 +1110,7 @@ class FlowMatchingPolicy(nnx.Module):
             rng=rng,
             num_steps=num_steps,
             solver=solver,
+            guidance_scale=guidance_scale,
         )
 
     # ==================================================================
@@ -1031,6 +1211,7 @@ class FlowMatchingPolicy(nnx.Module):
         t_start: float,
         num_steps: Optional[int],
         solver: str,
+        guidance_scale: float | jnp.ndarray,
     ) -> jnp.ndarray:
 
         proposals_bdt = jnp.transpose(
@@ -1047,6 +1228,7 @@ class FlowMatchingPolicy(nnx.Module):
             t_start=t_start,
             num_steps=num_steps,
             solver=solver,
+            guidance_scale=guidance_scale,
         )
 
         return jnp.transpose(
@@ -1066,6 +1248,7 @@ class FlowMatchingPolicy(nnx.Module):
         num_steps: Optional[int] = None,
         solver: str = "euler",
         data_parallel: bool = False,
+        guidance_scale: float | jnp.ndarray = 1.0,
     ) -> jnp.ndarray:
 
         if data_parallel:
@@ -1091,6 +1274,7 @@ class FlowMatchingPolicy(nnx.Module):
             t_start=t_start,
             num_steps=num_steps,
             solver=solver,
+            guidance_scale=guidance_scale,
         )
 
     # ==================================================================
@@ -1106,6 +1290,7 @@ class FlowMatchingPolicy(nnx.Module):
         rng: jax.Array,
         num_steps: Optional[int] = None,
         solver: str = "euler",
+        guidance_scale: float | jnp.ndarray = 1.0,
     ) -> jnp.ndarray:
 
         return self.sample(
@@ -1113,6 +1298,7 @@ class FlowMatchingPolicy(nnx.Module):
             rng=rng,
             num_steps=num_steps,
             solver=solver,
+            guidance_scale=guidance_scale,
         )
 
     def sample(
@@ -1126,19 +1312,15 @@ class FlowMatchingPolicy(nnx.Module):
         data_parallel: bool = False,
         num_steps: Optional[int] = None,
         solver: str = "euler",
+        guidance_scale: float | jnp.ndarray = 1.0,
     ) -> jnp.ndarray:
 
         features = self._as_features(
             input_features
         )
 
-        cond, inst_cond = (
+        cond, inst_cond, inst_cond_mask = (
             self.compute_condition(features)
-        )
-
-        inst_cond_mask = jnp.asarray(
-            features.inst_valid,
-            dtype=bool,
         )
 
         return self.sample_from_condition(
@@ -1149,6 +1331,7 @@ class FlowMatchingPolicy(nnx.Module):
             data_parallel=data_parallel,
             num_steps=num_steps,
             solver=solver,
+            guidance_scale=guidance_scale,
         )
 
     def loss(
@@ -1178,13 +1361,8 @@ class FlowMatchingPolicy(nnx.Module):
             :,
         ]
 
-        cond, inst_cond = (
+        cond, inst_cond, inst_cond_mask = (
             self.compute_condition(features)
-        )
-
-        inst_cond_mask = jnp.asarray(
-            features.inst_valid,
-            dtype=bool,
         )
 
         return self.loss_from_condition(
@@ -1209,19 +1387,15 @@ class FlowMatchingPolicy(nnx.Module):
         num_steps: Optional[int] = None,
         solver: str = "euler",
         data_parallel: bool = False,
+        guidance_scale: float | jnp.ndarray = 1.0,
     ) -> jnp.ndarray:
 
         features = self._as_features(
             input_features
         )
 
-        cond, inst_cond = (
+        cond, inst_cond, inst_cond_mask = (
             self.compute_condition(features)
-        )
-
-        inst_cond_mask = jnp.asarray(
-            features.inst_valid,
-            dtype=bool,
         )
 
         return self.resample_from_condition(
@@ -1234,4 +1408,5 @@ class FlowMatchingPolicy(nnx.Module):
             num_steps=num_steps,
             solver=solver,
             data_parallel=data_parallel,
+            guidance_scale=guidance_scale,
         )
