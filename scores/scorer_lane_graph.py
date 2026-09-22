@@ -240,6 +240,17 @@ class Scorer:
         return jnp.clip(score, a_min=0.0, a_max=1.0)
 
     def compute_collision_score(self, ego_trajectories, object_trajectories, object_masks):
+        # CV / GT / deterministic WM: original hard box-overlap.
+        # Gaussian WM with K>1: Monte Carlo ensemble reduce.
+        if scorer_helpers.use_gaussian_collision_ensemble(self.world_model_forecaster):
+            kwargs = scorer_helpers.collision_ensemble_kwargs(self.world_model_forecaster)
+            return scorer_helpers.box_collision_score(
+                ego_trajectories,
+                object_trajectories,
+                object_masks,
+                **kwargs,
+            )
+
         ego_trajectories = jnp.asarray(ego_trajectories)
         object_trajectories = jnp.asarray(object_trajectories)
         object_masks = jnp.asarray(object_masks)
@@ -740,13 +751,28 @@ class Scorer:
                 elif metric_name == "goal":
                     goal_score = self.compute_goal_score(ego_trajectories)
                     score = score + weight * goal_score
-                score = score / total_weight
+            score = score / total_weight
         if "collision" in self._multiplicative_metrics:
-            collision_score = self.compute_collision_score(
-                ego_trajectories,
-                collision_object_trajectories,
-                collision_object_masks,
-            )
+            if scorer_helpers.uses_occupancy_collision(self.world_model_forecaster):
+                # wm_occ only: soft occupancy risk. Other modes keep SAT / ensemble.
+                occ_score, _ = self.world_model_forecaster.score_occupancy_risk(
+                    np.asarray(ego_trajectories, dtype=np.float32),
+                    world_idx=int(world_idx),
+                    dt=0.1,
+                )
+                collision_score = jnp.asarray(occ_score, dtype=jnp.float32)
+            elif scorer_helpers.uses_independent_mode_collision(self.world_model_forecaster):
+                ind_score, _ = self.world_model_forecaster.score_independent_mode_collision(
+                    np.asarray(ego_trajectories, dtype=np.float32),
+                    world_idx=int(world_idx),
+                )
+                collision_score = jnp.asarray(ind_score, dtype=jnp.float32)
+            else:
+                collision_score = self.compute_collision_score(
+                    ego_trajectories,
+                    collision_object_trajectories,
+                    collision_object_masks,
+                )
             score = score * collision_score
         if "offroad" in self._multiplicative_metrics:
             offroad_score = self.compute_offroad_score_v2(

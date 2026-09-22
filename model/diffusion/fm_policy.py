@@ -611,7 +611,15 @@ class FlowMatchingPolicy(nnx.Module):
         default_num_steps: int = 100,
         **kwargs: Any,
     ) -> None:
-        del kwargs
+        if kwargs:
+            raise TypeError(
+                "Unexpected FlowMatchingPolicy arguments: "
+                f"{sorted(kwargs.keys())}. "
+                "Note: flow_num_steps / flow_time_embedding_scale are not "
+                "constructor args; default_num_steps controls model_time = "
+                "t * (default_num_steps - 1). Pass ODE step counts at "
+                "sample/resample time via num_steps."
+            )
 
         self.target_dim = target_dim
         self.predict_horizon = predict_horizon

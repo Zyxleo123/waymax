@@ -63,8 +63,7 @@ def build_training_components(args: FlowMatchingPretrainConfig):
         tl_attr_dim=args.tl_attr_dim,
         inst_attr_dim=args.inst_dim,
         predict_horizon=args.predict_horizon,
-        flow_time_embedding_scale=args.flow_time_embedding_scale,
-        flow_num_steps=args.flow_num_steps,
+        default_num_steps=args.default_num_steps,
         subgoal_conditioned=args.subgoal_conditioned,
     )
 

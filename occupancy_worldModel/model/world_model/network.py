@@ -41,10 +41,14 @@ class LatentMultiAgentWorldModel(nn.Module):
     Outputs
     -------
     pred_delta_xy_norm: [B, N, T, 2]
-        Future displacement from each agent's current position, expressed in the
-        current ego frame and normalized by config.max_range.
+        Mean future displacement (mu_x, mu_y) from each agent's current position,
+        ego frame, divided by config.max_range. Inference uses this mean path.
     pred_yaw_vec: [B, N, T, 2]
         sin/cos of future yaw delta relative to the agent's current yaw.
+    pred_sigma_xy_norm: [B, N, T, 2]
+        Per-timestep diagonal std of (mu_x, mu_y) in the same normalized units.
+    pred_sigma_xy_m: [B, N, T, 2]
+        Same std converted to meters (sigma_norm * max_range).
     latent_scene: [B, N, C]
         Interaction-aware per-agent latent at the anchor time.
     latent_future: [B, N, T, C]
@@ -119,7 +123,12 @@ class LatentMultiAgentWorldModel(nn.Module):
             enable_nested_tensor=False,
         )
         self.future_norm = nn.LayerNorm(c)
-        self.state_decoder = _MLP(c, c, 4, dropout=config.dropout)
+        # mu_x, mu_y, raw_sigma_x, raw_sigma_y, sin d yaw, cos d yaw.
+        self.state_decoder = _MLP(c, c, 6, dropout=config.dropout)
+        last = self.state_decoder.net[-1]
+        nn.init.zeros_(last.weight)
+        nn.init.zeros_(last.bias)
+        last.bias.data[2:4] = float(config.sigma_raw_bias)
 
     @staticmethod
     def _masked_map_pool(
@@ -191,15 +200,21 @@ class LatentMultiAgentWorldModel(nn.Module):
 
         decoded = self.state_decoder(latent_future)
         pred_delta_xy_norm = decoded[..., :2]
-        pred_yaw_vec = F.normalize(decoded[..., 2:4], dim=-1, eps=1e-6)
+        raw_sigma = decoded[..., 2:4]
+        sigma_xy_norm = F.softplus(raw_sigma) + float(self.config.sigma_eps)
+        pred_yaw_vec = F.normalize(decoded[..., 4:6], dim=-1, eps=1e-6)
 
         valid_scale = agent_valid[:, :, None, None].to(decoded.dtype)
         pred_delta_xy_norm = pred_delta_xy_norm * valid_scale
+        sigma_xy_norm = sigma_xy_norm * valid_scale
         pred_yaw_vec = pred_yaw_vec * valid_scale
 
         return {
             "pred_delta_xy_norm": pred_delta_xy_norm,
             "pred_yaw_vec": pred_yaw_vec,
+            "pred_sigma_xy_norm": sigma_xy_norm,
+            "pred_sigma_xy_m": sigma_xy_norm * float(self.config.max_range),
+            "pred_raw_sigma_xy": raw_sigma * valid_scale,
             "latent_scene": latent_scene,
             "latent_future": latent_future,
         }

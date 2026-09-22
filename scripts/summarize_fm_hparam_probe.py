@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarize FM hyperparam probe runs on the mixed Diff-OK / Diff-fail GT subset."""
+"""Summarize FM hyperparam probe runs (default: n=250 under Flow_matching_sim)."""
 
 from __future__ import annotations
 
@@ -9,8 +9,9 @@ from collections import defaultdict
 from pathlib import Path
 
 
-DEFAULT_SUBSET = Path("/zfsauton/scratch/sbellad/immediate_exp/fm_hparam_probe_n20_seed0")
-DEFAULT_RUNS = Path("/zfsauton/scratch/sbellad/immediate_exp/fm_hparam_probe_runs")
+DEFAULT_FM_ROOT = Path("/zfsauton/scratch/sbellad/Flow_matching_sim")
+DEFAULT_SUBSET = DEFAULT_FM_ROOT / "fm_hparam_probe_n250_seed0"
+DEFAULT_RUNS = DEFAULT_FM_ROOT / "fm_hparam_probe_runs"
 
 
 def _latest_sim(run_folder: Path) -> Path | None:
@@ -44,11 +45,11 @@ def main() -> None:
     runs = Path(args.runs_dir)
     manifest = json.loads((subset / "subset_manifest.json").read_text())
     cases = {(c["tfrecord"], int(c["scenario_idx"])): c for c in manifest["cases"]}
-    buckets = {k: c["bucket"] for k, c in cases.items()}
+    buckets = {k: c.get("bucket", "unknown") for k, c in cases.items()}
 
-    print(f"subset n={manifest['n_final']} buckets={manifest['bucket_counts']}")
-    print(f"{'tag':40} {'N':>3} {'ok':>3} {'rate':>6}  {'diffOK_fmF':>10} {'diffFail':>8}")
-    print("-" * 80)
+    print(f"subset n={manifest['n_final']} source={manifest.get('source')} buckets={manifest.get('bucket_counts')}")
+    print(f"{'tag':55} {'N':>3} {'ok':>3} {'rate':>7}  bucket breakdown")
+    print("-" * 100)
 
     summary = {"subset": str(subset), "runs": {}}
     for run_dir in sorted(runs.glob("*")):
@@ -56,28 +57,30 @@ def main() -> None:
             continue
         sim = _latest_sim(run_dir)
         if sim is None:
-            print(f"{run_dir.name:40}  (no simulation_* yet)")
+            print(f"{run_dir.name:55}  (no simulation_* yet)")
             continue
         res = load_results(sim)
-        # Restrict to probe keys if present.
         keys = [k for k in cases if k in res]
         if not keys:
-            print(f"{run_dir.name:40}  (0 overlapping results)")
+            print(f"{run_dir.name:55}  (0 overlapping results)")
             continue
         succ = [k for k in keys if res[k].get("success")]
-        by_bucket_n = defaultdict(int)
-        by_bucket_ok = defaultdict(int)
+        by_bucket_n: dict[str, int] = defaultdict(int)
+        by_bucket_ok: dict[str, int] = defaultdict(int)
         for k in keys:
             b = buckets[k]
             by_bucket_n[b] += 1
             if res[k].get("success"):
                 by_bucket_ok[b] += 1
         rate = len(succ) / len(keys)
-        a_n, a_ok = by_bucket_n["diff_ok_fm_fail"], by_bucket_ok["diff_ok_fm_fail"]
-        b_n, b_ok = by_bucket_n["diff_fail"], by_bucket_ok["diff_fail"]
-        a_s = f"{a_ok}/{a_n}" if a_n else "-"
-        b_s = f"{b_ok}/{b_n}" if b_n else "-"
-        print(f"{run_dir.name:40} {len(keys):3d} {len(succ):3d} {rate:6.1%}  {a_s:>10} {b_s:>8}")
+        parts = [
+            f"{b}={by_bucket_ok[b]}/{by_bucket_n[b]}"
+            for b in sorted(by_bucket_n)
+        ]
+        print(
+            f"{run_dir.name:55} {len(keys):3d} {len(succ):3d} {rate:7.1%}  "
+            + " ".join(parts)
+        )
         summary["runs"][run_dir.name] = {
             "n": len(keys),
             "success": len(succ),
@@ -92,8 +95,8 @@ def main() -> None:
     out.write_text(json.dumps(summary, indent=2) + "\n")
     print(f"\nWrote {out}")
     print(
-        "\nHow to read: on diff_ok_fm_fail, higher recovery => better FM settings. "
-        "On diff_fail, gains are bonus; Diff baseline rate is the soft ceiling."
+        "\nHow to read: compare FM tags against diff_gt_baseline_* on the same "
+        "n=250 subset. Higher success rate wins for Phase-1 t_start selection."
     )
 
 

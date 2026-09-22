@@ -288,7 +288,14 @@ def make_beta_schedule(timesteps: int, schedule: str = "cosine") -> jnp.ndarray:
     raise ValueError(f"Unknown schedule: {schedule}")
 
 class FlowMatching(nnx.Module):
-    """Linear Flow Matching / Rectified Flow.
+    """LEGACY / UNUSED Linear Flow Matching implementation.
+
+    Not used by training or simulation. The active FlowMatching class lives in
+    ``model.diffusion.fm_policy`` and is what ``FlowMatchingPolicy`` constructs.
+    This module is retained only because ``UNet1DConditioned`` (and related
+    helpers) above are still imported from this file.
+
+    Do not wire new code to this class; prefer ``fm_policy.FlowMatching``.
 
     Convention:
         t = 0 : data

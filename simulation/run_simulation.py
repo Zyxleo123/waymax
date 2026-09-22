@@ -6,6 +6,7 @@ import os
 import sys
 from pathlib import Path
 from datetime import datetime
+from typing import Any
 from flax import nnx
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -82,8 +83,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--num_es_iterations", type=int, default=4)
     parser.add_argument("--resample_t_start", type=float, default=0.2,
                         help="FM-ES only: flow time to restart resampling from (0=data, 1=noise).")
-    parser.add_argument("--resample_num_steps", type=int, default=None,
-                        help="FM-ES only: ODE steps during resample (default: policy flow_num_steps).")
+    parser.add_argument("--resample_num_steps", type=int, default=20,
+                        help="FM-ES only: ODE steps during resample (explicit; do not rely on default_num_steps).")
+    parser.add_argument("--fm_num_steps", type=int, default=50,
+                        help="FM / FM-ES only: ODE steps for full (noise→data) sampling. "
+                        "Independent of model timestep conditioning (default_num_steps=100 → t*99).")
     parser.add_argument("--fm_solver", type=str, default="euler", choices=["euler", "heun"])
     parser.add_argument(
         "--other_agent_forecast",
@@ -109,12 +113,59 @@ def _parse_args() -> argparse.Namespace:
         "'auto' prefers CUDA when available.",
     )
     parser.add_argument(
+        "--wm_backend",
+        type=str,
+        default="production",
+        choices=["production", "multifuture", "occupancy", "ego"],
+        help="Which world-model package to load for --other_agent_forecast wm. "
+        "'production' = model/world_model (det/gaussian). "
+        "Others load the matching package under the repo root.",
+    )
+    parser.add_argument(
+        "--wm_planning_mode",
+        type=str,
+        default=None,
+        choices=[
+            "top1",
+            "expected_independent",
+            "worst_case_independent",
+            # Legacy aliases (canonicalize to *_independent inside multifuture).
+            "expected",
+            "worst_case",
+        ],
+        help="Multifuture WM only: agent-wise collision risk. "
+        "top1 | expected_independent | worst_case_independent "
+        "(aliases: expected, worst_case). Default: checkpoint config.",
+    )
+    parser.add_argument(
         "--wm_refresh_steps",
         type=int,
         default=10,
         help="WM absolute-sim-step refresh interval. "
         "50 = Exp1 (0,50,...), 20 = Exp2, 10 = Exp3 / every replan. "
-        "Shortfall always re-queries at the current timestep.",
+        "Shortfall always re-queries at the current timestep. "
+        "Only used by the production ScheduledWorldModelForecaster.",
+    )
+    parser.add_argument(
+        "--num_collision_worlds",
+        type=int,
+        default=8,
+        help="Gaussian WM only: Monte Carlo samples for collision scoring. "
+        "1 disables sampling (mean-only). Ignored for deterministic WM / cv / gt.",
+    )
+    parser.add_argument(
+        "--collision_reduce",
+        type=str,
+        default="mean",
+        choices=["any", "mean"],
+        help="How to reduce collision across WM sample worlds: "
+        "'mean' = Monte Carlo P(safe); 'any' = collide if any sample overlaps.",
+    )
+    parser.add_argument(
+        "--collision_sample_seed",
+        type=int,
+        default=0,
+        help="RNG seed offset for Gaussian collision sampling (plus timestep).",
     )
     parser.add_argument("--save_cache", type=str, default="none", choices=["none", "all", "success", "failure"])
     parser.add_argument("--start_from", type=str, default=None)
@@ -134,6 +185,73 @@ def _resolve_world_model_device(device_arg: str) -> str:
     return str(device_arg).strip()
 
 
+def _load_isolated_wm_forecaster(
+    pkg_root: Path,
+    *,
+    checkpoint_path: str,
+    device: str,
+    planning_mode: str | None = None,
+):
+    """Load a package-local WorldModelForecaster without clashing with repo ``model``/``data``."""
+    import importlib
+    import types
+
+    pkg_root = pkg_root.resolve()
+    alias = f"_wmpkg_{pkg_root.name.replace('-', '_')}"
+
+    def _register_namespace(fullname: str, path: Path) -> None:
+        if fullname in sys.modules:
+            return
+        mod = types.ModuleType(fullname)
+        mod.__path__ = [str(path)]  # type: ignore[attr-defined]
+        init_py = path / "__init__.py"
+        mod.__file__ = str(init_py if init_py.exists() else path)
+        sys.modules[fullname] = mod
+
+    _register_namespace(alias, pkg_root)
+    _register_namespace(f"{alias}.data", pkg_root / "data")
+    _register_namespace(f"{alias}.model", pkg_root / "model")
+    _register_namespace(f"{alias}.model.world_model", pkg_root / "model" / "world_model")
+    if (pkg_root / "occupancy").is_dir():
+        _register_namespace(f"{alias}.occupancy", pkg_root / "occupancy")
+
+    # Package code uses absolute ``from data...`` / ``from occupancy...``.
+    saved_top = {
+        key: sys.modules[key]
+        for key in ("data", "occupancy")
+        if key in sys.modules
+    }
+    sys.modules["data"] = sys.modules[f"{alias}.data"]
+    if f"{alias}.occupancy" in sys.modules:
+        sys.modules["occupancy"] = sys.modules[f"{alias}.occupancy"]
+
+    try:
+        inference = importlib.import_module(f"{alias}.model.world_model.inference")
+        load_kwargs: dict[str, Any] = {"device": device}
+        # Only multifuture accepts planning_mode today.
+        if planning_mode is not None:
+            load_kwargs["planning_mode"] = planning_mode
+        try:
+            forecaster = inference.WorldModelForecaster.from_checkpoint(
+                checkpoint_path,
+                **load_kwargs,
+            )
+        except TypeError:
+            load_kwargs.pop("planning_mode", None)
+            forecaster = inference.WorldModelForecaster.from_checkpoint(
+                checkpoint_path,
+                **load_kwargs,
+            )
+    finally:
+        for key in ("data", "occupancy"):
+            if key in saved_top:
+                sys.modules[key] = saved_top[key]
+            elif key in sys.modules and getattr(sys.modules[key], "__name__", "").startswith(alias):
+                del sys.modules[key]
+
+    return forecaster
+
+
 def _load_world_model_forecaster(args: argparse.Namespace):
     if str(args.other_agent_forecast).strip().lower() != "wm":
         return None
@@ -145,18 +263,64 @@ def _load_world_model_forecaster(args: argparse.Namespace):
     if device.startswith("cuda"):
         os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
-    from model.world_model.inference import ScheduledWorldModelForecaster
+    backend = str(getattr(args, "wm_backend", "production")).strip().lower()
+    repo_root = Path(__file__).resolve().parents[1]
+    backend_roots = {
+        "production": None,
+        "multifuture": repo_root / "multiFuture_GaussianWorldModel",
+        "occupancy": repo_root / "occupancy_worldModel",
+        "ego": repo_root / "egoConditioned_WM",
+    }
+    if backend not in backend_roots:
+        raise ValueError(f"Unknown --wm_backend {backend!r}")
 
-    forecaster = ScheduledWorldModelForecaster.from_checkpoint(
-        args.world_model_ckpt,
-        device=device,
-        refresh_steps=int(args.wm_refresh_steps),
-    )
+    if backend == "production":
+        from model.world_model.inference import ScheduledWorldModelForecaster
+
+        forecaster = ScheduledWorldModelForecaster.from_checkpoint(
+            args.world_model_ckpt,
+            device=device,
+            refresh_steps=int(args.wm_refresh_steps),
+            num_collision_worlds=int(args.num_collision_worlds),
+            collision_reduce=str(args.collision_reduce),
+            collision_sample_seed=int(args.collision_sample_seed),
+        )
+    else:
+        pkg_root = backend_roots[backend]
+        assert pkg_root is not None
+        planning_mode = None
+        if backend == "multifuture" and getattr(args, "wm_planning_mode", None):
+            planning_mode = str(args.wm_planning_mode)
+        forecaster = _load_isolated_wm_forecaster(
+            pkg_root,
+            checkpoint_path=str(args.world_model_ckpt),
+            device=device,
+            planning_mode=planning_mode,
+        )
+        if not hasattr(forecaster, "num_collision_worlds"):
+            forecaster.num_collision_worlds = 1
+        if not hasattr(forecaster, "collision_reduce"):
+            forecaster.collision_reduce = "any"
+
     print(
-        f"[wm] loaded {args.world_model_ckpt} on {device}; "
-        f"wm_refresh_steps={int(args.wm_refresh_steps)}"
+        f"[wm] backend={backend} loaded {args.world_model_ckpt} on {device}; "
+        f"wm_refresh_steps={int(args.wm_refresh_steps)}; "
+        f"num_collision_worlds={int(getattr(forecaster, 'num_collision_worlds', 1))}; "
+        f"collision_reduce={getattr(forecaster, 'collision_reduce', 'any')}"
     )
     return forecaster
+
+
+def _fm_default_num_steps_from_metadata(metadata: dict) -> int:
+    """Resolve FlowMatching time-embedding scale from checkpoint metadata.
+
+    Never use ``flow_num_steps`` here — that field was an unused pretrain CLI
+    leftover and caused the t*49 vs t*99 bug. Missing/null → 100 (trained default).
+    """
+    raw = metadata.get("default_num_steps", 100)
+    if raw is None:
+        return 100
+    return int(raw)
 
 
 def _load_fm_model_for_inference(
@@ -212,7 +376,10 @@ def _load_fm_model_for_inference(
         other_dim=int(metadata.get("other_dim", 15)),
         predict_horizon=int(metadata.get("predict_horizon", preprocess_cfg.predict_horizon)),
         subgoal_conditioned=bool(metadata.get("subgoal_conditioned", False)),
-        default_num_steps=int(metadata.get("flow_num_steps", 100)),
+        # Prefer metadata default_num_steps when present. Never use flow_num_steps
+        # (legacy unused training CLI). Existing ckpt has default_num_steps=null
+        # and must still resolve to 100 → model_time = t * 99.
+        default_num_steps=_fm_default_num_steps_from_metadata(metadata),
         rngs=nnx.Rngs(int(seed)),
     )
 
@@ -326,7 +493,8 @@ def main(args: argparse.Namespace) -> None:
             preprocess_cfg=preprocess_cfg,
             population_size=args.population_size,
             num_worlds=args.num_worlds,
-            num_steps=None,
+            # ODE steps only; conditioning stays default_num_steps=100 → t*99.
+            num_steps=int(args.fm_num_steps),
             solver=args.fm_solver,
         )
     elif args.planner == "es_fm":
@@ -354,7 +522,8 @@ def main(args: argparse.Namespace) -> None:
             metrics=["collision", "offroad"],
             resample_t_start=args.resample_t_start,
             resample_num_steps=args.resample_num_steps,
-            num_steps=None,
+            # ODE steps only; conditioning stays default_num_steps=100 → t*99.
+            num_steps=int(args.fm_num_steps),
             solver=args.fm_solver,
             other_agent_forecast=args.other_agent_forecast,
             world_model_forecaster=_load_world_model_forecaster(args),

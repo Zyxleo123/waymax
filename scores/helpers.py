@@ -10,6 +10,8 @@ import jax
 from waymax.datatypes.roadgraph import MapElementIds
 from waymax.datatypes.object_state import ObjectTypeIds
 
+from .polygon import pairwise_intersections, polygon_corners
+
 
 CENTERLINE_TYPES = {
     int(MapElementIds.LANE_FREEWAY.value),
@@ -451,6 +453,136 @@ def forecast_other_agents(
     raise ValueError(
         f"Unknown other-agent forecast mode {mode!r}; expected 'cv', 'gt', or 'wm'."
     )
+
+
+def collision_ensemble_kwargs(world_model_forecaster: Any) -> dict[str, Any]:
+    """Collision reduce settings advertised by a WM forecaster (CV/GT ignore this)."""
+    if world_model_forecaster is None:
+        return {"ensemble_worlds": 1, "reduce": "any"}
+    worlds = int(getattr(world_model_forecaster, "num_collision_worlds", 1) or 1)
+    reduce = str(getattr(world_model_forecaster, "collision_reduce", "any")).strip().lower()
+    if worlds <= 1:
+        reduce = "any"
+    if reduce not in {"any", "mean"}:
+        raise ValueError(f"collision_reduce must be 'any' or 'mean', got {reduce!r}")
+    return {"ensemble_worlds": max(worlds, 1), "reduce": reduce}
+
+
+def use_gaussian_collision_ensemble(world_model_forecaster: Any) -> bool:
+    """True when the forecaster packs K>1 collision worlds (Gaussian MC or multimodal).
+
+    CV / GT / mean-only WM keep the original hard single-world collision path.
+    """
+    if world_model_forecaster is None:
+        return False
+    worlds = int(getattr(world_model_forecaster, "num_collision_worlds", 1) or 1)
+    return worlds > 1
+
+
+def uses_occupancy_collision(world_model_forecaster: Any) -> bool:
+    """True only for occupancy WM forecasters that expose soft grid risk scoring.
+
+    CV / GT / det / gaussian / multifuture / ego return False and keep SAT (or
+    ensemble) collision unchanged.
+    """
+    return callable(getattr(world_model_forecaster, "score_occupancy_risk", None))
+
+
+def uses_independent_mode_collision(world_model_forecaster: Any) -> bool:
+    """True for multifuture WM with agent-wise multimodal collision scoring.
+
+    Modes are independent per agent (training WTA); do not use joint mode-k worlds.
+    """
+    return callable(getattr(world_model_forecaster, "score_independent_mode_collision", None))
+
+
+def box_collision_score(
+    ego_trajectories,
+    object_trajectories,
+    object_masks,
+    *,
+    ensemble_worlds: int = 1,
+    reduce: str = "any",
+):
+    """Hard box-overlap collision score, optionally averaged over WM sample worlds.
+
+    object_trajectories/masks are [num_objects, T, 5] / [num_objects, T]. When
+    ``ensemble_worlds > 1``, objects are concatenated worlds of equal size N:
+    shape [ensemble_worlds * N, T, ...].
+
+    ``reduce='any'``: 0 if ego overlaps any object in any world (CV-style).
+    ``reduce='mean'``: fraction of worlds with no overlap (Monte Carlo P(safe)).
+    """
+    ego_trajectories = jnp.asarray(ego_trajectories)
+    object_trajectories = jnp.asarray(object_trajectories)
+    object_masks = jnp.asarray(object_masks)
+    reduce_mode = str(reduce).strip().lower()
+    n_worlds = int(ensemble_worlds)
+
+    if ego_trajectories.ndim != 3 or ego_trajectories.shape[-1] != 5:
+        raise ValueError(
+            "ego_trajectories must have shape [num_ego_trajectories, num_time_steps, 5], "
+            f"got {ego_trajectories.shape}"
+        )
+    if object_trajectories.ndim != 3 or object_trajectories.shape[-1] != 5:
+        raise ValueError(
+            "object_trajectories must have shape [num_objects, num_time_steps, 5], "
+            f"got {object_trajectories.shape}"
+        )
+
+    num_objects = object_trajectories.shape[0]
+    num_time_steps = object_trajectories.shape[1]
+    if ego_trajectories.shape[1] != num_time_steps:
+        raise ValueError(
+            "ego_trajectories and object_trajectories must share num_time_steps, "
+            f"got {ego_trajectories.shape[1]} and {num_time_steps}"
+        )
+
+    if object_masks.ndim != 2:
+        raise ValueError(
+            "object_masks must have shape [num_objects, num_time_steps] or [num_time_steps, num_objects], "
+            f"got {object_masks.shape}"
+        )
+    if object_masks.shape == (num_objects, num_time_steps):
+        object_masks_o_t = object_masks > 0
+    elif object_masks.shape == (num_time_steps, num_objects):
+        object_masks_o_t = jnp.swapaxes(object_masks, 0, 1) > 0
+    else:
+        raise ValueError(
+            "object_masks shape mismatch: "
+            f"got {object_masks.shape}, expected ({num_objects}, {num_time_steps}) "
+            f"or ({num_time_steps}, {num_objects})"
+        )
+
+    def _one_world(obj_traj, obj_masks_ot):
+        ego_polygons = polygon_corners(ego_trajectories)
+        object_polygons = polygon_corners(obj_traj)
+
+        def _time_pairwise(ego_t: jax.Array, object_t: jax.Array) -> jax.Array:
+            return pairwise_intersections(ego_t, object_t)
+
+        intersections_t_e_o = jax.vmap(_time_pairwise, in_axes=(1, 1), out_axes=0)(
+            ego_polygons,
+            object_polygons,
+        )
+        valid_mask_t_o = jnp.swapaxes(obj_masks_ot, 0, 1)
+        intersections_t_e_o = intersections_t_e_o & valid_mask_t_o[:, None, :]
+        collision_flags = jnp.any(intersections_t_e_o, axis=(0, 2))
+        return jnp.where(collision_flags, 0.0, 1.0)
+
+    if n_worlds > 1 and reduce_mode == "mean":
+        if num_objects % n_worlds != 0:
+            raise ValueError(
+                "collision ensemble size must be divisible by ensemble_worlds, "
+                f"got num_objects={num_objects}, ensemble_worlds={n_worlds}"
+            )
+        n = num_objects // n_worlds
+        obj_w = object_trajectories.reshape((n_worlds, n, num_time_steps, 5))
+        mask_w = object_masks_o_t.reshape((n_worlds, n, num_time_steps))
+        per_world = jax.vmap(_one_world, in_axes=(0, 0))(obj_w, mask_w)
+        return jnp.mean(per_world, axis=0).astype(jnp.float32)
+
+    return _one_world(object_trajectories, object_masks_o_t).astype(jnp.float32)
 
 
 def get_vehicle_current_lane_ids(

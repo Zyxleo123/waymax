@@ -23,7 +23,10 @@ class FMPlanner(AbstractPlanner):
 		solver: str = "euler",
 		**kwargs: Any,
 	) -> None:
-		del kwargs
+		if kwargs:
+			raise TypeError(
+				f"Unexpected FMPlanner arguments: {sorted(kwargs.keys())}"
+			)
 
 		self.policy = policy
 		self.preprocess_cfg = preprocess_cfg

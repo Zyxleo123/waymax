@@ -40,6 +40,11 @@ class WorldModelConfig:
     num_future_layers: int = 2
     dropout: float = 0.1
 
+    # Diagonal Gaussian XY head (optional). When False, decoder is deterministic 4-D.
+    predict_gaussian_xy: bool = False
+    sigma_eps: float = 1e-3
+    sigma_raw_bias: float = -4.0
+
     # Loss. Nearby moving objects matter most for the CV -> GT overlap gap.
     yaw_loss_weight: float = 0.5
     collision_focus_radius_m: float = 20.0

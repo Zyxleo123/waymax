@@ -62,7 +62,8 @@ POPULATION_SIZE="${POPULATION_SIZE:-64}"
 ELITE_SIZE="${ELITE_SIZE:-8}"
 NUM_ES_ITERATIONS="${NUM_ES_ITERATIONS:-4}"
 RESAMPLE_T_START="${RESAMPLE_T_START:-0.2}"
-RESAMPLE_NUM_STEPS="${RESAMPLE_NUM_STEPS:-}"
+RESAMPLE_NUM_STEPS="${RESAMPLE_NUM_STEPS:-20}"
+FM_NUM_STEPS="${FM_NUM_STEPS:-50}"
 REPLAN_INTERVAL_STEPS="${REPLAN_INTERVAL_STEPS:-10}"
 
 RUN_STAMP="$(date +%Y%m%d_%H%M%S)"
@@ -141,7 +142,8 @@ done
   echo " elite_size:             ${ELITE_SIZE}"
   echo " num_es_iterations:      ${NUM_ES_ITERATIONS}"
   echo " resample_t_start:       ${RESAMPLE_T_START}"
-  echo " resample_num_steps:     ${RESAMPLE_NUM_STEPS:-"(policy default)"}"
+  echo " resample_num_steps:     ${RESAMPLE_NUM_STEPS}"
+  echo " fm_num_steps:           ${FM_NUM_STEPS}"
   echo "============================================================"
   echo
   echo "[TRAIN symlink dir]"
@@ -184,14 +186,13 @@ run_one() {
     --elite_size "${ELITE_SIZE}"
     --num_es_iterations "${NUM_ES_ITERATIONS}"
     --resample_t_start "${RESAMPLE_T_START}"
+    --resample_num_steps "${RESAMPLE_NUM_STEPS}"
+    --fm_num_steps "${FM_NUM_STEPS}"
     --replan_interval_steps "${REPLAN_INTERVAL_STEPS}"
     --other_agent_forecast "${OTHER_AGENT_FORECAST}"
     --visualize_mode none
     --tag "${tag}"
   )
-  if [[ -n "${RESAMPLE_NUM_STEPS}" ]]; then
-    CMD+=(--resample_num_steps "${RESAMPLE_NUM_STEPS}")
-  fi
 
   set +e
   "${CMD[@]}" 2>&1 | tee -a "${LOG_FILE}"

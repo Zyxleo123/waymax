@@ -45,6 +45,24 @@ def _rotate_by_plus_heading(xy: np.ndarray, heading: np.ndarray) -> np.ndarray:
     return np.stack([x * c - y * s, x * s + y * c], axis=-1)
 
 
+def _decoder_out_dim(state_dict: dict[str, Any]) -> int | None:
+    for key, value in state_dict.items():
+        if not hasattr(value, "shape") or len(getattr(value, "shape", ())) != 2:
+            continue
+        if key.endswith("state_decoder.net.3.weight"):
+            return int(value.shape[0])
+    return None
+
+
+def _checkpoint_predicts_gaussian(config_dict: dict[str, Any], state_dict: dict[str, Any]) -> bool:
+    if "predict_gaussian_xy" in config_dict:
+        return bool(config_dict["predict_gaussian_xy"])
+    if "sigma_eps" in config_dict or "sigma_raw_bias" in config_dict:
+        return True
+    out_dim = _decoder_out_dim(state_dict)
+    return out_dim == 6
+
+
 class WorldModelForecaster:
     """Runtime adapter from the learned latent world model to FM-ES scorer boxes.
 
@@ -55,6 +73,10 @@ class WorldModelForecaster:
     Predictions are cached per (sim_state, timestep, horizon), because an ES
     iteration scores many ego candidates against the same surrounding-agent
     future.
+
+    For Gaussian checkpoints, ``forecast`` returns mean trajectories for progress /
+    overtake and a Monte Carlo collision ensemble sampled from N(μ, σ) on xy
+    (yaw/length/width stay at the mean).
     """
 
     def __init__(
@@ -63,12 +85,30 @@ class WorldModelForecaster:
         config: WorldModelConfig,
         *,
         device: str | torch.device = "cpu",
+        num_collision_worlds: int = 1,
+        collision_reduce: str = "mean",
+        collision_sample_seed: int = 0,
     ) -> None:
         self.config = config
         self.device = torch.device(device)
         self.model = model.to(self.device)
         self.model.eval()
-        self._cache: dict[tuple[int, int, int, float], tuple[np.ndarray, np.ndarray]] = {}
+        worlds = int(num_collision_worlds)
+        if worlds < 1:
+            raise ValueError(f"num_collision_worlds must be >= 1, got {worlds}")
+        reduce = str(collision_reduce).strip().lower()
+        if reduce not in {"any", "mean"}:
+            raise ValueError(f"collision_reduce must be 'any' or 'mean', got {reduce!r}")
+        # Deterministic heads have no σ; force a single collision world.
+        if not bool(getattr(config, "predict_gaussian_xy", False)):
+            worlds = 1
+        self.num_collision_worlds = worlds
+        self.collision_reduce = reduce if worlds > 1 else "any"
+        self.collision_sample_seed = int(collision_sample_seed)
+        self._cache: dict[
+            tuple[int, int, int, float],
+            tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+        ] = {}
 
     @classmethod
     def from_checkpoint(
@@ -76,6 +116,9 @@ class WorldModelForecaster:
         checkpoint_path: str | Path,
         *,
         device: str | torch.device = "cpu",
+        num_collision_worlds: int = 1,
+        collision_reduce: str = "mean",
+        collision_sample_seed: int = 0,
     ) -> "WorldModelForecaster":
         path = Path(checkpoint_path).expanduser()
         if path.is_dir():
@@ -86,11 +129,22 @@ class WorldModelForecaster:
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
         if "config" not in checkpoint:
             raise KeyError(f"Checkpoint {path} is missing 'config'.")
-        config = WorldModelConfig.from_dict(dict(checkpoint["config"]))
-        model = LatentMultiAgentWorldModel(config)
+        config_dict = dict(checkpoint["config"])
         state = checkpoint.get("model_state_dict", checkpoint)
+        if not isinstance(state, dict):
+            raise TypeError(f"Unexpected checkpoint state type: {type(state)}")
+        config_dict["predict_gaussian_xy"] = _checkpoint_predicts_gaussian(config_dict, state)
+        config = WorldModelConfig.from_dict(config_dict)
+        model = LatentMultiAgentWorldModel(config)
         model.load_state_dict(state, strict=True)
-        return cls(model, config, device=device)
+        return cls(
+            model,
+            config,
+            device=device,
+            num_collision_worlds=num_collision_worlds,
+            collision_reduce=collision_reduce,
+            collision_sample_seed=collision_sample_seed,
+        )
 
     def clear_cache(self) -> None:
         self._cache.clear()
@@ -262,12 +316,15 @@ class WorldModelForecaster:
         timestep: int,
         traj_length: int,
         dt: float,
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         features, meta = self._prepare_features(sim_state, timestep)
         with torch.inference_mode():
             pred = self.model(features)
         pred_delta = pred["pred_delta_xy_norm"].detach().float().cpu().numpy()
         pred_yaw_vec = pred["pred_yaw_vec"].detach().float().cpu().numpy()
+        pred_sigma_m = None
+        if "pred_sigma_xy_m" in pred:
+            pred_sigma_m = pred["pred_sigma_xy_m"].detach().float().cpu().numpy()
 
         x = meta["x"]
         y = meta["y"]
@@ -303,8 +360,9 @@ class WorldModelForecaster:
         # Default to a static hold. Dynamic modeled agents are replaced below.
         out_xy = np.broadcast_to(current_xy[:, :, None, :], (b, n_total, horizon, 2)).copy()
         out_yaw = np.broadcast_to(current_yaw[:, :, None], (b, n_total, horizon)).copy()
+        out_sigma_local = np.zeros((b, n_total, horizon, 2), dtype=np.float32)
 
-        # Model displacement is in the current ego coordinate frame.
+        # Model displacement / σ are in the current ego coordinate frame.
         delta_local = pred_delta[:, :modeled_n] * float(self.config.max_range)
         delta_world = _rotate_by_plus_heading(
             delta_local,
@@ -318,6 +376,12 @@ class WorldModelForecaster:
         model_yaw_future = _wrap_to_pi_np(
             current_yaw[:, :modeled_n, None] + yaw_delta
         )
+        model_sigma_local = None
+        if pred_sigma_m is not None:
+            model_sigma_local = np.maximum(
+                pred_sigma_m[:, :modeled_n].astype(np.float32),
+                0.0,
+            )
 
         # Include t=0 current state, then interpolate the learned model-dt future
         # to the world-dt horizon expected by FM-ES collision scoring.
@@ -338,6 +402,16 @@ class WorldModelForecaster:
                 sin_interp = np.interp(dst_t, src_t, np.sin(yaw_src))
                 cos_interp = np.interp(dst_t, src_t, np.cos(yaw_src))
                 out_yaw[bi, ni] = np.arctan2(sin_interp, cos_interp)
+                if model_sigma_local is not None:
+                    sigma_src = np.concatenate(
+                        [
+                            np.zeros((1, 2), dtype=np.float32),
+                            model_sigma_local[bi, ni],
+                        ],
+                        axis=0,
+                    )
+                    out_sigma_local[bi, ni, :, 0] = np.interp(dst_t, src_t, sigma_src[:, 0])
+                    out_sigma_local[bi, ni, :, 1] = np.interp(dst_t, src_t, sigma_src[:, 1])
 
         out_len = np.broadcast_to(current_len[:, :, None], (b, n_total, horizon))
         out_wid = np.broadcast_to(current_wid[:, :, None], (b, n_total, horizon))
@@ -349,7 +423,38 @@ class WorldModelForecaster:
             (current_valid & (~is_sdc))[:, :, None],
             (b, n_total, horizon),
         ).copy()
-        return trajectories, masks
+
+        k = int(self.num_collision_worlds)
+        can_sample = (
+            k > 1
+            and model_sigma_local is not None
+            and bool(getattr(self.config, "predict_gaussian_xy", False))
+        )
+        if not can_sample:
+            return trajectories, masks, trajectories, masks
+
+        # Sample xy in ego-local frame then rotate to world; yaw/L/W stay at mean.
+        rng = np.random.default_rng(self.collision_sample_seed + int(timestep))
+        sample_chunks_traj: list[np.ndarray] = []
+        sample_chunks_mask: list[np.ndarray] = []
+        for _ in range(k):
+            noise_local = rng.normal(size=out_sigma_local.shape).astype(np.float32)
+            noise_local = noise_local * out_sigma_local
+            noise_world = _rotate_by_plus_heading(
+                noise_local,
+                ego_yaw[:, None, None],
+            )
+            # Only perturb dynamic modeled non-ego agents (σ is already 0 elsewhere).
+            sample_xy = out_xy + noise_world
+            sample_traj = np.stack(
+                [sample_xy[..., 0], sample_xy[..., 1], out_yaw, out_len, out_wid],
+                axis=-1,
+            ).astype(np.float32)
+            sample_chunks_traj.append(sample_traj)
+            sample_chunks_mask.append(masks)
+        collision_trajectories = np.concatenate(sample_chunks_traj, axis=1)
+        collision_masks = np.concatenate(sample_chunks_mask, axis=1)
+        return trajectories, masks, collision_trajectories, collision_masks
 
     def forecast(
         self,
@@ -374,17 +479,17 @@ class WorldModelForecaster:
             self._cache.clear()
             self._cache[key] = cached
 
-        trajectories_bnt5, masks_bnt = cached
+        trajectories_bnt5, masks_bnt, collision_bnt5, collision_masks_bnt = cached
         idx = int(world_idx)
         object_trajectories = jnp.asarray(trajectories_bnt5[idx], dtype=jnp.float32)
         object_masks = jnp.asarray(masks_bnt[idx]).astype(jnp.bool_)
-        # V1 is deterministic. Collision ensemble == primary forecast. A later
-        # multimodal extension can return multiple sampled worlds here.
+        collision_object_trajectories = jnp.asarray(collision_bnt5[idx], dtype=jnp.float32)
+        collision_object_masks = jnp.asarray(collision_masks_bnt[idx]).astype(jnp.bool_)
         return (
             object_trajectories,
             object_masks,
-            object_trajectories,
-            object_masks,
+            collision_object_trajectories,
+            collision_object_masks,
         )
 
 
@@ -414,6 +519,8 @@ class ScheduledWorldModelForecaster:
         self._origin_t: int | None = None
         self._traj_bnt5: np.ndarray | None = None
         self._mask_bnt: np.ndarray | None = None
+        self._collision_bnt5: np.ndarray | None = None
+        self._collision_mask_bnt: np.ndarray | None = None
         self._dt: float | None = None
         self._last_timestep: int | None = None
         self.num_queries: int = 0
@@ -426,8 +533,17 @@ class ScheduledWorldModelForecaster:
         *,
         device: str | torch.device = "cpu",
         refresh_steps: int = 10,
+        num_collision_worlds: int = 1,
+        collision_reduce: str = "mean",
+        collision_sample_seed: int = 0,
     ) -> "ScheduledWorldModelForecaster":
-        base = WorldModelForecaster.from_checkpoint(checkpoint_path, device=device)
+        base = WorldModelForecaster.from_checkpoint(
+            checkpoint_path,
+            device=device,
+            num_collision_worlds=num_collision_worlds,
+            collision_reduce=collision_reduce,
+            collision_sample_seed=collision_sample_seed,
+        )
         return cls(base, refresh_steps=refresh_steps)
 
     @property
@@ -438,11 +554,21 @@ class ScheduledWorldModelForecaster:
     def device(self) -> torch.device:
         return self.base.device
 
+    @property
+    def num_collision_worlds(self) -> int:
+        return int(self.base.num_collision_worlds)
+
+    @property
+    def collision_reduce(self) -> str:
+        return str(self.base.collision_reduce)
+
     def clear_cache(self) -> None:
         self.base.clear_cache()
         self._origin_t = None
         self._traj_bnt5 = None
         self._mask_bnt = None
+        self._collision_bnt5 = None
+        self._collision_mask_bnt = None
         self._dt = None
         self._last_timestep = None
 
@@ -454,6 +580,8 @@ class ScheduledWorldModelForecaster:
             self._origin_t is None
             or self._traj_bnt5 is None
             or self._mask_bnt is None
+            or self._collision_bnt5 is None
+            or self._collision_mask_bnt is None
             or self._dt is None
             or abs(float(self._dt) - float(dt)) > 1e-8
         ):
@@ -476,7 +604,7 @@ class ScheduledWorldModelForecaster:
     ) -> None:
         native = self.native_horizon_steps(dt)
         predict_len = max(int(traj_length), native)
-        traj_bnt5, mask_bnt = self.base._predict_all_worlds(
+        traj_bnt5, mask_bnt, collision_bnt5, collision_mask_bnt = self.base._predict_all_worlds(
             sim_state,
             timestep=int(timestep),
             traj_length=predict_len,
@@ -485,6 +613,8 @@ class ScheduledWorldModelForecaster:
         self._origin_t = int(timestep)
         self._traj_bnt5 = traj_bnt5
         self._mask_bnt = mask_bnt
+        self._collision_bnt5 = collision_bnt5
+        self._collision_mask_bnt = collision_mask_bnt
         self._dt = float(dt)
         self._last_timestep = int(timestep)
         self.num_queries += 1
@@ -493,6 +623,8 @@ class ScheduledWorldModelForecaster:
         self.base._cache[(id(sim_state), int(timestep), predict_len, float(dt))] = (
             traj_bnt5,
             mask_bnt,
+            collision_bnt5,
+            collision_mask_bnt,
         )
 
     def forecast(
@@ -528,7 +660,13 @@ class ScheduledWorldModelForecaster:
             self.num_slices += 1
             self._last_timestep = t
 
-        assert self._origin_t is not None and self._traj_bnt5 is not None and self._mask_bnt is not None
+        assert (
+            self._origin_t is not None
+            and self._traj_bnt5 is not None
+            and self._mask_bnt is not None
+            and self._collision_bnt5 is not None
+            and self._collision_mask_bnt is not None
+        )
         offset = t - int(self._origin_t)
         if offset < 0 or offset + length > int(self._traj_bnt5.shape[2]):
             # Belts-and-suspenders: should be unreachable after _covers / refresh.
@@ -548,11 +686,18 @@ class ScheduledWorldModelForecaster:
         object_masks = jnp.asarray(
             self._mask_bnt[idx, :, offset : offset + length],
         ).astype(jnp.bool_)
+        collision_object_trajectories = jnp.asarray(
+            self._collision_bnt5[idx, :, offset : offset + length, :],
+            dtype=jnp.float32,
+        )
+        collision_object_masks = jnp.asarray(
+            self._collision_mask_bnt[idx, :, offset : offset + length],
+        ).astype(jnp.bool_)
         return (
             object_trajectories,
             object_masks,
-            object_trajectories,
-            object_masks,
+            collision_object_trajectories,
+            collision_object_masks,
         )
 
 

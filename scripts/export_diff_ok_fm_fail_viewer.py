@@ -72,7 +72,13 @@ ES_COMMON = dict(
     metrics=["collision", "offroad"],
 )
 DIFF_HPARAMS = dict(resample_timesteps=5, **ES_COMMON)
-FM_HPARAMS = dict(resample_t_start=0.2, resample_num_steps=None, **ES_COMMON)
+FM_HPARAMS = dict(
+    resample_t_start=0.2,
+    resample_num_steps=20,
+    num_steps=50,
+    solver="euler",
+    **ES_COMMON,
+)
 
 
 def _latest_sim(run_folder: Path) -> Path:
@@ -218,6 +224,9 @@ def _build_planners(mode: str, diffusion_ckpt: str, fm_ckpt: str):
         num_worlds=FM_HPARAMS["num_worlds"],
         metrics=FM_HPARAMS["metrics"],
         resample_t_start=FM_HPARAMS["resample_t_start"],
+        resample_num_steps=FM_HPARAMS["resample_num_steps"],
+        num_steps=FM_HPARAMS["num_steps"],
+        solver=FM_HPARAMS["solver"],
         other_agent_forecast=mode,
     )
     return diff_planner, fm_planner

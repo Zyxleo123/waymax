@@ -45,6 +45,8 @@ class LatentMultiAgentWorldModel(nn.Module):
         current ego frame and normalized by config.max_range.
     pred_yaw_vec: [B, N, T, 2]
         sin/cos of future yaw delta relative to the agent's current yaw.
+    pred_sigma_xy_norm / pred_sigma_xy_m: [B, N, T, 2] (Gaussian checkpoints only)
+        Per-timestep diagonal std of (mu_x, mu_y) in ego-local units / meters.
     latent_scene: [B, N, C]
         Interaction-aware per-agent latent at the anchor time.
     latent_future: [B, N, T, C]
@@ -54,6 +56,7 @@ class LatentMultiAgentWorldModel(nn.Module):
     def __init__(self, config: WorldModelConfig):
         super().__init__()
         self.config = config
+        self.predict_gaussian_xy = bool(getattr(config, "predict_gaussian_xy", False))
         c = int(config.hidden_dim)
 
         self.agent_step_encoder = _MLP(
@@ -119,7 +122,13 @@ class LatentMultiAgentWorldModel(nn.Module):
             enable_nested_tensor=False,
         )
         self.future_norm = nn.LayerNorm(c)
-        self.state_decoder = _MLP(c, c, 4, dropout=config.dropout)
+        out_dim = 6 if self.predict_gaussian_xy else 4
+        self.state_decoder = _MLP(c, c, out_dim, dropout=config.dropout)
+        if self.predict_gaussian_xy:
+            last = self.state_decoder.net[-1]
+            nn.init.zeros_(last.weight)
+            nn.init.zeros_(last.bias)
+            last.bias.data[2:4] = float(config.sigma_raw_bias)
 
     @staticmethod
     def _masked_map_pool(
@@ -191,15 +200,28 @@ class LatentMultiAgentWorldModel(nn.Module):
 
         decoded = self.state_decoder(latent_future)
         pred_delta_xy_norm = decoded[..., :2]
-        pred_yaw_vec = F.normalize(decoded[..., 2:4], dim=-1, eps=1e-6)
+        if self.predict_gaussian_xy:
+            raw_sigma = decoded[..., 2:4]
+            sigma_xy_norm = F.softplus(raw_sigma) + float(self.config.sigma_eps)
+            pred_yaw_vec = F.normalize(decoded[..., 4:6], dim=-1, eps=1e-6)
+        else:
+            raw_sigma = None
+            sigma_xy_norm = None
+            pred_yaw_vec = F.normalize(decoded[..., 2:4], dim=-1, eps=1e-6)
 
         valid_scale = agent_valid[:, :, None, None].to(decoded.dtype)
         pred_delta_xy_norm = pred_delta_xy_norm * valid_scale
         pred_yaw_vec = pred_yaw_vec * valid_scale
 
-        return {
+        out = {
             "pred_delta_xy_norm": pred_delta_xy_norm,
             "pred_yaw_vec": pred_yaw_vec,
             "latent_scene": latent_scene,
             "latent_future": latent_future,
         }
+        if sigma_xy_norm is not None and raw_sigma is not None:
+            sigma_xy_norm = sigma_xy_norm * valid_scale
+            out["pred_sigma_xy_norm"] = sigma_xy_norm
+            out["pred_sigma_xy_m"] = sigma_xy_norm * float(self.config.max_range)
+            out["pred_raw_sigma_xy"] = raw_sigma * valid_scale
+        return out

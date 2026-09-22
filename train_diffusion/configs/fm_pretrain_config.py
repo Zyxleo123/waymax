@@ -42,10 +42,17 @@ class FlowMatchingPretrainConfig:
     inst_dim: int = 768
     model_dt: float = 0.2
 
+    # Model-side continuous-time embedding scale for FlowMatching in fm_policy.py:
+    # model_time = t * (default_num_steps - 1). Training uses 100 → t * 99.
+    default_num_steps: int = 100
+
+    # NOTE: flow_num_steps / flow_time_embedding_scale are NOT consumed by
+    # FlowMatchingPolicy training (see config_to_dict). Kept as CLI leftovers only.
     flow_num_steps: int = 50
     flow_solver: str = "euler"
     flow_time_embedding_scale: int = 1000
 
+    # Intended inference/ES defaults (not used by the pretrain loss).
     resample_t_start: float = 0.2
     resample_num_steps: int = 20
 
@@ -113,9 +120,25 @@ def parse_args() -> FlowMatchingPretrainConfig:
     parser.add_argument("--inst_dim", type=int, default=768)
     parser.add_argument("--model_dt", type=float, default=0.2)
 
-    parser.add_argument("--flow_num_steps", type=int, default=50)
+    parser.add_argument(
+        "--default_num_steps",
+        type=int,
+        default=100,
+        help="FlowMatching model_time scale: model_time = t * (default_num_steps - 1).",
+    )
+    parser.add_argument(
+        "--flow_num_steps",
+        type=int,
+        default=50,
+        help="UNUSED by training (legacy CLI). Not written to checkpoint metadata.",
+    )
     parser.add_argument("--flow_solver", type=str, default="euler", choices=["euler", "heun"])
-    parser.add_argument("--flow_time_embedding_scale", type=int, default=1000)
+    parser.add_argument(
+        "--flow_time_embedding_scale",
+        type=int,
+        default=1000,
+        help="UNUSED by training (legacy CLI). Not written to checkpoint metadata.",
+    )
 
     parser.add_argument("--resample_t_start", type=float, default=0.2)
     parser.add_argument("--resample_num_steps", type=int, default=20)
@@ -148,6 +171,8 @@ def parse_args() -> FlowMatchingPretrainConfig:
 
     args = parser.parse_args()
 
+    if args.default_num_steps <= 1:
+        parser.error("--default_num_steps must be > 1")
     if args.flow_num_steps <= 0:
         parser.error("--flow_num_steps must be > 0")
     if args.flow_time_embedding_scale <= 1:
@@ -164,4 +189,12 @@ def parse_args() -> FlowMatchingPretrainConfig:
 
 
 def config_to_dict(config: FlowMatchingPretrainConfig) -> dict:
-    return asdict(config)
+    """Serialize config for checkpoint metadata.
+
+    Omits unused legacy fields that previously misled inference into reading
+    flow_num_steps as the model time-embedding scale.
+    """
+    data = asdict(config)
+    data.pop("flow_num_steps", None)
+    data.pop("flow_time_embedding_scale", None)
+    return data
