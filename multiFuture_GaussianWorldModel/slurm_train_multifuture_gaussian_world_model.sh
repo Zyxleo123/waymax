@@ -41,7 +41,8 @@ fi
 mkdir -p "${SCRATCH_WM}" "${SAVE_DIR}"
 
 cd "${ROOT}"
-export PYTHONPATH="${ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+# ROOT first so its data/ and model/ shadow the repo root's; repo root provides scores/.
+export PYTHONPATH="${ROOT}:$(dirname "${ROOT}")${PYTHONPATH:+:${PYTHONPATH}}"
 
 echo "host=$(hostname)  cuda=${CUDA_VISIBLE_DEVICES:-}  python=$(command -v python)"
 python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
