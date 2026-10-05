@@ -11,6 +11,8 @@ PLANNING_MODES = (
     "expected_independent",
     "worst_case_independent",
 )
+DECODER_TYPES = ("per_step", "direct")
+
 _PLANNING_MODE_ALIASES = {
     "expected": "expected_independent",
     "worst_case": "worst_case_independent",
@@ -57,6 +59,12 @@ class WorldModelConfig:
     num_modes: int = 6
     sigma_eps: float = 1e-3
     sigma_raw_bias: float = -4.0
+    # Decode mu / sigma in each agent's current heading frame, then rotate mu
+    # back to the ego frame. False keeps legacy (ego-frame) checkpoints loadable.
+    agent_frame_decoding: bool = False
+    # "per_step": future transformer over T, modes added per step (legacy).
+    # "direct": one query per (agent, mode) -> whole [T, 6] trajectory in one MLP.
+    decoder_type: str = "per_step"
 
     yaw_loss_weight: float = 0.5
     mode_cls_weight: float = 1.0
@@ -78,6 +86,8 @@ class WorldModelConfig:
                 f"(aliases: expected, worst_case), got {self.planning_mode!r}"
             )
         self.planning_mode = mode
+        if self.decoder_type not in DECODER_TYPES:
+            raise ValueError(f"decoder_type must be one of {DECODER_TYPES}, got {self.decoder_type!r}")
 
     @property
     def agent_feature_dim(self) -> int:

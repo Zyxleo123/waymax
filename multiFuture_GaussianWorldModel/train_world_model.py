@@ -16,7 +16,7 @@ from tqdm import tqdm
 
 from data.utils import resolve_cache_paths, split_cache_paths
 from data.world_model_cache_loader import build_world_model_cache_loader
-from model.world_model import LatentMultiAgentWorldModel, WorldModelConfig, gather_mode
+from model.world_model import LatentMultiAgentWorldModel, WorldModelConfig, gather_mode, rotate_xy
 
 
 def _parse_int_tuple(value: str) -> tuple[int, ...]:
@@ -73,6 +73,19 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--num_modes", type=int, default=6)
     p.add_argument("--sigma_eps", type=float, default=1e-3)
+    p.add_argument(
+        "--agent_frame_decoding",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Decode in each agent's heading frame (sigma = longitudinal/lateral).",
+    )
+    p.add_argument(
+        "--decoder_type",
+        type=str,
+        default="direct",
+        choices=["per_step", "direct"],
+        help="direct = whole-trajectory head per (agent, mode) with per-mode classifier.",
+    )
     p.add_argument("--yaw_loss_weight", type=float, default=0.5)
     p.add_argument("--mode_cls_weight", type=float, default=1.0)
     p.add_argument("--collision_focus_radius_m", type=float, default=20.0)
@@ -88,7 +101,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--log_every", type=int, default=20)
 
     p.add_argument("--wandb_project", type=str, default="world Model")
-    p.add_argument("--wandb_entity", type=str, default="scbellad2025-carnegie-mellon-university")
+    p.add_argument("--wandb_entity", type=str, default=None, help="Empty/None = logged-in user's default entity.")
     p.add_argument("--wandb_name", type=str, default="multiFuture_GaussianWorldModel")
     p.add_argument("--wandb_mode", type=str, default="online", choices=["online", "offline", "disabled"])
     return p.parse_args()
@@ -115,6 +128,8 @@ def _make_config(args: argparse.Namespace) -> WorldModelConfig:
         dropout=args.dropout,
         num_modes=args.num_modes,
         sigma_eps=args.sigma_eps,
+        agent_frame_decoding=args.agent_frame_decoding,
+        decoder_type=args.decoder_type,
         yaw_loss_weight=args.yaw_loss_weight,
         mode_cls_weight=args.mode_cls_weight,
         collision_focus_radius_m=args.collision_focus_radius_m,
@@ -201,11 +216,14 @@ def _loss_and_metrics(
         pred_xy_k, target_xy, valid, float(config.max_range)
     )
     best_mode = ade_k.argmin(dim=-1)
-    pred_xy = gather_mode(pred_xy_k, best_mode)
     pred_yaw = gather_mode(pred_yaw_k, best_mode)
     sigma_xy = gather_mode(sigma_k, best_mode)
 
-    xy_loss = _gaussian_nll_xy(pred_xy, target_xy, sigma_xy)
+    # NLL in the frame sigma lives in (agent frame when agent_frame_decoding).
+    heading_sc = out["agent_heading_sc"]
+    target_xy_agent = rotate_xy(target_xy, -heading_sc[:, :, None, 0], heading_sc[:, :, None, 1])
+    pred_xy_agent = gather_mode(out["pred_delta_xy_agent_norm_k"], best_mode)
+    xy_loss = _gaussian_nll_xy(pred_xy_agent, target_xy_agent, sigma_xy)
     yaw_loss = 1.0 - (pred_yaw * target_yaw).sum(dim=-1).clamp(-1.0, 1.0)
     xy_term = (xy_loss * time_weights).sum() / time_denom
     yaw_term = (yaw_loss * time_weights).sum() / time_denom
@@ -351,7 +369,7 @@ def _init_wandb(args: argparse.Namespace, config: WorldModelConfig, save_dir: Pa
     os.environ["WANDB_MODE"] = args.wandb_mode
     run = wandb.init(
         project=args.wandb_project,
-        entity=args.wandb_entity,
+        entity=args.wandb_entity or None,
         name=wandb_name,
         dir=str(run_dir),
         config={"world_model": config.to_dict(), "train_args": vars(args)},

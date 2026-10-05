@@ -8,15 +8,15 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=96G
 #SBATCH --time=2-00:00:00
-#SBATCH --chdir=/zfsauton2/home/sbellad/baseline/waymax_rs/multiFuture_GaussianWorldModel
-#SBATCH --output=/zfsauton/scratch/sbellad/world_model/multifuture_gaussian_world_model_%j.out
-#SBATCH --error=/zfsauton/scratch/sbellad/world_model/multifuture_gaussian_world_model_%j.err
+#SBATCH --chdir=/zfsauton/scratch/ishanj/waymax_rs/multiFuture_GaussianWorldModel
+#SBATCH --output=/zfsauton/scratch/ishanj/world_model/multifuture_gaussian_world_model_%j.out
+#SBATCH --error=/zfsauton/scratch/ishanj/world_model/multifuture_gaussian_world_model_%j.err
 
 set -euo pipefail
 
-ROOT="${MULTIFUTURE_WM_ROOT:-/zfsauton2/home/sbellad/baseline/waymax_rs/multiFuture_GaussianWorldModel}"
+ROOT="${MULTIFUTURE_WM_ROOT:-/zfsauton/scratch/ishanj/waymax_rs/multiFuture_GaussianWorldModel}"
 CACHE_DIR="${CACHE_DIR:-/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz}"
-SCRATCH_WM="${SCRATCH_WM:-/zfsauton/scratch/sbellad/world_model}"
+SCRATCH_WM="${SCRATCH_WM:-/zfsauton/scratch/ishanj/world_model}"
 SAVE_DIR="${SAVE_DIR:-${SCRATCH_WM}/ckpts_multifuture_gaussian}"
 DEVICE="${WORLD_MODEL_TRAIN_DEVICE:-cuda}"
 
@@ -27,6 +27,15 @@ if [[ "${CONDA_PREFIX:-}" != "${WAYMAX_ENV}" ]]; then
   # shellcheck source=/dev/null
   source "${CONDA_ROOT}/bin/activate" "${WAYMAX_ENV}"
   set -u
+fi
+
+# Decoder A/B: DECODER_TYPE=direct|per_step, AGENT_FRAME_DECODING=1|0.
+# Each run saves to SAVE_DIR/<WANDB_NAME>_<timestamp>/; use distinct WANDB_NAMEs per variant.
+DECODER_TYPE="${DECODER_TYPE:-direct}"
+if [[ "${AGENT_FRAME_DECODING:-1}" == "1" ]]; then
+  AGENT_FRAME_FLAG="--agent_frame_decoding"
+else
+  AGENT_FRAME_FLAG="--no-agent_frame_decoding"
 fi
 
 mkdir -p "${SCRATCH_WM}" "${SAVE_DIR}"
@@ -56,9 +65,11 @@ python train_world_model.py \
   --yaw_loss_weight "${YAW_LOSS_WEIGHT:-0.5}" \
   --mode_cls_weight "${MODE_CLS_WEIGHT:-1.0}" \
   --sigma_eps "${SIGMA_EPS:-1e-3}" \
+  --decoder_type "${DECODER_TYPE}" \
+  "${AGENT_FRAME_FLAG}" \
   --planning_mode "${PLANNING_MODE:-top1}" \
   --wandb_project "${WANDB_PROJECT:-world Model}" \
-  --wandb_entity "${WANDB_ENTITY:-scbellad2025-carnegie-mellon-university}" \
+  --wandb_entity "${WANDB_ENTITY:-}" \
   --wandb_name "${WANDB_NAME:-multiFuture_GaussianWorldModel}" \
   --wandb_mode "${WANDB_MODE:-online}" \
   --amp

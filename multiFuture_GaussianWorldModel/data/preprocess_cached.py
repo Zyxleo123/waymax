@@ -328,42 +328,47 @@ def _build_map_features(
 		if not np.any(valid_and_range):
 			continue
 
+		# Group points by polyline id; stable sort keeps along-polyline order.
 		sort_ids = np.where(valid_and_range, point_ids, sentinel_id)
 		sort_dist = np.where(valid_and_range, dist, np.inf)
-		order = np.lexsort((sort_dist, sort_ids))
+		order = np.argsort(sort_ids, kind="stable")
 
 		sort_ids = sort_ids[order]
+		sort_dist = sort_dist[order]
 		sort_xy = xy[order]
 		sort_dirs = dirs[order]
 		sort_types = types[order]
 
-		unique_ids, counts = np.unique(sort_ids, return_counts=True)
+		unique_ids, starts, counts = np.unique(sort_ids, return_index=True, return_counts=True)
 		keep = unique_ids != sentinel_id
-		unique_ids = unique_ids[keep][:max_segments]
-		counts = counts[keep][:max_segments]
+		unique_ids, starts, counts = unique_ids[keep], starts[keep], counts[keep]
 		if unique_ids.size == 0:
 			continue
 
-		starts = np.concatenate([
-			np.array([0], dtype=np.int32),
-			np.cumsum(counts[:-1], dtype=np.int32),
-		], axis=0)
+		# Keep the polylines closest to the ego, nearest first.
+		min_dist = np.minimum.reduceat(sort_dist, starts)
+		pick = np.argsort(min_dist, kind="stable")[:max_segments]
+		unique_ids, starts, counts = unique_ids[pick], starts[pick], counts[pick]
+
 		point_rank = np.arange(max_points_per_segment, dtype=np.int32)
+		stride_den = max(max_points_per_segment - 1, 1)
 
 		for seg_idx, (seg_id, count, start) in enumerate(zip(unique_ids, counts, starts, strict=False)):
-			if seg_id == sentinel_id or count <= 0:
-				continue
+			count = int(count)
 			start = int(start)
-			end = min(start + max_points_per_segment, sort_xy.shape[0])
+			# Subsample evenly along the polyline when it has too many points.
+			if count > max_points_per_segment:
+				point_idx = start + (point_rank * (count - 1)) // stride_den
+			else:
+				point_idx = start + point_rank[:count]
+			span = point_idx.shape[0]
 
 			seg_xy = np.zeros((max_points_per_segment, 2), dtype=np.float32)
 			seg_dirs = np.zeros((max_points_per_segment, 2), dtype=np.float32)
 			seg_types = np.zeros((max_points_per_segment,), dtype=np.int32)
-			span = end - start
-			if span > 0:
-				seg_xy[:span] = sort_xy[start:end]
-				seg_dirs[:span] = sort_dirs[start:end]
-				seg_types[:span] = sort_types[start:end]
+			seg_xy[:span] = sort_xy[point_idx]
+			seg_dirs[:span] = sort_dirs[point_idx]
+			seg_types[:span] = sort_types[point_idx]
 
 			xy_rel = _rotate_xy(seg_xy - origin_xy_b2[batch_idx][None, :], heading_b[batch_idx]) / float(cfg.max_range)
 			dir_rel = _rotate_xy(seg_dirs, heading_b[batch_idx])
@@ -377,7 +382,7 @@ def _build_map_features(
 			)
 			type_oh = np.eye(int(cfg.num_map_type_classes), dtype=np.float32)[ty_safe]
 			seg_feat = np.concatenate([xy_rel.astype(np.float32), dir_rel.astype(np.float32), type_oh], axis=-1)
-			seg_valid = point_rank < int(count)
+			seg_valid = point_rank < span
 			seg_feat = np.where(seg_valid[:, None], seg_feat, 0.0)
 
 			feats[batch_idx, seg_idx] = seg_feat
