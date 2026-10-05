@@ -20,8 +20,8 @@ SCRATCH_WM="${SCRATCH_WM:-/zfsauton/scratch/ishanj/world_model}"
 SAVE_DIR="${SAVE_DIR:-${SCRATCH_WM}/ckpts_multifuture_gaussian}"
 DEVICE="${WORLD_MODEL_TRAIN_DEVICE:-cuda}"
 
-CONDA_ROOT="${CONDA_ROOT:-/zfsauton/scratch/sbellad/miniconda3}"
-WAYMAX_ENV="${WAYMAX_ENV:-/zfsauton/scratch/sbellad/conda_envs/waymax_rs}"
+CONDA_ROOT="${CONDA_ROOT:-/zfsauton/scratch/ishanj/miniconda3}"
+WAYMAX_ENV="${WAYMAX_ENV:-/zfsauton/scratch/ishanj/miniconda3/envs/waymax_rs}"
 if [[ "${CONDA_PREFIX:-}" != "${WAYMAX_ENV}" ]]; then
   set +u
   # shellcheck source=/dev/null
