@@ -11,6 +11,14 @@ from typing import Iterable
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+# Load Triton (imported lazily by torch.optim) before jax/tensorflow come in via
+# waymax: loading its LLVM after theirs segfaults in some environments.
+try:
+    import triton  # noqa: F401
+except ImportError:
+    pass
+
 import wandb
 from tqdm import tqdm
 
