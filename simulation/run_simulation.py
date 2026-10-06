@@ -170,6 +170,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--save_cache", type=str, default="none", choices=["none", "all", "success", "failure"])
     parser.add_argument("--start_from", type=str, default=None)
     parser.add_argument("--target_scenario_path", type=str, default=None)
+    parser.add_argument(
+        "--sim_agents",
+        type=str,
+        default="log",
+        choices=["log", "idm"],
+        help="How non-ego agents move during evaluation rollout: 'log' = log replay, "
+        "'idm' = IDM along logged routes. Planning still sees logged agents.",
+    )
     return parser.parse_args()
 
 
@@ -411,6 +419,8 @@ def main(args: argparse.Namespace) -> None:
     args.tfrecord_dir = os.path.join(args.tfrecord_dir, args.split)
     
     exp_name = f"simulation_{args.planner}_{args.split}"
+    if args.sim_agents != "log":
+        exp_name += f"_{args.sim_agents}"
     if args.tag is not None:
         exp_name += f"_{args.tag}"
     exp_name += f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}"

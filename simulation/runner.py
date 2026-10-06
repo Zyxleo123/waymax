@@ -247,6 +247,7 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
         rollout = rollout_predicted_trajectories_with_metrics(
             replaced_state,
             rng_key=rng_key,
+            sim_agents=getattr(args, "sim_agents", "log"),
         )
         # tl_violation_eval = check_traffic_light_violation(
         #     replaced_state,

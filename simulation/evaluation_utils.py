@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import dataclasses
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -10,7 +12,7 @@ _DEFAULT_METRIC_NAMES = ("overlap", "offroad")
 
 
 def _build_rollout_env_and_actor(
-    metric_names: tuple[str, ...], max_num_objects: int
+    metric_names: tuple[str, ...], max_num_objects: int, sim_agents: str = "log"
 ):
     from waymax import agents
     from waymax import config as waymax_config
@@ -24,6 +26,20 @@ def _build_rollout_env_and_actor(
         controlled_object=waymax_config.ObjectType.SDC,
         metrics=waymax_config.MetricsConfig(metrics_to_run=metric_names),
     )
+    if sim_agents == "idm":
+        # Non-ego agents follow their logged route with IDM speed control
+        # instead of replaying the log; ego still replays its (replaced) log.
+        env_cfg = dataclasses.replace(
+            env_cfg,
+            sim_agents=[
+                waymax_config.SimAgentConfig(
+                    agent_type=waymax_config.SimAgentType.IDM,
+                    controlled_objects=waymax_config.ObjectType.NON_SDC,
+                )
+            ],
+        )
+    elif sim_agents != "log":
+        raise ValueError(f"Unknown sim_agents '{sim_agents}'; expected 'log' or 'idm'.")
     env_obj = waymax_env.PlanningAgentEnvironment(
         dynamics_model=state_dynamics,
         config=env_cfg,
@@ -51,10 +67,11 @@ def rollout_predicted_trajectories_with_metrics(
     *,
     metric_names: tuple[str, ...] = _DEFAULT_METRIC_NAMES,
     rng_key: jax.Array | None = None,
+    sim_agents: str = "log",
 ):
     length = int(sim_state.log_trajectory.x.shape[-1])
     env_obj, actor = _build_rollout_env_and_actor(
-        metric_names, int(sim_state.log_trajectory.x.shape[1])
+        metric_names, int(sim_state.log_trajectory.x.shape[1]), sim_agents
     )
     key = jax.random.PRNGKey(0) if rng_key is None else rng_key
     rollout_out = _run_batched_rollout(
