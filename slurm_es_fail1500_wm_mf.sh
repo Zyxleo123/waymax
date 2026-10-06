@@ -22,8 +22,9 @@
 #   sbatch slurm_es_fail1500_wm_mf.sh idm "${CKPT}"
 set -euo pipefail
 
-SIM_AGENTS="${1:?Usage: sbatch slurm_es_fail1500_wm_mf.sh {log|idm} <world_model_ckpt.pt>}"
-WORLD_MODEL_CKPT="${2:?Usage: sbatch slurm_es_fail1500_wm_mf.sh {log|idm} <world_model_ckpt.pt>}"
+USAGE="Usage: sbatch slurm_es_fail1500_wm_mf.sh {log|idm} <world_model_ckpt.pt>"
+SIM_AGENTS="${1:?${USAGE}}"
+WORLD_MODEL_CKPT="${2:?${USAGE}}"
 case "${SIM_AGENTS}" in
   log|idm) ;;
   *) echo "ERROR: sim_agents must be log or idm, got '${SIM_AGENTS}'"; exit 1 ;;
