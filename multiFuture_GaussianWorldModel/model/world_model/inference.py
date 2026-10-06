@@ -13,7 +13,12 @@ from data.types import PreprocessConfig
 
 from .config import WorldModelConfig, canonicalize_planning_mode
 from .network import LatentMultiAgentWorldModel
-from .planning import pack_collision_worlds, score_independent_agent_collision
+from .planning import (
+    GaussianRiskParams,
+    pack_collision_worlds,
+    score_gaussian_independent_collision,
+    score_independent_agent_collision,
+)
 
 
 _DYNAMIC_TYPES = np.asarray(
@@ -46,6 +51,19 @@ def _rotate_by_plus_heading(xy: np.ndarray, heading: np.ndarray) -> np.ndarray:
     return np.stack([x * c - y * s, x * s + y * c], axis=-1)
 
 
+def _interp_time_axis(values: np.ndarray, src_t: np.ndarray, dst_t: np.ndarray, axis: int) -> np.ndarray:
+    """Linear interpolation along ``axis`` (clamped at the ends), vectorized."""
+    idx = np.clip(np.searchsorted(src_t, dst_t, side="right") - 1, 0, len(src_t) - 2)
+    span = src_t[idx + 1] - src_t[idx]
+    w = np.clip((dst_t - src_t[idx]) / span, 0.0, 1.0)
+    lo = np.take(values, idx, axis=axis)
+    hi = np.take(values, idx + 1, axis=axis)
+    shape = [1] * values.ndim
+    shape[axis] = len(dst_t)
+    w = w.reshape(shape)
+    return lo * (1.0 - w) + hi * w
+
+
 class WorldModelForecaster:
     """Runtime adapter from the learned latent world model to FM-ES scorer boxes.
 
@@ -73,6 +91,13 @@ class WorldModelForecaster:
         self.planning_mode = canonicalize_planning_mode(planning_mode or config.planning_mode)
         self._cache: dict[tuple[int, int, int, float], dict[str, np.ndarray]] = {}
         self._last_collision_debug: dict[str, Any] | None = None
+        self.gaussian_risk = GaussianRiskParams()
+
+    def configure_gaussian_risk(self, **overrides: Any) -> GaussianRiskParams:
+        """Override gaussian_independent knobs (None values keep the default)."""
+        kwargs = {key: value for key, value in overrides.items() if value is not None}
+        self.gaussian_risk = GaussianRiskParams(**kwargs)
+        return self.gaussian_risk
 
     @classmethod
     def from_checkpoint(
@@ -393,7 +418,65 @@ class WorldModelForecaster:
                 )
                 trajs.append(traj_i)
             out["traj_k"] = np.stack(trajs, axis=2).astype(np.float32)
+            sigma_k, sigma_yaw = self._decode_sigma(
+                pred["pred_sigma_xy_m_k"].detach().float().cpu().numpy(),
+                meta,
+                traj_length=traj_length,
+                dt=dt,
+            )
+            out["sigma_k"] = sigma_k
+            out["sigma_frame_yaw"] = sigma_yaw
         return out
+
+    def _decode_sigma(
+        self,
+        sigma_m_k: np.ndarray,
+        meta: dict[str, np.ndarray],
+        *,
+        traj_length: int,
+        dt: float,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Interpolate [B, N_modeled, K, S, 2] std (m) onto the ES horizon.
+
+        Returns sigma [B, N, K, H, 2] (0 at t=0 and for agents the model does
+        not move, i.e. static boxes) and the world yaw of the sigma frame [B, N].
+        """
+        yaw = meta["yaw"]
+        valid = meta["valid"]
+        is_sdc = meta["is_sdc"]
+        object_types = meta["object_types"]
+        t = int(meta["timestep"])
+        modeled_n = int(meta["modeled_agents"])
+        b, n_total, _ = yaw.shape
+        k = int(sigma_m_k.shape[2])
+
+        dst_t = np.arange(int(traj_length), dtype=np.float32) * float(dt)
+        src_t = np.concatenate(
+            [
+                np.asarray([0.0], dtype=np.float32),
+                np.arange(1, self.config.future_steps + 1, dtype=np.float32)
+                * float(self.config.future_dt),
+            ],
+            axis=0,
+        )
+        sig = sigma_m_k[:, :modeled_n]
+        sig = np.concatenate([np.zeros_like(sig[:, :, :, :1]), sig], axis=3)
+        sig = _interp_time_axis(sig, src_t, dst_t, axis=3)
+
+        # Same agents _decode_boxes moves; everything else stays a static box.
+        moved = (
+            valid[:, :modeled_n, t]
+            & np.isin(object_types[:, :modeled_n], _DYNAMIC_TYPES)
+            & ~is_sdc[:, :modeled_n]
+        )
+        out = np.zeros((b, n_total, k, int(traj_length), 2), dtype=np.float32)
+        out[:, :modeled_n] = np.where(moved[:, :, None, None, None], sig, 0.0)
+
+        if self.config.agent_frame_decoding:
+            frame_yaw = yaw[:, :, t].astype(np.float32)
+        else:
+            frame_yaw = np.broadcast_to(meta["ego_yaw"][:, None], (b, n_total)).astype(np.float32)
+        return out, frame_yaw
 
     def forecast(
         self,
@@ -453,6 +536,20 @@ class WorldModelForecaster:
         mode = canonicalize_planning_mode(planning_mode or self.planning_mode)
         cached = next(iter(self._cache.values()))
         idx = int(world_idx)
+        if mode == "gaussian_independent":
+            if "sigma_k" not in cached:
+                raise RuntimeError("gaussian_independent needs a forecast() cache with all modes decoded.")
+            score, debug = score_gaussian_independent_collision(
+                np.asarray(ego_trajectories_world, dtype=np.float32),
+                np.asarray(cached["traj_k"][idx]),
+                np.asarray(cached["sigma_k"][idx]),
+                np.asarray(cached["sigma_frame_yaw"][idx]),
+                np.asarray(cached["masks"][idx]),
+                np.asarray(cached["mode_probs"][idx]),
+                self.gaussian_risk,
+            )
+            self._last_collision_debug = debug
+            return score, debug
         if "traj_k" not in cached:
             # top1-only cache: synthesize K=1 from primary
             traj_k = np.asarray(cached["top1_traj"][idx])[:, None, ...]

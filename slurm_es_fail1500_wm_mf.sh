@@ -20,11 +20,19 @@
 #   CKPT=/zfsauton/scratch/ishanj/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20261005_092950/latest.pt
 #   sbatch slurm_es_fail1500_wm_mf.sh log "${CKPT}"
 #   sbatch slurm_es_fail1500_wm_mf.sh idm "${CKPT}"
+#
+# Planning mode via env (default expected_independent); any extra args are
+# forwarded to run_simulation.py and folded into the run name:
+#   WM_PLANNING_MODE=gaussian_independent sbatch slurm_es_fail1500_wm_mf.sh idm "${CKPT}"
+#   WM_PLANNING_MODE=gaussian_independent sbatch slurm_es_fail1500_wm_mf.sh idm "${CKPT}" \
+#     --wm_risk_gamma 1.0 --wm_risk_agent_reduce max
 set -euo pipefail
 
-USAGE="Usage: sbatch slurm_es_fail1500_wm_mf.sh {log|idm} <world_model_ckpt.pt>"
+USAGE="Usage: [WM_PLANNING_MODE=...] sbatch slurm_es_fail1500_wm_mf.sh {log|idm} <world_model_ckpt.pt> [extra run_simulation args]"
 SIM_AGENTS="${1:?${USAGE}}"
 WORLD_MODEL_CKPT="${2:?${USAGE}}"
+EXTRA_ARGS=("${@:3}")
+WM_PLANNING_MODE="${WM_PLANNING_MODE:-expected_independent}"
 case "${SIM_AGENTS}" in
   log|idm) ;;
   *) echo "ERROR: sim_agents must be log or idm, got '${SIM_AGENTS}'"; exit 1 ;;
@@ -49,7 +57,12 @@ export PYTHONPATH="${ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 # Tag runs with the checkpoint folder + file, e.g. 20261005_092950_latest.
 WM_RUN="$(basename "$(dirname "${WORLD_MODEL_CKPT}")")"
 WM_TAG="${WM_RUN#multiFuture_GaussianWorldModel_}_$(basename "${WORLD_MODEL_CKPT}" .pt)"
-RUN_NAME="es_fm_wm_mf_${WM_TAG}_expected_independent_${SIM_AGENTS}_fail1500"
+# e.g. "--wm_risk_gamma 1.0" -> "_gamma_1.0"
+EXTRA_TAG=""
+if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
+  EXTRA_TAG="_$(echo "${EXTRA_ARGS[*]}" | sed -e 's/--wm_risk_//g' -e 's/--//g' | tr ' ' '_')"
+fi
+RUN_NAME="es_fm_wm_mf_${WM_TAG}_${WM_PLANNING_MODE}${EXTRA_TAG}_${SIM_AGENTS}_fail1500"
 EXP_DIR="${EXP_ROOT}/${RUN_NAME}"
 LOG_FILE="${EXP_ROOT}/logs/${RUN_NAME}_$(date +%Y%m%d_%H%M%S).log"
 mkdir -p "${EXP_DIR}" "${EXP_ROOT}/logs"
@@ -61,7 +74,7 @@ for p in "${TARGET_JSON}" "${TFRECORD_DIR}/training" "${LANE_GRAPH_DIR}" "${WORL
   fi
 done
 
-echo "RUN_NAME=${RUN_NAME}  sim_agents=${SIM_AGENTS}  ckpt=${WORLD_MODEL_CKPT}" | tee -a "${LOG_FILE}"
+echo "RUN_NAME=${RUN_NAME}  sim_agents=${SIM_AGENTS}  ckpt=${WORLD_MODEL_CKPT}  planning_mode=${WM_PLANNING_MODE}  extra=${EXTRA_ARGS[*]:-}" | tee -a "${LOG_FILE}"
 
 CMD=(
   python "${ROOT}/simulation/run_simulation.py"
@@ -93,7 +106,8 @@ CMD=(
   --num_collision_worlds 1
   --collision_reduce any
   --collision_sample_seed 0
-  --wm_planning_mode expected_independent
+  --wm_planning_mode "${WM_PLANNING_MODE}"
+  ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
 )
 
 set +e

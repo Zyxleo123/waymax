@@ -10,6 +10,7 @@ PLANNING_MODES = (
     "top1",
     "expected_independent",
     "worst_case_independent",
+    "gaussian_independent",
 )
 DECODER_TYPES = ("per_step", "direct")
 
@@ -72,7 +73,8 @@ class WorldModelConfig:
     collision_focus_weight: float = 2.0
 
     # Planner-facing collision risk: top1 | expected_independent | worst_case_independent
-    # (aliases: expected, worst_case). Modes are agent-wise, not scene-joint.
+    # | gaussian_independent (aliases: expected, worst_case). Modes are agent-wise,
+    # not scene-joint.
     planning_mode: str = "top1"
 
     def __post_init__(self) -> None:

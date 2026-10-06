@@ -129,14 +129,30 @@ def _parse_args() -> argparse.Namespace:
             "top1",
             "expected_independent",
             "worst_case_independent",
+            "gaussian_independent",
             # Legacy aliases (canonicalize to *_independent inside multifuture).
             "expected",
             "worst_case",
         ],
         help="Multifuture WM only: agent-wise collision risk. "
-        "top1 | expected_independent | worst_case_independent "
+        "top1 | expected_independent | worst_case_independent | gaussian_independent "
         "(aliases: expected, worst_case). Default: checkpoint config.",
     )
+    # gaussian_independent knobs (unset = GaussianRiskParams defaults).
+    parser.add_argument("--wm_risk_t_commit", type=float, default=None,
+                        help="gaussian_independent: full collision weight up to this time (s). Default 1.0.")
+    parser.add_argument("--wm_risk_gamma", type=float, default=None,
+                        help="gaussian_independent: per-0.1s decay of collision weight after t_commit. Default 0.9.")
+    parser.add_argument("--wm_risk_w_min", type=float, default=None,
+                        help="gaussian_independent: floor on the time weight. Default 0.3.")
+    parser.add_argument("--wm_risk_eps", type=float, default=None,
+                        help="gaussian_independent: drop per-agent risk below this. Default 0.01.")
+    parser.add_argument("--wm_risk_sigma_floor", type=float, default=None,
+                        help="gaussian_independent: minimum std (m). Default 0.05.")
+    parser.add_argument("--wm_risk_radius", type=float, default=None,
+                        help="gaussian_independent: ignore agents farther than this (m) at t=0. Default off.")
+    parser.add_argument("--wm_risk_agent_reduce", type=str, default=None, choices=["product", "max"],
+                        help="gaussian_independent: combine agents as prod(1-p_i) or 1-max(p_i). Default product.")
     parser.add_argument(
         "--wm_refresh_steps",
         type=int,
@@ -305,6 +321,18 @@ def _load_world_model_forecaster(args: argparse.Namespace):
             device=device,
             planning_mode=planning_mode,
         )
+        if hasattr(forecaster, "configure_gaussian_risk"):
+            risk = forecaster.configure_gaussian_risk(
+                t_commit_s=args.wm_risk_t_commit,
+                gamma=args.wm_risk_gamma,
+                w_min=args.wm_risk_w_min,
+                eps=args.wm_risk_eps,
+                sigma_floor_m=args.wm_risk_sigma_floor,
+                radius_m=args.wm_risk_radius,
+                agent_reduce=args.wm_risk_agent_reduce,
+            )
+            if getattr(forecaster, "planning_mode", None) == "gaussian_independent":
+                print(f"[wm] gaussian_independent risk params: {risk}")
         if not hasattr(forecaster, "num_collision_worlds"):
             forecaster.num_collision_worlds = 1
         if not hasattr(forecaster, "collision_reduce"):
