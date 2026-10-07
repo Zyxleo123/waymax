@@ -270,3 +270,227 @@ def score_independent_agent_collision(
         planning_mode=planning_mode,
         agent_valid=agent_valid,
     )
+
+
+# ---------------------------------------------------------------------------
+# MF collision-method ablation (opt-in via mf_collision_method; the planning
+# modes above are untouched).
+#
+#   P(C_i | tau) = sum_k w_ik * c_ik(tau),   S(tau) = prod_i (1 - P(C_i | tau))
+#
+#   mean_uniform      c_ik = SAT hit on the mode mean,           w_ik = 1/K
+#   mean_learned      c_ik = SAT hit on the mode mean,           w_ik = p_ik
+#                     (== expected_independent)
+#   gaussian_uniform  c_ik = fraction of M samples x ~ N(mu_ik, diag sigma_ik^2)
+#                     that hit (same SAT),                       w_ik = 1/K
+#   gaussian_learned  same c_ik as gaussian_uniform,             w_ik = p_ik
+# ---------------------------------------------------------------------------
+
+MF_COLLISION_METHODS = ("mean_uniform", "mean_learned", "gaussian_uniform", "gaussian_learned")
+_MF_COLLISION_ALIASES = {"expected_independent": "mean_learned"}
+
+
+def canonicalize_mf_collision_method(method: str) -> str:
+    m = _MF_COLLISION_ALIASES.get(str(method).strip().lower(), str(method).strip().lower())
+    if m not in MF_COLLISION_METHODS:
+        raise ValueError(
+            f"mf_collision_method must be one of {MF_COLLISION_METHODS} "
+            f"(alias: expected_independent), got {method!r}"
+        )
+    return m
+
+
+def mf_uses_sampling(method: str) -> bool:
+    return canonicalize_mf_collision_method(method).startswith("gaussian_")
+
+
+def mf_mode_weights(method: str, mode_probs: np.ndarray) -> np.ndarray:
+    """[N, K] weights: learned p_ik (normalized as in expected_independent) or exactly 1/K."""
+    m = canonicalize_mf_collision_method(method)
+    probs = _normalize_mode_probs(np.asarray(mode_probs, dtype=np.float32))
+    if m.endswith("_learned"):
+        return probs
+    return np.full(probs.shape, 1.0 / probs.shape[-1], dtype=np.float32)
+
+
+def combine_mf_collision(
+    collision_eik: np.ndarray,
+    weights: np.ndarray,
+    agent_valid: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """S = prod_i (1 - sum_k w_ik c_eik) over active agents.
+
+    ``collision_eik`` may be hard (bool) or sampled (float in [0, 1]). Same
+    arithmetic as the expected_independent branch, so mean_learned matches it
+    bit-for-bit.
+    """
+    c = np.asarray(collision_eik).astype(np.float32)
+    active = np.asarray(agent_valid, dtype=bool).astype(np.float32)
+    p_collision_i = (c * np.asarray(weights, dtype=np.float32)[None, :, :]).sum(axis=-1)
+    p_collision_i = p_collision_i * active[None, :]
+    score = np.prod(1.0 - p_collision_i, axis=-1).astype(np.float32)
+    return score, p_collision_i.astype(np.float32)
+
+
+@jax.jit
+def _any_timestep_hits(ego_poly: jax.Array, obj: jax.Array, valid_t: jax.Array) -> jax.Array:
+    """Same SAT reduction as ego_agent_mode_collisions, jitted for fixed chunk shapes.
+
+    ego_poly [E, T, 4, 2], obj [O, T, 5], valid_t [T, O] -> [E, O] any-timestep hit.
+    """
+    obj_poly = polygon_corners(obj)
+    hits_t = jax.vmap(pairwise_intersections, in_axes=(1, 1), out_axes=0)(ego_poly, obj_poly)
+    return jnp.any(hits_t & valid_t[:, None, :], axis=0)
+
+
+def sampled_mode_collision_prob(
+    ego_trajectories: np.ndarray,
+    traj_k: np.ndarray,
+    sample_noise_k: np.ndarray,
+    agent_masks: np.ndarray,
+    mean_collision_eik: np.ndarray,
+    *,
+    max_pairs_per_call: int = 2_500_000,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """c_hat[e, i, k] = mean over M samples of the SAT hit with sampled agent boxes.
+
+    ego_trajectories [E, T, 5]; traj_k [N, K, T, 5] mode means; sample_noise_k
+    [N, K, M, T, 2] xy offsets (world frame) added to the means; agent_masks [N, T].
+    Agents with all-zero noise (static / unmodeled / invalid) have every sample
+    equal to the mean, so they reuse ``mean_collision_eik`` instead of M SAT calls.
+
+    Returns (c_hat [E, N, K] float32, sampled-agent mask [N], number of
+    (ego, agent-sample) trajectory checks run).
+    """
+    ego = np.asarray(ego_trajectories, dtype=np.float32)
+    traj = np.asarray(traj_k, dtype=np.float32)
+    noise = np.asarray(sample_noise_k, dtype=np.float32)
+    masks = np.asarray(agent_masks, dtype=bool)
+    e, t = ego.shape[:2]
+    n, k = traj.shape[:2]
+    m = noise.shape[2]
+    if noise.shape != (n, k, m, t, 2):
+        raise ValueError(f"sample_noise_k must be [N, K, M, T, 2]=[{n}, {k}, M, {t}, 2], got {noise.shape}")
+
+    c_hat = np.asarray(mean_collision_eik, dtype=np.float32).copy()
+    sampled = masks.any(axis=-1) & np.any(noise != 0.0, axis=(1, 2, 3, 4))
+    idx = np.nonzero(sampled)[0]
+    if idx.size == 0:
+        return c_hat, sampled, 0
+
+    # Fixed agent-chunk size keeps jitted shapes constant across calls.
+    chunk = max(1, int(max_pairs_per_call) // max(1, e * k * m * t))
+    ego_poly = polygon_corners(jnp.asarray(ego))
+    for start in range(0, idx.size, chunk):
+        sel = idx[start : start + chunk]
+        pad = np.concatenate([sel, np.full(chunk - sel.size, sel[0])]) if sel.size < chunk else sel
+        obj = np.repeat(traj[pad][:, :, None], m, axis=2)  # [C, K, M, T, 5]
+        obj[..., :2] += noise[pad]
+        valid = np.repeat(masks[pad][:, None, None, :], k * m, axis=1).reshape(-1, t)  # [C*K*M, T]
+        valid[sel.size * k * m :] = False
+        hits = _any_timestep_hits(ego_poly, jnp.asarray(obj.reshape(-1, t, 5)), jnp.asarray(valid.T))
+        hits = np.asarray(hits).reshape(e, chunk, k, m)[:, : sel.size]
+        c_hat[:, sel] = hits.mean(axis=-1, dtype=np.float32)
+    return c_hat, sampled, int(e * idx.size * k * m)
+
+
+class MFCollisionDiagnostics:
+    """Running aggregates for the gaussian_* methods (sampled agents only).
+
+    c_hat takes values j/M, so a histogram over j gives exact quantiles.
+    """
+
+    def __init__(self, method: str, num_samples: int, num_modes: int) -> None:
+        self.method = method
+        self.m = int(num_samples)
+        self.k = int(num_modes)
+        self.n_predictions = 0
+        self.n_score_calls = 0
+        self.n_traj_checks = 0
+        self.n_box_checks = 0
+        self.hist = np.zeros(self.m + 1, dtype=np.int64)
+        self.mode_sum = np.zeros(self.k, dtype=np.float64)
+        self.mode_cnt = np.zeros(self.k, dtype=np.int64)
+        self.p_agent_sum = 0.0
+        self.p_agent_cnt = 0
+        self.mean0 = self.mean0_hat_pos = 0
+        self.mean1 = self.mean1_hat_lt1 = 0
+        self.score_absdiff_sum = 0.0
+        self.score_changed = 0
+        self.n_candidates = 0
+
+    def update(
+        self,
+        c_hat: np.ndarray,
+        c_mean: np.ndarray,
+        sampled: np.ndarray,
+        p_collision_i: np.ndarray,
+        score: np.ndarray,
+        score_mean_method: np.ndarray,
+        n_traj_checks: int,
+        horizon: int,
+    ) -> None:
+        self.n_score_calls += 1
+        self.n_traj_checks += int(n_traj_checks)
+        self.n_box_checks += int(n_traj_checks) * int(horizon)
+        self.n_candidates += int(score.shape[0])
+        d = np.abs(np.asarray(score, np.float64) - np.asarray(score_mean_method, np.float64))
+        self.score_absdiff_sum += float(d.sum())
+        self.score_changed += int((d > 1e-6).sum())
+        if not np.any(sampled):
+            return
+        ch = c_hat[:, sampled]  # [E, Ns, K]
+        cm = c_mean[:, sampled]
+        self.hist += np.bincount(np.rint(ch * self.m).astype(np.int64).ravel(), minlength=self.m + 1)[: self.m + 1]
+        self.mode_sum += ch.sum(axis=(0, 1))
+        self.mode_cnt += ch.shape[0] * ch.shape[1]
+        p = p_collision_i[:, sampled]
+        self.p_agent_sum += float(p.sum())
+        self.p_agent_cnt += int(p.size)
+        self.mean0 += int((~cm).sum())
+        self.mean0_hat_pos += int(((~cm) & (ch > 0)).sum())
+        self.mean1 += int(cm.sum())
+        self.mean1_hat_lt1 += int((cm & (ch < 1)).sum())
+
+    def _quantile(self, q: float) -> float | None:
+        total = int(self.hist.sum())
+        if total == 0:
+            return None
+        j = int(np.searchsorted(np.cumsum(self.hist), q * total, side="left"))
+        return j / self.m
+
+    def to_dict(self) -> dict[str, Any]:
+        total = int(self.hist.sum())
+        pct = lambda a, b: (100.0 * a / b) if b else None  # noqa: E731
+        return {
+            "mf_collision_method": self.method,
+            "gaussian_num_samples": self.m,
+            "num_modes": self.k,
+            "n_predictions_sampled": self.n_predictions,
+            "n_score_calls": self.n_score_calls,
+            "total_sat_trajectory_checks": self.n_traj_checks,
+            "total_sat_box_checks": self.n_box_checks,
+            "scope": "agent-mode pairs of valid, modeled dynamic agents (the only ones that receive noise)",
+            "n_agent_mode_pairs": total,
+            "c_hat_mean": float((self.hist * np.arange(self.m + 1)).sum() / (self.m * total)) if total else None,
+            "c_hat_per_mode_mean": (self.mode_sum / np.maximum(self.mode_cnt, 1)).tolist(),
+            "agent_collision_prob_mean": self.p_agent_sum / self.p_agent_cnt if self.p_agent_cnt else None,
+            "pct_pairs_mean0_sampled_gt0": pct(self.mean0_hat_pos, total),
+            "pct_pairs_mean1_sampled_lt1": pct(self.mean1_hat_lt1, total),
+            "pct_of_mean0_pairs_with_sampled_gt0": pct(self.mean0_hat_pos, self.mean0),
+            "pct_of_mean1_pairs_with_sampled_lt1": pct(self.mean1_hat_lt1, self.mean1),
+            "c_hat_summary": {
+                "mean": float((self.hist * np.arange(self.m + 1)).sum() / (self.m * total)) if total else None,
+                "median": self._quantile(0.5),
+                "p25": self._quantile(0.25),
+                "p75": self._quantile(0.75),
+                "frac_eq_0": self.hist[0] / total if total else None,
+                "frac_eq_1": self.hist[-1] / total if total else None,
+                "frac_between": self.hist[1:-1].sum() / total if total else None,
+                "hist_j_over_M": self.hist.tolist(),
+            },
+            "score_vs_mean_method": {
+                "mean_abs_diff": self.score_absdiff_sum / self.n_candidates if self.n_candidates else None,
+                "frac_candidates_changed": self.score_changed / self.n_candidates if self.n_candidates else None,
+            },
+        }

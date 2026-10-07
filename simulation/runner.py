@@ -72,6 +72,22 @@ def _load_completed_scenarios(start_from: str | None) -> set[tuple[str, int]]:
     return completed
 
 
+def _count_completed_results(start_from: str | None) -> tuple[int, int, int]:
+    """(tested, goal_reached, success) over per-scenario JSONs already in start_from."""
+    if not start_from or not Path(start_from).exists():
+        return 0, 0, 0
+    tested = reached = success = 0
+    for result_path in Path(start_from).rglob("*.json"):
+        if _SCENARIO_RESULT_RE.match(result_path.name) is None:
+            continue
+        with open(result_path, "r") as f:
+            result = json.load(f)
+        tested += 1
+        reached += int(bool(result.get("goal_reached", False)))
+        success += int(bool(result.get("success", False)))
+    return tested, reached, success
+
+
 def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]]:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -86,6 +102,8 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
     tested_scenarios, curr_scenario_index = 0, 0
     target_scenario_cursor = 0
     reached_all, success_all = 0, 0
+    if completed_scenarios:
+        tested_scenarios, reached_all, success_all = _count_completed_results(getattr(args, "start_from", None))
     tfrecord_paths = sorted(glob(str(Path(args.tfrecord_dir) / "*")))
     if not tfrecord_paths:
         raise FileNotFoundError(f"No tfrecords found under {args.tfrecord_dir}")
@@ -184,7 +202,12 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
             if not scenario_indices:
                 break
         try:
-            sim_state, _ = load_scenario_state_batch_fast(ds_cfg, scenario_indices)
+            sim_state, _, scenario_ids = load_scenario_state_batch_fast(
+                ds_cfg, scenario_indices, return_scenario_ids=True
+            )
+            wm_forecaster = getattr(planner, "world_model_forecaster", None)
+            if hasattr(wm_forecaster, "set_scene_ids"):
+                wm_forecaster.set_scene_ids(scenario_ids)
         except Exception as e:
             print(f"Error loading scenarios {scenario_indices} from {os.path.basename(tfrecord_path)}: {e}")
             if not _advance_tfrecord():

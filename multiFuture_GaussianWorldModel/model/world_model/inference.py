@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import atexit
+import json
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +16,17 @@ from data.types import PreprocessConfig
 
 from .config import WorldModelConfig, canonicalize_planning_mode
 from .network import LatentMultiAgentWorldModel
-from .planning import pack_collision_worlds, score_independent_agent_collision
+from .planning import (
+    MFCollisionDiagnostics,
+    canonicalize_mf_collision_method,
+    combine_mf_collision,
+    ego_agent_mode_collisions,
+    mf_mode_weights,
+    mf_uses_sampling,
+    pack_collision_worlds,
+    sampled_mode_collision_prob,
+    score_independent_agent_collision,
+)
 
 
 _DYNAMIC_TYPES = np.asarray(
@@ -65,6 +78,11 @@ class WorldModelForecaster:
         *,
         device: str | torch.device = "cpu",
         planning_mode: str | None = None,
+        mf_collision_method: str | None = None,
+        mf_gaussian_num_samples: int = 8,
+        mf_gaussian_seed: int = 0,
+        mf_diagnostics_dir: str | None = None,
+        mf_debug_dump: bool = False,
     ) -> None:
         self.config = config
         self.device = torch.device(device)
@@ -74,6 +92,25 @@ class WorldModelForecaster:
         self._cache: dict[tuple[int, int, int, float], dict[str, np.ndarray]] = {}
         self._last_collision_debug: dict[str, Any] | None = None
 
+        # Collision-method ablation; None keeps planning_mode scoring unchanged.
+        self.mf_collision_method = (
+            canonicalize_mf_collision_method(mf_collision_method) if mf_collision_method else None
+        )
+        self.mf_gaussian_num_samples = int(mf_gaussian_num_samples)
+        self.mf_gaussian_seed = int(mf_gaussian_seed)
+        self.mf_diagnostics_dir = mf_diagnostics_dir
+        self.mf_debug_dump = bool(mf_debug_dump)
+        self._mf_scene_ids: list[str] | None = None
+        self._mf_diag: MFCollisionDiagnostics | None = None
+        if self.mf_collision_method and mf_uses_sampling(self.mf_collision_method):
+            if self.mf_gaussian_num_samples < 1:
+                raise ValueError("mf_gaussian_num_samples must be >= 1")
+            self._mf_diag = MFCollisionDiagnostics(
+                self.mf_collision_method, self.mf_gaussian_num_samples, int(config.num_modes)
+            )
+            if self.mf_diagnostics_dir:
+                atexit.register(self.write_mf_diagnostics)
+
     @classmethod
     def from_checkpoint(
         cls,
@@ -81,6 +118,7 @@ class WorldModelForecaster:
         *,
         device: str | torch.device = "cpu",
         planning_mode: str | None = None,
+        **mf_kwargs: Any,
     ) -> "WorldModelForecaster":
         path = Path(checkpoint_path).expanduser()
         if path.is_dir():
@@ -96,7 +134,7 @@ class WorldModelForecaster:
         state = checkpoint.get("model_state_dict", checkpoint)
         model.load_state_dict(state, strict=True)
         mode = canonicalize_planning_mode(planning_mode if planning_mode is not None else config.planning_mode)
-        forecaster = cls(model, config, device=device, planning_mode=mode)
+        forecaster = cls(model, config, device=device, planning_mode=mode, **mf_kwargs)
         # Independent-agent risk is scored via score_independent_mode_collision;
         # do not advertise K joint worlds to the gaussian ensemble SAT path.
         forecaster.num_collision_worlds = 1
@@ -349,6 +387,81 @@ class WorldModelForecaster:
         ).copy()
         return trajectories, masks
 
+    def set_scene_ids(self, scene_ids: list[str] | None) -> None:
+        """WOMD scenario/id per batch element (batch order), set by the runner for each loaded batch."""
+        self._mf_scene_ids = None if scene_ids is None else [str(s) for s in scene_ids]
+        if self.mf_collision_method is not None:
+            self._cache.clear()
+
+    def _mf_sample_seed(self, meta: dict[str, np.ndarray], world_idx: int) -> np.random.SeedSequence:
+        """(mf_gaussian_seed, crc32(WOMD scenario/id), replan timestep) for one batch element."""
+        ids = getattr(self, "_mf_scene_ids", None)
+        b = int(meta["x"].shape[0])
+        if ids is None or len(ids) != b:
+            raise RuntimeError(
+                f"gaussian_* collision methods need set_scene_ids() with {b} WOMD scenario ids "
+                f"for this batch, got {None if ids is None else len(ids)}."
+            )
+        return np.random.SeedSequence(
+            [self.mf_gaussian_seed, zlib.crc32(ids[world_idx].encode()), int(meta["timestep"])]
+        )
+
+    def _sample_gaussian_noise(
+        self,
+        sigma_m_k: np.ndarray,
+        meta: dict[str, np.ndarray],
+        *,
+        traj_length: int,
+        dt: float,
+    ) -> np.ndarray:
+        """World-frame xy offsets [B, N, K, M, H, 2] such that mean + offset ~ the model's Gaussian.
+
+        The model's density is an independent diagonal Gaussian per (agent, mode,
+        model step, axis) with std sigma (metres) in the anchor ego frame, so
+        eps ~ N(0, I) is scaled by sigma, rotated to the world frame and linearly
+        interpolated to dt exactly like the means in ``_decode_boxes`` (current
+        pose fixed, zero offset). Agents that _decode_boxes keeps static get zero.
+        Each scene draws from its own RNG, so its samples do not depend on the
+        rest of the batch or its order.
+        """
+        b, n_mod, k, t_model, _ = sigma_m_k.shape
+        m = int(self.mf_gaussian_num_samples)
+        eps = np.stack(
+            [
+                np.random.default_rng(self._mf_sample_seed(meta, bi)).standard_normal(
+                    (n_mod, k, m, t_model, 2), dtype=np.float32
+                )
+                for bi in range(b)
+            ],
+            axis=0,
+        )
+        local = eps * sigma_m_k[:, :, :, None].astype(np.float32)
+        world = _rotate_by_plus_heading(local, meta["ego_yaw"][:, None, None, None, None]).astype(np.float32)
+
+        horizon = int(traj_length)
+        dst_t = np.arange(horizon, dtype=np.float32) * float(dt)
+        src_t = np.concatenate(
+            [[0.0], np.arange(1, self.config.future_steps + 1, dtype=np.float32) * float(self.config.future_dt)]
+        ).astype(np.float32)
+        # interp_w[h, j] reproduces np.interp(dst_t, src_t, .) as a linear map; column 0 is the noise-free current pose.
+        interp_w = np.stack(
+            [np.interp(dst_t, src_t, np.eye(src_t.size, dtype=np.float32)[j]) for j in range(src_t.size)], axis=-1
+        ).astype(np.float32)
+        noise = np.einsum("hj,bnkmjc->bnkmhc", interp_w[:, 1:], world).astype(np.float32)
+
+        t = int(meta["timestep"])
+        keep = (
+            meta["valid"][:, :n_mod, t]
+            & np.isin(meta["object_types"][:, :n_mod], _DYNAMIC_TYPES)
+            & ~meta["is_sdc"][:, :n_mod]
+        )
+        noise *= keep[:, :, None, None, None, None]
+        n_total = meta["x"].shape[1]
+        if n_total > n_mod:
+            pad = np.zeros((b, n_total - n_mod, k, m, horizon, 2), dtype=np.float32)
+            noise = np.concatenate([noise, pad], axis=1)
+        return noise
+
     def _predict_all_worlds(
         self,
         sim_state: Any,
@@ -393,6 +506,25 @@ class WorldModelForecaster:
                 )
                 trajs.append(traj_i)
             out["traj_k"] = np.stack(trajs, axis=2).astype(np.float32)
+            if self.mf_collision_method and mf_uses_sampling(self.mf_collision_method):
+                # One draw per WM prediction, shared by every ES round / candidate / world of this replan.
+                out["sample_noise_k"] = self._sample_gaussian_noise(
+                    pred["pred_sigma_xy_m_k"].detach().float().cpu().numpy(),
+                    meta,
+                    traj_length=traj_length,
+                    dt=dt,
+                )
+                if self._mf_diag is not None:
+                    self._mf_diag.n_predictions += 1
+                if self.mf_debug_dump and self.mf_diagnostics_dir:
+                    dump_dir = Path(self.mf_diagnostics_dir) / "mf_samples_debug"
+                    dump_dir.mkdir(parents=True, exist_ok=True)
+                    np.savez_compressed(
+                        dump_dir / f"pred{self._mf_diag.n_predictions:06d}_t{int(timestep):03d}.npz",
+                        sample_noise_k=out["sample_noise_k"],
+                        traj_k=out["traj_k"],
+                        mode_probs=mode_probs,
+                    )
         return out
 
     def forecast(
@@ -450,6 +582,8 @@ class WorldModelForecaster:
             raise RuntimeError(
                 "Call forecast() once to cache multimodal futures before independent-mode scoring."
             )
+        if self.mf_collision_method is not None:
+            return self._score_mf_collision_method(ego_trajectories_world, world_idx=int(world_idx))
         mode = canonicalize_planning_mode(planning_mode or self.planning_mode)
         cached = next(iter(self._cache.values()))
         idx = int(world_idx)
@@ -470,6 +604,47 @@ class WorldModelForecaster:
         )
         self._last_collision_debug = debug
         return score, debug
+
+    def _score_mf_collision_method(
+        self, ego_trajectories_world: np.ndarray, *, world_idx: int
+    ) -> tuple[np.ndarray, dict[str, Any]]:
+        """mean_* / gaussian_* scoring against the cached prediction (see planning.py)."""
+        method = self.mf_collision_method
+        cached = next(iter(self._cache.values()))
+        ego = np.asarray(ego_trajectories_world, dtype=np.float32)
+        traj_k = np.asarray(cached["traj_k"][world_idx])
+        probs = np.asarray(cached["mode_probs"][world_idx])
+        masks = np.asarray(cached["masks"][world_idx])
+        agent_valid = masks.any(axis=-1)
+        weights = mf_mode_weights(method, probs)
+
+        c_mean = ego_agent_mode_collisions(ego, traj_k, masks)  # [E, N, K] existing SAT on mode means
+        debug: dict[str, Any] = {"mf_collision_method": method, "weights": weights, "c_mean": c_mean}
+        if not mf_uses_sampling(method):
+            score, p_collision_i = combine_mf_collision(c_mean, weights, agent_valid)
+        else:
+            c_hat, sampled, n_checks = sampled_mode_collision_prob(
+                ego, traj_k, cached["sample_noise_k"][world_idx], masks, c_mean
+            )
+            score, p_collision_i = combine_mf_collision(c_hat, weights, agent_valid)
+            score_mean, _ = combine_mf_collision(c_mean, weights, agent_valid)
+            debug.update({"c_hat": c_hat, "sampled_agents": sampled, "n_sat_trajectory_checks": n_checks})
+            if self._mf_diag is not None:
+                self._mf_diag.update(
+                    c_hat, c_mean, sampled, p_collision_i, score, score_mean, n_checks, ego.shape[1]
+                )
+                if self.mf_diagnostics_dir and self._mf_diag.n_score_calls % 500 == 0:
+                    self.write_mf_diagnostics()
+        debug.update({"p_collision_i": p_collision_i, "collision_score": score})
+        self._last_collision_debug = debug
+        return score, debug
+
+    def write_mf_diagnostics(self) -> None:
+        if self._mf_diag is None or not self.mf_diagnostics_dir:
+            return
+        path = Path(self.mf_diagnostics_dir) / "mf_collision_diagnostics.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self._mf_diag.to_dict(), indent=2))
 
     def forecast_modes(
         self,

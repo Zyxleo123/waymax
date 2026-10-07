@@ -138,6 +138,21 @@ def _parse_args() -> argparse.Namespace:
         "(aliases: expected, worst_case). Default: checkpoint config.",
     )
     parser.add_argument(
+        "--mf_collision_method",
+        type=str,
+        default=None,
+        choices=["mean_uniform", "mean_learned", "gaussian_uniform", "gaussian_learned", "expected_independent"],
+        help="Multifuture WM only: collision-scoring ablation. Unset = --wm_planning_mode scoring. "
+        "mean_* = SAT on mode means; gaussian_* = SAT on M samples per mode; "
+        "*_uniform = w=1/K, *_learned = w=p_k. expected_independent = mean_learned.",
+    )
+    parser.add_argument("--mf_gaussian_num_samples", type=int, default=8,
+                        help="gaussian_* only: samples M per (agent, mode), drawn once per WM prediction.")
+    parser.add_argument("--mf_gaussian_seed", type=int, default=0,
+                        help="gaussian_* only: base seed (combined with scene fingerprint and timestep).")
+    parser.add_argument("--mf_collision_debug_dump", action="store_true",
+                        help="gaussian_* only: dump per-prediction sample noise to <output_dir>/mf_samples_debug/.")
+    parser.add_argument(
         "--wm_refresh_steps",
         type=int,
         default=10,
@@ -191,6 +206,7 @@ def _load_isolated_wm_forecaster(
     checkpoint_path: str,
     device: str,
     planning_mode: str | None = None,
+    extra_kwargs: dict[str, Any] | None = None,
 ):
     """Load a package-local WorldModelForecaster without clashing with repo ``model``/``data``."""
     import importlib
@@ -231,6 +247,12 @@ def _load_isolated_wm_forecaster(
         # Only multifuture accepts planning_mode today.
         if planning_mode is not None:
             load_kwargs["planning_mode"] = planning_mode
+        if extra_kwargs:
+            # Never silently drop requested ablation options on the TypeError fallback.
+            forecaster = inference.WorldModelForecaster.from_checkpoint(
+                checkpoint_path, **load_kwargs, **extra_kwargs
+            )
+            return forecaster
         try:
             forecaster = inference.WorldModelForecaster.from_checkpoint(
                 checkpoint_path,
@@ -291,22 +313,42 @@ def _load_world_model_forecaster(args: argparse.Namespace):
         planning_mode = None
         if backend == "multifuture" and getattr(args, "wm_planning_mode", None):
             planning_mode = str(args.wm_planning_mode)
+        extra_kwargs = None
+        if getattr(args, "mf_collision_method", None):
+            if backend != "multifuture":
+                raise ValueError("--mf_collision_method requires --wm_backend multifuture.")
+            extra_kwargs = {
+                "mf_collision_method": str(args.mf_collision_method),
+                "mf_gaussian_num_samples": int(args.mf_gaussian_num_samples),
+                "mf_gaussian_seed": int(args.mf_gaussian_seed),
+                "mf_diagnostics_dir": str(args.output_dir),
+                "mf_debug_dump": bool(args.mf_collision_debug_dump),
+            }
         forecaster = _load_isolated_wm_forecaster(
             pkg_root,
             checkpoint_path=str(args.world_model_ckpt),
             device=device,
             planning_mode=planning_mode,
+            extra_kwargs=extra_kwargs,
         )
         if not hasattr(forecaster, "num_collision_worlds"):
             forecaster.num_collision_worlds = 1
         if not hasattr(forecaster, "collision_reduce"):
             forecaster.collision_reduce = "any"
+        if extra_kwargs:
+            args.mf_num_modes = int(forecaster.config.num_modes)
 
     print(
         f"[wm] backend={backend} loaded {args.world_model_ckpt} on {device}; "
         f"wm_refresh_steps={int(args.wm_refresh_steps)}; "
         f"num_collision_worlds={int(getattr(forecaster, 'num_collision_worlds', 1))}; "
         f"collision_reduce={getattr(forecaster, 'collision_reduce', 'any')}"
+        + (
+            f"; mf_collision_method={forecaster.mf_collision_method}"
+            f" M={forecaster.mf_gaussian_num_samples} seed={forecaster.mf_gaussian_seed}"
+            if getattr(forecaster, "mf_collision_method", None)
+            else ""
+        )
     )
     return forecaster
 
@@ -599,7 +641,62 @@ def main(args: argparse.Namespace) -> None:
         )
     elif args.planner == "log-replay":
         planner = None
+    if getattr(args, "mf_collision_method", None):
+        _write_mf_experiment_config(args)
     run(args, planner, log_replay=(args.planner == "log-replay"))
+
+
+def _write_mf_experiment_config(args: argparse.Namespace) -> None:
+    """experiment_config.json for MF collision-method ablation runs (written to the run dir and exp dir)."""
+    import subprocess
+
+    try:
+        git_hash = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        dirty = bool(subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "status", "--porcelain"], capture_output=True, text=True
+        ).stdout.strip())
+    except Exception:
+        git_hash, dirty = None, None
+    num_scenes = None
+    if args.target_scenario_path and os.path.exists(args.target_scenario_path):
+        with open(args.target_scenario_path) as f:
+            targets = json.load(f)
+        num_scenes = min(sum(len(v) for v in targets.values()), int(args.num_scenarios))
+    method = str(args.mf_collision_method)
+    uses_sampling = method.startswith("gaussian_")
+    config = {
+        "planner": {"es": "diffusion_es", "es_fm": "flow_matching_es"}.get(args.planner, args.planner),
+        "mf_collision_method": "mean_learned" if method == "expected_independent" else method,
+        "num_modes": getattr(args, "mf_num_modes", None),
+        "gaussian_num_samples": int(args.mf_gaussian_num_samples) if uses_sampling else None,
+        "mf_gaussian_seed": int(args.mf_gaussian_seed),
+        "random_seed": int(args.seed),
+        "world_model_checkpoint": args.world_model_ckpt,
+        "wm_backend": args.wm_backend,
+        "planner_checkpoint": args.fm_ckpt_path if args.planner == "es_fm" else args.diffusion_ckpt_path,
+        "es": {
+            "population_size": args.population_size,
+            "elite_size": args.elite_size,
+            "num_es_iterations": args.num_es_iterations,
+            "resample_timesteps": args.resample_timesteps if args.planner == "es" else None,
+            "resample_t_start": args.resample_t_start if args.planner == "es_fm" else None,
+            "resample_num_steps": args.resample_num_steps if args.planner == "es_fm" else None,
+            "fm_num_steps": args.fm_num_steps if args.planner == "es_fm" else None,
+        },
+        "number_of_scenes": num_scenes,
+        "target_scenario_path": args.target_scenario_path,
+        "num_worlds": args.num_worlds,
+        "replan_interval_steps": args.replan_interval_steps,
+        "output_dir": args.output_dir,
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "git_commit_hash": git_hash,
+        "git_dirty": dirty,
+    }
+    for d in {args.output_dir, args.exp_dir}:
+        with open(os.path.join(d, "experiment_config.json"), "w") as f:
+            json.dump(config, f, indent=2)
 
 
 if __name__ == "__main__":

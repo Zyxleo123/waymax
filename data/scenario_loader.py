@@ -33,9 +33,17 @@ def load_scenario_state_fast(cfg: waymax_config.DatasetConfig, scenario_index: i
 
 
 def load_scenario_state_batch_fast(
-    cfg: waymax_config.DatasetConfig, scenario_indices: Iterable[int]
+    cfg: waymax_config.DatasetConfig,
+    scenario_indices: Iterable[int],
+    *,
+    return_scenario_ids: bool = False,
 ):
-    """Loads a batch of scenarios from one TFRecord in a single dataset scan."""
+    """Loads a batch of scenarios from one TFRecord in a single dataset scan.
+
+    Returns (state_batch, scenario_to_batch_idx), plus a list of WOMD
+    ``scenario/id`` strings in batch order when ``return_scenario_ids`` is set
+    (Waymax's parser drops that feature from the state).
+    """
     indices = [int(i) for i in scenario_indices]
     if not indices:
         raise ValueError("scenario_indices must be non-empty.")
@@ -67,4 +75,10 @@ def load_scenario_state_batch_fast(
         processed, include_sdc_paths=cfg.include_sdc_paths
     )
     scenario_to_batch_idx = {scenario_idx: i for i, scenario_idx in enumerate(selected_indices)}
+    if return_scenario_ids:
+        scenario_ids = [
+            tf.train.Example.FromString(s.numpy()).features.feature["scenario/id"].bytes_list.value[0].decode()
+            for s in selected
+        ]
+        return state_batch, scenario_to_batch_idx, scenario_ids
     return state_batch, scenario_to_batch_idx
