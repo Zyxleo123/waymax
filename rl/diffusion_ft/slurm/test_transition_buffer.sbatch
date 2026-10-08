@@ -19,7 +19,7 @@ ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
 cd "$ROOT"; mkdir -p "$ROOT/logs/dft"
 PY="${DFT_PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 export JAX_PLATFORM_NAME=cpu CUDA_VISIBLE_DEVICES=""
-for t in test_transition_buffer test_gate2 test_gate2b test_safety_loss \
+for t in test_transition_buffer test_unroll_jit test_gate2 test_gate2b test_safety_loss \
          test_ddim_stride test_bc_term test_resume_state; do
   echo "=== $t"; "$PY" -m "rl.diffusion_ft.tests.$t"
 done

@@ -90,6 +90,11 @@ def main() -> None:
                         "were calibrated under 'disc', whose cover overhang "
                         "costs ~1 m per pair of cars; re-run this under 'exact' "
                         "to recalibrate agent_margin_m against real geometry.")
+    p.add_argument("--edge_geometry", type=str, default="point",
+                   choices=("point", "segment"),
+                   help="road-edge distance: to the nearest SAMPLE (waymax, and "
+                        "every margin on record) or to the polyline SEGMENT. "
+                        "The sign, and so the dirty/clean split, is identical.")
     p.add_argument("--time_chunk", type=int, default=4)
     p.add_argument("--out_dir", type=str, required=True)
     args = p.parse_args()
@@ -99,7 +104,7 @@ def main() -> None:
         edge_margin_m=args.edge_margin_m, edge_tau_m=args.edge_tau_m,
         agent_margin_m=args.agent_margin_m, agent_tau_m=args.agent_tau_m,
         n_discs=args.n_discs, time_chunk=args.time_chunk,
-        agent_geometry=args.agent_geometry)
+        agent_geometry=args.agent_geometry, edge_geometry=args.edge_geometry)
     print(f"[cal] {args.n_scenes} scenes from {Path(args.tfrecord).name}, "
           f"chunk={args.chunk}, devices={jax.devices()}")
     print(f"[cal] {cfg}\n")

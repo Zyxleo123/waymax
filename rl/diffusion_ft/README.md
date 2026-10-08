@@ -2106,3 +2106,875 @@ family. What makes it worth the GPU anyway is that it is not a
 re-parameterisation of the same objective: it deletes a term that is present in
 every scene whether or not anything is wrong. And either way the run returns a
 measured `tail_share`, which no previous sweep reported.
+
+## Reactive NPCs (2026-09-19/21) — 70% of the frozen-car collision rate is the rails
+
+Every result above was measured against **log-replayed** other agents:
+`controlled_object=SDC` on a `PlanningAgentEnvironment`, so each non-ego object
+repeats its recorded pose and cannot see the ego, and `overlap` is symmetric box
+contact with **no fault attribution**. The 08-30 probe localised what that costs:
+lateral deviation is cheap (1 m off the log = one extra scene in 32, 0.031 →
+0.062) but **delay** is not (5 steps 0.125, 20 steps 0.500, 40 steps — a car that
+never moves — **0.719**). Rails punish being there at the wrong *time*, which is
+exactly what a slow policy is. Reactive agents are the only thing that separates
+"the policy stalls" from "a follower on rails drove through it."
+
+### The result (job 58232, `idm_brake`, 32 failure scenes, all three gates PASS)
+
+| delay (world steps late) | rails (`none`) | `idm_brake` | removed |
+|---|---|---|---|
+| 0 — **the control** | 0.031 | 0.031 | — |
+| 2 | 0.062 | 0.031 | −0.031 |
+| 5 | 0.125 | 0.062 | −0.062 |
+| 10 | 0.250 | 0.156 | −0.094 |
+| 20 | 0.500 | 0.250 | −0.250 |
+| 40 — a car that never moves | **0.719** | **0.219** | **−0.500** |
+
+Gate 1 PASS: the human demonstration is untouched (1 scene → 1 scene). Gate 2
+PASS: the lateral column does not move (largest change −0.062 at 0.5 m, and it
+*improves*), so the agents have not gone slack. Only then gate 3: **70% of the
+frozen-car collision rate was the simulator**, and no reward, filter or fine-tune
+could ever have removed it.
+
+This converges with the failure-anatomy measurement (jobs 58135/58136,
+`tools/failure_anatomy.py`), taken independently on
+the policy's own rollouts: at first contact the ego is behind its own log and the
+collider comes from **dead astern** (`c_r10`: 87% from behind, |bearing| p50
+176°, paired speed deficit −1.81 m/s). A rear-ender by a car on rails is exactly
+what `idm_brake` deletes.
+
+**What this invalidates.** Every collision number above was measured under rails
+and is inflated by an amount that grows with how far behind schedule the policy
+is — so the arms that lag most are penalised most, which is a *ranking* hazard,
+not just a level shift. `project_collision_is_downstream_of_stalling`'s "there
+was never a collision problem to reward-shape" was derived from the 0.719, half
+of which is now known to be exogenous. The failure splits themselves were built
+under rails, so some `failure_heldout` membership is rails-induced.
+
+### Post-mortem: waymax's stock `IDMRoutePolicy` does not test that (jobs 58075, 58076)
+
+`IDMRoutePolicy`'s free-road term is `max_accel * (1 - (v/desired_vel)**delta)`
+with defaults `max_accel=2.0`, `desired_vel=30.0` m/s, `delta=4`. An unobstructed
+car at 10 m/s therefore accelerates at **1.98 m/s²** toward **108 km/h**, whatever
+the human did — ~16 m/s and ~64 m of extra distance over an 8 s episode.
+
+Mechanics gate (58075, 8 scenes, expert replay, so the ego is on the log and
+every difference belongs to the NPCs): same-timestep deviation **p99 = 53.7 m**,
+and 5% of poses **7.75 m off the agent's own logged polyline** — the latter
+because an agent that races through its route runs out of waypoints and
+`invalidate_on_end=False` extrapolates it straight past the end.
+
+Paired probe (58076, 32 failure scenes, `none` → `idm`):
+
+| case | none | idm | Δ |
+|---|---|---|---|
+| lateral 0 m (the control) | 0.031 | 0.062 | +0.031 |
+| lateral 1 m | 0.062 | **0.188** | +0.125 |
+| lateral 3 m | 0.250 | 0.344 | +0.094 |
+| delay 2 / 3 / 5 steps | 0.062 / 0.062 / 0.125 | 0.062 / 0.062 / 0.125 | **0.000** |
+
+It damages the demonstration, it *adds* lateral collisions, and it removes
+**nothing** from the delay column — which is the only thing it was wanted for. A
+speeding follower does not brake for a late ego, it arrives sooner.
+
+Two caveats on that run, both since fixed: the delay sweep stopped at 5 steps and
+never reached the region where the 0.719 lives (default is now `0,2,5,10,20,40`),
+and the probe's own gate said PASS because its threshold was absolute (+0.06)
+while the control's lift was a *doubling* of a 1-scene baseline. At n=32 one
+scene is 0.031, so the gate now reports scene counts and reads three ordered
+questions rather than one.
+
+### `idm_brake`: keep the reactive half, delete the free-road half
+
+`sim_agents.BrakingIDMPolicy` caps IDM's speed at the agent's own logged speed
+for the step being produced:
+
+    v = min(idm(v, lead_dist, lead_vel), v_log[t+1])
+
+With nothing ahead, IDM's free-road term is above the logged speed almost
+everywhere, the cap binds, and the agent reproduces its recording — so an
+undisturbed scene is log replay and `d=0` is a control again. With the ego ahead,
+the interaction term drops below the cap and the agent brakes. It also sets
+`invalidate_on_end=True`, so an agent that finishes its route is invalidated
+rather than extrapolated, which is what log replay does there.
+
+**The cap is indexed by POSITION, not time**, and that was wrong in the first
+implementation. Reading `v_log[t+1]` lets an agent that has fallen behind use a
+*later, faster* part of the speed profile at an *earlier, slower* part of its
+route — a car still queued at a light gets allowed the speed the human had after
+it, sprints through and overshoots. Job 59763 caught it: **2.4% of poses ahead of
+the recording, p99 = +15 steps**. Reading `v_log[j]` at the nearest waypoint to
+where the agent actually *is* makes overshoot impossible: getting ahead would
+require exceeding the human's own speed at that point.
+
+The gate that catches this is the signed along-path schedule offset in
+`tests/test_reactive_npc.py` (negative = braking, positive = racing). Hold any
+future agent model to it. It excludes agents whose logged path is under 2 m —
+a parked car's nearest-waypoint index is arbitrary and produced a spurious
+p1 = −83 on the first reading.
+
+The 58232 numbers above were produced by the time-indexed version, so they are
+if anything *pessimistic* about `idm_brake`: 2.4% of NPCs were still racing.
+
+`sim_agents="idm"` is kept so 58075/58076 stay reproducible, not because it is
+usable.
+
+### Two knobs, and they are not the same knob
+
+| flag | what it changes |
+|---|---|
+| `--sim_agents none\|idm` (`DFT_SIM_AGENTS`) | how the other agents MOVE, i.e. what `overlap` means |
+| `--neighbor_source log\|sim` (`DFT_NEIGHBOR_SOURCE`) | where the SAFETY LOSS reads their boxes |
+
+Under `sim_agents=none` both sources hold the same motion and `neighbor_source`
+is a no-op (kept as an equivalence control). Under `idm` they diverge, and `log`
+charges the candidate for a hazard that braked its way out of existence.
+`sim` reads `sim_trajectory` of the state the collection rollout ended in — the
+NPCs' *executed* poses. That is one policy update stale, exactly like the
+contexts themselves; making the NPCs react to the live candidate would mean
+re-stepping the simulator inside the gradient, and the IDM's lead selection is an
+argmin over an overlap indicator (zero gradient a.e.), so it would buy no signal.
+
+`--neighbor_source sim` refuses to start with `--tb_weight>0`: `buffer_grads`
+reloads its scenes at timestep 0 and cannot reconstruct the NPC motion its
+transitions were recorded under, so the replay term would keep reading the log
+while the on-policy term read the sim.
+
+**Watch `n_neighbors`** (new, per iteration, console + `train_log.jsonl` + W&B):
+valid ego-neighbour pairs per scored step. `sim_trajectory` is invalid past
+`timestep`, `safety_terms` masks invalid pairs, and the agent barrier then reads
+**0** — identical to an empty road. `neighbor_window` raises where the check is
+concrete; `n_neighbors` is what catches it where it is traced.
+
+### Run order
+
+```bash
+# 1. mechanics. The gate with teeth is "NPCs never run AHEAD of their
+#    recording" -- that is the one stock IDM failed. CPU, minutes.
+bash rl/diffusion_ft/slurm/submit_test_reactive_npc.sh
+DFT_REACTIVE=idm bash rl/diffusion_ft/slurm/submit_test_reactive_npc.sh  # reproduce 58075
+
+# 2. the paired probe, now reaching delay 40. CPU, ~45 min.
+bash rl/diffusion_ft/slurm/submit_probe_logreplay_collision.sh
+DFT_SIM_AGENTS=none,idm,idm_brake \
+  bash rl/diffusion_ft/slurm/submit_probe_logreplay_collision.sh   # all three
+```
+
+**Read the gates before the curves, in order.** (1) Does the model damage the
+human demonstration? A braking agent falls *behind* its logged schedule and can
+end up where the recording never put it. (2) Did the lateral column go slack or
+get worse? (3) Only then: how much of the delay column was rails. The probe
+prints all three with scene counts, because at n=32 one scene is 0.031 and a
+single-scene move is the resolution limit, not a result.
+
+### The A/B (jobs 60192/60218 rails, 60194/60219 reactive; all 11 gates pass)
+
+`submit_reactive_select.sh` runs `base` + `b_l24` as two sibling jobs, identical
+but for the simulator.
+
+| arm | m2 vs base, rails | m2 vs base, `idm_brake` |
+|---|---|---|
+| `b_l24_r20` | +0.0103 [+0.0083,+0.0127] | +0.0097 [+0.0078,+0.0122] |
+| `b_l24_r10` | +0.0069 | +0.0066 |
+| `ft` | −0.0119 | −0.0108 |
+| `broken` (bank) | 0.0000 | 0.0002 |
+
+**The selection result does not depend on the log-replay assumption.** The
+prediction that the bank's margin would *grow* is refuted — it is unchanged
+within overlapping CIs. `cons`'s do-no-harm weakens from structurally exact to
+0.0002, which is the honest and expected consequence of `clear` becoming a
+prediction rather than a certificate.
+
+**But the base policy's measured failure rate was inflated by the rails**, and
+that is the finding with consequences:
+
+| split | base solved, rails | base solved, `idm_brake` |
+|---|---|---|
+| `failure_heldout` | 0.0462 | **0.1069** |
+| `intermittent_heldout` | 0.4955 | **0.5523** |
+| `success_heldout` | 0.9968 | 0.9950 |
+
+Six points of `failure_heldout` and `intermittent_heldout` were the simulator.
+The bank's own overlap on `failure_heldout` falls 0.1127 → 0.0318 (−72%), with
+`offroad` and `reached` unmoved. Since `failure_heldout` was *built* under rails,
+part of its membership is rails-induced — on top of the third that
+`project_split_labels_protocol_mismatch` already flagged.
+
+#### The two defects this A/B exposed, both fixed
+
+**1. A 6% spurious collision floor on good driving.** The first run (59781/59812)
+had `success_heldout` base fall 0.9968 → **0.9357**, entirely through overlap
+(0.0000 → 0.0610), `reached`/`offroad` unchanged, bank switch rate 0.001 — the
+simulator, not the intervention. Cause: stock IDM lets an NPC brake for *another
+NPC* with generic constants (`min_spacing` 2 m, `safe_time_headway` 2 s) that
+real logged traffic violates, so traffic halts where the human did not and the
+ego rear-ends it. `BrakingIDMPolicy._get_accel` now masks the obstacle axis to
+the **SDC only**: NPC-NPC motion replays as recorded (mutually consistent by
+construction) and the ego is the only perturbation. The floor fell to 0.0018.
+Note `failure_heldout` moved the *right* way throughout, which is why a
+failure-set-only probe could not have caught this — **validate a simulator change
+on the successes too.**
+
+**2. The ego could not see the reactive NPCs.** `reached_rate` came back
+bit-identical across simulators on all three splits (0.7327 / 0.9883 / 1.0000).
+The preprocessor reads other agents off `log_trajectory`, and the observation
+splice only replaced the *ego's* row — so NPCs reacted in the simulator and stood
+still in the observation. Clean for an A/B that holds behaviour fixed and moves
+only the metric; fatal for training against them, which is the
+`project_sb3_route_reward_unobservable` failure mode. `_splice_sim_into_log_batched`
+now splices every object. Under log replay that is an exact no-op (a replayed
+object's simulated pose IS its logged pose — gate 1 measures 0.00e+00 over 19529
+poses), and gate 1b asserts it both ways.
+
+The A/B numbers above predate defect 2's fix, so they still describe a fixed-ego
+comparison. That is the right design for *this* question; a run that lets the
+policy respond to the traffic is a different and larger experiment.
+
+Also reverted: the position-indexed speed cap. It deadlocks an agent that halts
+in a stop cluster (cap reads ~0, it never leaves), and time-indexing cannot race
+anyway — `∫v ≤ ∫v_log` bounds arclength, so an agent may catch up but never pass.
+The racing gate now measures **arclength in metres**; waypoint *index* is
+ill-conditioned in exactly those stop clusters, which produced the spurious
+±30–80 step readings in jobs 59763/59778.
+
+### If the gates pass
+
+Nothing is comparable across the two simulators — `overlap` under `idm` is not
+the same number as `overlap` under `none` — so every arm needs its own base arm
+in the same job. `--sim_agents` is on `build_argparser`, so `proposal_select`
+inherits it (`DFT_SIM_AGENTS` in `submit_select_eval.sh`), and re-scoring the
+shipping `b_l24 @ ramp 20` arm under `idm_brake` alongside `base` is the direct
+test of whether `cons`'s do-no-harm survives reactive agents. Note `make_scorer` keeps
+reading the log deliberately: the selector commits at *plan* time, so the NPCs'
+future is not available to it in any simulator. What changes is the status of
+`clear` — exact under rails, a genuine prediction under reactive agents.
+
+## FlowMol3: self-conditioning + late-stage distortion (inference-time OOD)
+
+FlowMol3 ([arXiv:2508.12629](https://arxiv.org/abs/2508.12629), Dunn & Koes;
+*Digital Discovery* `d5dd00363f`) names a pathology this package already
+describes in `unrolled_prediction.py` under "Diffusion-state mismatch":
+**transport models produce suboptimal geometries at inference despite never
+observing suboptimal geometries at training time.** The reverse chain's own
+`x_t` is not a sample from the forward path the denoiser was trained on, the gap
+compounds step by step, and nothing in the training objective ever asked the
+network what to do about it. Two of FlowMol3's three techniques port directly
+(the third, fake atoms, does not — the horizon here is fixed at 25).
+
+Both are **off by default**, and off they leave the parameter tree, the traced
+programs and every existing result untouched (`tests/test_self_cond.py` gate 1
+pins that against hand-written references, and the same job re-runs Gate 2).
+
+**Self-conditioning** — the denoiser additionally sees its own clean prediction
+from the previous reverse step, `g(x_t, x̂0(x_{t+1}))`, so it can notice that it
+is revising and correct rather than compound. Implemented as a channel concat at
+the U-Net stem, so it is the one change that alters the parameter tree: the
+stem's fan-in doubles from `in_ch` to `2*in_ch`. Training follows FlowMol3's
+50/50 split — half the examples are scored on the zero-self-cond prediction, half
+get an input from a **stop-gradient** first pass — and inference always passes
+the previous prediction.
+
+**Late-stage geometry distortion** — at training time only,
+`x_t += 1[t_min ≤ t ≤ t_max] · (M ⊙ ε)` with `M_i ~ Bernoulli(p)` over
+**waypoints** (the waypoint is this model's "atom") and `ε ~ N(0, σ²)` on the
+**position** channels only. FlowMol3's `t_distort = 0.5` is flow time
+(`t=0` noise → `t=1` data), i.e. the low-noise half, which is `t ≤ 49` on this
+100-step DDPM index. The regression **target is corrected** for the kick so the
+network is asked to map the distorted state back to the *same* clean
+trajectory; leaving the target alone would train it to *reproduce* the kick
+(`x0_pred = x0 + √ᾱ·d`), which is exactly backwards — gate 5 catches that.
+
+`--distort_mode relative` (the default) scales σ by `√(1-ᾱ_t)`, the forward noise
+already present at that timestep. `absolute` matches FlowMol3's fixed σ, in
+normalized units (`1.0 == ego_range == 100 m`). Relative is the default because
+on a **v-parameterized** DDPM the corrected target for an absolute kick blows up
+like `1/√(1-ᾱ_t)` — a factor of ~40 at `t=0`.
+
+### What to run, in order
+
+```bash
+# 1. gates (CPU, minutes). Nothing else is worth submitting until these pass.
+bash rl/diffusion_ft/slurm/submit_test_self_cond.sh
+
+# 2. measure the drift, so sigma is not a transplant from a molecule (GPU, ~20 min)
+bash rl/diffusion_ft/slurm/submit_probe_drift.sh
+#    -> prints path_std (1.0 == on the forward path), the drift penalty `gap_m`,
+#       and a suggested --distort_sigma. If gap_m is ~0 in the late window,
+#       STOP: there is no inference-time OOD here for distortion to fix.
+
+# 3. the 2x2 ablation, 20k steps each from the base checkpoint (GPU, %2 throttle)
+FM3_DISTORT_SIGMA=<from step 2> bash rl/diffusion_ft/slurm/submit_train_flowmol3.sh
+
+# 4. score every arm through the SAME harness/splits as every other arm here
+FM3_SAVE_DIR=<the save dir step 3 printed> \
+DFT_SPLITS_JSON=<the VERIFIED splits.json> \
+DFT_SHARD_GLOB='<the glob splits.json was built against>' \
+FM3_TRAIN_JOBID=<step 3 job id> \
+bash rl/diffusion_ft/slurm/submit_eval_flowmol3.sh
+```
+
+Arms: `base` (same fine-tune, neither feature — **not** the base checkpoint, so
+"trained longer" is controlled for), `sc`, `dist`, `sc_dist`. The eval also
+scores the untrained base checkpoint as `base_ckpt`.
+
+### Why a fine-tune and not a re-pretrain
+
+Self-conditioning changes the parameter tree, which normally forces training from
+scratch. `--init_from` instead **zero-expands** the stem
+(`rl/diffusion_ft/self_cond_init.py`): the new input block starts at zero, so it
+contributes nothing to the convolution and the expanded model computes the base's
+function *exactly* at step 0 for any self-cond input, including the zeros the
+first reverse step supplies. Gate 2 asserts that rather than assuming it. Every
+other leaf is copied unchanged. `--init_from` is **not** `--resume_path`: it
+loads parameters only and starts fresh optimizer state, schedule and counters.
+
+To produce a standalone self-conditioned checkpoint (e.g. to point an existing
+eval at):
+
+```bash
+python -m rl.diffusion_ft.self_cond_init --src <base>/latest --dst <new>/latest
+```
+
+The new `metadata.json` carries `self_cond: true`, which is what
+`train_diffusion/utils/infer.py::_build_model_from_metadata` reads — the
+architecture flag must come from the checkpoint, never from a caller's default,
+or the restore silently shape-mismatches.
+
+### Known limits of this port
+
+* DPPO/safety machinery is threaded through (`sample_with_trace` records `x_sc`,
+  `transition_log_prob` takes it, and the reusable prefix becomes the pair
+  `(x_{k-1}, x̂0_k)` — still one opaque pytree argument, so no caller changed).
+  It is *gated* for equivalence but has not been *run* under self-conditioning.
+* The self-cond training branch costs a second denoiser evaluation on every step
+  (the first pass runs for the whole batch and is then masked per example).
+  FlowMol3's per-step coin flip would average 1.5; the per-example mask was
+  chosen for lower variance and a static program shape under jit/pmap.
+
+## Anatomy of the residual (2026-09-19/23) — no-goal is a pace bug, and it has a root cause
+
+> **SUPERSEDED 2026-09-23 — read [The world-dt bug](#the-world-dt-bug-2026-09-23--the-never-reached-block-is-a-time-base)
+> first.** The never-reached block below is the set of scenes whose world step
+> was read off a short first timestamp pair (43 of its 44 scenes), and the
+> 13–23% "velocity inflation" is the pooled signature of the same scenes. The
+> "two heads, two constants" mechanism is not established. The off-road and
+> collision anatomy stands.
+
+**Result: the three things the safety fine-tune still fails on are one bug.** The
+model's velocity head and its position head disagree by ~15%; the positions
+under-travel; the goal is a fixed 3 m ball at the end of the human's path, so a
+constant fractional shortfall is free on a short trip and fatal on a long one;
+and the resulting lag is what the log-replayed traffic rear-ends. The off-road
+term is the only part the barrier was ever the right tool for.
+
+`tools/failure_anatomy.py` + `slurm/{failure_anatomy.sbatch,submit_failure_anatomy.sh}`.
+CPU only: it reads the executed world paths a select run dumped under
+`--dump_traj` (`<arm>/r<rep>/traj` in `feat/*.npz`) and recomputes every geometric
+quantity with `safety_loss` itself, so a disagreement here is a disagreement with
+the objective rather than with an approximation of it. No GPU, no checkpoint, no
+re-rolling.
+
+```bash
+bash rl/diffusion_ft/slurm/submit_failure_anatomy.sh          # array of 6 + afterok merge
+DFT_ANAT_SMOKE=1 bash rl/diffusion_ft/slurm/submit_failure_anatomy.sh
+DFT_ANAT_SPLIT=intermittent_heldout bash rl/diffusion_ft/slurm/submit_failure_anatomy.sh
+```
+
+**Two alignment facts, both asserted at runtime rather than trusted.** Each replan
+dumps `world[:, :n_exec]` — the anchor plus the first `n_exec-1` executed poses —
+and the next replan's anchor IS the pose the previous one ended on, so
+concatenating the replans gives a contiguous 0.1 s path; and index `i` of it is
+absolute log step `T0 + i` with `T0 = init_steps - 1 = 10` (waymax's `reset`
+leaves `state.timestep` one below `init_steps`). Measured residual against the
+ego's logged pose at `T0`: **0.0000 m**, a hard exit above `--align_tol`. The
+recomputed `solved`/`reached`/`offroad`/`overlap` reproduce the run's own flags at
+0.99–1.00. Read both before reading anything below.
+
+### What the residual is made of (jobs 58135/58136, `failure_heldout`, 692 episodes)
+
+ft = `stopping/20260911_160658_962947/base_s0/iter_000110`, verify seed 4242.
+
+| | base | ft | c_r10 (bank) |
+|---|---|---|---|
+| solved | 0.043 | 0.312 | 0.549 |
+| never reached | 188 | **187** | 188 |
+| off-road (any) | 354 | 187 | 100 |
+| overlap (any) | 204 | 178 | 78 |
+
+The fine-tune halves off-road, moves overlap 13%, and does **nothing** to
+reaching. Of its 476 unsolved episodes: 39% never reached, 39% off-road, 37%
+overlap (the buckets overlap).
+
+### No-goal is trip length x pace, not geometric hardness
+
+44 of 173 scenes never reach in ANY of 4 repeats, and it is the *same 44 scene
+ids* under base, `b_l24` and `bf_w10` (46 under ft alone); ft rescues one. That
+invariance is the tell — it is a property of the scenes. Why:
+
+* the human's path length **equals** its goal distance (surplus **+0.03 m**), so
+  the 3 m ball sits at the END of the demonstration with no slack;
+* the fraction of the human's path the ego must cover is therefore
+  `(goal_dist - 3)/s_log`, which rises with trip length: **0.921** on the reached
+  scenes (44 m trips) against **0.979** on the never-reached ones (94 m);
+* a roughly constant fractional shortfall is then free when short and fatal when
+  long.
+
+| trip length | <40 m | 40–60 | 60–80 | 80–120 | >120 m |
+|---|---|---|---|---|---|
+| never-reach rate | 0.03 | 0.19 | 0.40 | 0.40 | **0.58** |
+
+**AUC of trip length alone = 0.793.** `stall_frac` is **0.00** — it never stops —
+cross-track is 0.52 m and detours are 2.1%, so this is not a stall and not a
+detour. It drives the right line short.
+
+### The root cause: two heads, two constants, nothing coupling them
+
+`data/postprocess.py::ego_normalized_to_world` denormalizes the model's two heads
+with two independent constants — `pos * ego_range (100)` and
+`vel * max_velocity (25)`. **Not config drift**: the checkpoint's `metadata.json`
+carries exactly those values. Nothing forces `d(pos)/dt == vel`, and measured over
+753 episodes the two disagree:
+
+| arm | commanded / realised (ego) | same ratio for the LOG |
+|---|---|---|
+| base | 1.132 | 1.000 |
+| ft | 1.149 | 1.000 |
+| c_r10 | **1.229** | 1.000 |
+
+The log column is the control and reads 1.000, so this is the policy's output,
+not a dt or frame error in the comparison. **`c_r10`'s 1.229 is NOT explained**:
+an earlier note here said the bank edits "move positions and leave velocities
+alone", but `lateral_shift` and `time_warp` both end in `branching.fd_velocity`
+(since the module was written), so a fired edit's velocities ARE consistent with
+its positions and should pull the ratio toward 1, not away. Suspect episode
+composition (a per-episode ratio of means over slow tails) before any mechanism.
+
+**Which head is right: the velocity one.** Against the human, commanded speed is
+**1.05–1.07x** and realised displacement **0.93x**. The model knows roughly the
+right speed and emits positions that travel ~7–10% short — which is the pace
+deficit above, to within its own error bar.
+
+**And it is a closed loop.** `_splice_sim_into_log_batched` writes sim
+`vel_x`/`vel_y` into `log_trajectory` (`env.py`, the `blend` call) and
+`data/preprocess.py` builds the policy's own `ego_state` from exactly that field,
+so at every replan the model is conditioned on a speed it is not doing, having
+been pretrained on data where the two agree.
+
+### The barrier is not the problem it was suspected of being
+
+Ground-truth lateral sweep at 69 excursion onsets — the ego box is shifted along
+its own normal and the clearance `is_offroad` thresholds are recomputed from
+scratch at every offset, so this is the metric's own verdict on each shifted pose:
+
+* an on-road offset exists within ±4 m at **100%** of onsets; both sides blocked **0%**;
+* corner coherence p50 **0.99**; corners disagree at only 2.9%;
+* the barrier's descent points at the nearer exit **89.9%** of the time under the
+  default `edge_geometry="point"`, **97.1%** under `"segment"`.
+
+So **"the car is trapped between two road edges" does not happen**, and the
+wrong-direction case is a 10% minority rather than the mechanism. The number that
+replaces it: the exit is **0.10 m away at p50** (0.22 m at p90) and the excursion
+still lasts **21 steps (2.1 s)** at 0.64 m median depth. Two seconds off-road, a
+hand's width from legal, with a correctly-pointing gradient. Consistent with the
+bank's −0.69 m shortfall, which is measured over a 20-step window: the
+instantaneous exit is trivial, staying clear for 2 s is not.
+
+`edge_geometry="segment"` also removes a **+0.10 m** overstatement of depth — with
+"point" the barrier charges the distance to a roadgraph SAMPLE, not to the
+boundary.
+
+### Collisions
+
+At first contact the ego is behind its own log (ft 2.58 m / 6 steps, 53% lagging
+>2 m, 74% still on the log line, collider from behind 54%, paired speed deficit
+−0.38 m/s), and the signature sharpens as the other modes are removed: `c_r10` is
+14.07 m / 11 steps behind, 87% from behind, |bearing| p50 **176°** — dead astern.
+This is the same finding the reactive-NPC section reaches from the other side;
+see [Reactive NPCs](#reactive-npcs-2026-09-1921--70-of-the-frozen-car-collision-rate-is-the-rails),
+and re-score under `idm_brake` before spending anything on the agent barrier.
+
+### Traps, all three silent
+
+* **Speed read from the velocity field inverted the conclusion.** The first read
+  had the ego at **1.18x** the human it was falling 7.7 m behind, which reads as
+  "not a pace problem". Off positions it is 0.91x, matching the independently
+  computed path-length ratio of 0.90. The tool now computes pace from POSITIONS
+  and logs `speed_cmd_ratio` (ego) beside `log_speed_cmd_ratio`, which must read
+  ~1.000 — the defect is now visible rather than remembered.
+* **`jax.grad` on a closure built per call leaks its trace cache.** The escape
+  test defines a differentiated function per excursion; `jax.grad` keys its cache
+  on the function object, so a few hundred sweeps accumulated a few hundred
+  never-evicted traces and the job was OOM-killed with nothing large anywhere in
+  it. `_edge_grad_fn` builds it once per configuration.
+* **The submitter must run on rhea, and rhea's system python3 has no numpy.** It
+  inspects the dumped `.npz` with `zipfile` from the stdlib instead — an `.npz`
+  IS a zip and each array is one `<key>.npy` member.
+
+### Where this leaves it
+
+* **The no-goal residual is not reachable by any restriction-shaped method** —
+  not the barrier, not the bank, not a selector. It needs pace.
+* **The first thing to try is the cheapest**: a `bank@pace:always` arm with a
+  single `tw1.1` candidate (`bank`+`always` is permitted). It is not
+  restriction-shaped, so `broken` will NOT be 0.0000 and the cost on
+  `success_heldout` is the whole measurement.
+* **Then couple the heads**: derive ego velocity in the splice from the blended
+  positions (the observation stops lying — sign on pace genuinely unpredictable,
+  since making the state self-consistent should return the model to its training
+  manifold but that is the experiment), and/or rescale predicted displacement to
+  the predicted speed in `ego_normalized_to_world`. Score on `reached_rate` in the
+  LONG-TRIP decile; a corpus average washes it out.
+* `edge_geometry="segment"` is a real but small A/B and does not touch the
+  0.10 m / 2.1 s puzzle.
+* The 09-19 artifact on disk predates the velocity fix: its two "speed ratio"
+  lines read ~1.18 where they should read ~0.91. Everything else in it stands.
+
+### Fix 1 x fix 2a: the pace 2x2 (built 2026-09-23; superseded before it ran)
+
+> The smoke (jobs 62441–62446) ran the chain end to end; its gate failed G1, which is how
+> the world-dt bug below was found. Both fixes divide by the same wrong step, so the full
+> 2x2 was not run. The flags stay (defaults unchanged).
+
+```bash
+DFT_SELECT_SMOKE=1 bash rl/diffusion_ft/slurm/submit_pace.sh   # 4 scenes/split, 1 repeat
+bash rl/diffusion_ft/slurm/submit_pace.sh
+bash rl/diffusion_ft/slurm/submit_test_ego_vel.sh              # the gate on its own
+```
+
+**2a is `--ego_vel_source {commanded,realised}`** (env `DFT_EGO_VEL_SOURCE`).
+`realised` replaces the ego's `vel_x/vel_y` in the observation splice with the
+backward difference of the executed positions -- only the ego, only on steps the
+policy executed (`init_steps..timestep`), never the replayed history, so the first
+replan is bit-identical. Backward because at the anchor the blend holds the
+HUMAN's next pose; a central difference would leak the demonstration into the
+observation. `commanded` is the default and every earlier result.
+
+**Why a 2x2.** The pace arm (`bank@p10:always`, one `tw1.1` candidate) is not a
+pure speed-up: `time_warp` rewrites velocities from finite differences, so under
+`commanded` it also hands the policy a self-consistent speed. The same arms under
+`realised` separate the two effects (`realised:base - commanded:base` is 2a alone;
+`realised:pace10 - realised:base` is the speed-up with the observation held
+fixed). Pace arms run at **ramp 1**: at the bank's default ramp 10 the factor
+eases 1.0 -> 1.1 inside each 10-step window and resets at the next anchor, so
+"tw1.1" would execute 5.5%. `pace05` (tw1.05) is a dose point.
+
+**Gates.** `tests/test_ego_vel_splice.py` (CPU, `test_ego_vel.sbatch`): the default
+is the old splice bit for bit; the estimator on the HUMAN's positions reproduces
+the human's logged speed within 1% (the log column still reads 1.000), also end
+to end at the policy's anchors under expert replay; positions, yaw, every non-ego
+row and the replayed history are untouched; under a synthetic under-travelling
+override `commanded` shows the lie (~1/0.9) and `realised` reads 1.000 at every
+anchor on both the jitted and eager paths. It always exits 0 and writes
+`gate/verdict.txt`; the `realised` sibling depends on it and its tasks exit 0 with
+the reason unless it says PASS.
+
+**Live checks in every row** (`proposal_select.episode_pace`): `trip_m` (the
+human's path to the goal), `goal_d_min` (closest approach, the continuous version
+of `reached`), `pace_moving` (ego/human displacement while the human moves, from
+positions), and `obs_v_sum`/`real_v_sum` -- the speed the policy was SHOWN vs the
+speed it drove. `realised` cells must read 1.000; `commanded:base` shows the
+defect (~1.13). `tools/pace_analysis.py` reads both siblings, refuses to pair
+unless seed/chunk/shards match, checks `trip_m` agrees across every row of a
+scene, and reports `reached`/`solved` per trip bin (40/60/80/120 m and each
+split's top decile) with paired scene-bootstrap CIs, plus m2/m3 via
+`select_analysis`. Headline: failure_heldout top-decile `reached`; cost:
+success_heldout `solved`.
+
+## The world-dt bug (2026-09-23) — the never-reached block is a time base
+
+**Result.** `data/preprocess.py::compute_world_dt_seconds` read each scene's world
+step off its FIRST valid timestamp pair. The preprocessor lays the policy's plan
+onto a `k * world_dt` grid, and the env advances one log step per grid point.
+WOMD tf_example timestamps here are real and slightly non-uniform, and in some
+scenes the first interval is short — p50 **0.0748 s** (p5 0.059), where the median
+step is 0.100 s and 80 steps span 8.0 s. There the plan executes at ~0.75x, while
+its velocity field still reports full speed.
+
+| `failure_heldout` (09-19 anatomy run + per-scene dt) | short first pair | the rest |
+|---|---|---|
+| scenes | 44 of 173 | 129 |
+| never reach the goal (base) | **43 of 44** | 4 of 129 |
+| reached rate, base / ft / c_r10 | 0.023 / 0.023 / 0.023 | 0.969 / 0.971 / 0.969 |
+| commanded speed vs the human | 1.19 | 0.99 |
+
+`success_heldout`: 0 of 120 sampled scenes have a short first pair, and
+`intermittent_heldout` 0 of 96. The base fails every such scene, so the scan put
+all of them in the failure split. A quarter of `failure_heldout` is selected by
+this bug, and every restriction-shaped method measured on it had a ~25% ceiling
+it could not see.
+
+**The log is fine.** Dividing each step by its OWN timestamp gap, the human's
+backward difference matches its logged speed at **1.0014** (central 1.0000;
+p90 error 0.1 m/s), and every object's at 0.9991, on the 64 scenes where dividing
+by the first-pair dt read 1.1085.
+
+**The fix is `--world_dt_method median`** (env `DFT_WORLD_DT_METHOD`, default
+`first` = every earlier result). Only the JAX preprocessor has it;
+`data/preprocess_cached.py` and `vla/preprocess.py` keep their own `first`
+copies. Training barely depends on it, because targets use the stamped time
+base, and here it only bounds the anchor draw.
+
+```bash
+DFT_SELECT_SMOKE=1 bash rl/diffusion_ft/slurm/submit_world_dt.sh
+bash rl/diffusion_ft/slurm/submit_world_dt.sh
+```
+
+The chain: `test_world_dt.sbatch` (CPU gate) → `first/` and `median/` select
+siblings, `base` only, where `median/` reads the gate's verdict →
+`pace_analysis.sbatch`, whose `dt_short`/`dt_normal` columns are the readout.
+The gate (`tests/test_world_dt.py`):
+
+* `first` reproduces the old function bit for bit;
+* `median` matches the executed window's clock to 1% at p95;
+* the flag reaches `aux["world_dt_seconds"]` on the jitted and eager paths;
+* the human's own trajectory, executed as the plan, stays on the log under
+  `median` (p95 < 0.25 m) and visibly lags on the short-dt scenes under `first`.
+
+**Result (jobs 62629–62634, 2026-09-24; gate PASS, 1450 scenes x 4, paired by
+common random numbers).** The base policy alone, with no weights changed:
+
+| `median - first` (paired, 95% scene bootstrap) | n | reached | solved | broken |
+|---|---|---|---|---|
+| failure_heldout, short-dt | 44 | **0.03 → 1.00** (+0.972) | **0.01 → 0.95** (+0.949 [+0.886, +0.994]) | 0.000 |
+| failure_heldout, normal-dt | 129 | +0.000 | +0.000 | 0.000 |
+| intermittent, short-dt | 3 | +0.667 | +0.417 | 0.000 |
+| intermittent, normal-dt | 274 | −0.001 | −0.004 [−0.007, −0.001] | 0.004 |
+| success_heldout | 1000 | +0.000 | +0.000 | 0.000 |
+
+The corpus-level **m3 is +0.0035 [+0.0026, +0.0045]** (rec 0.0036, brk 0.0001) —
+a third of the shipping bank's +0.0103, from a clock fix. In the short-dt
+scenes, pace goes 0.90 → 1.00 and the world dt used goes 0.0748 → 0.1000.
+Every failure-split flip is a short-dt scene, and every one of them is 0 → 1.
+
+The only breaks are 4 single episodes in 4 normal-dt intermittent scenes, whose
+dt moved by at most 1.1% (the median move on normal scenes is 0.03%). Three of
+the four flipped via a new off-road. Intermittent scenes are coin flips by
+construction, so any perturbation diverges them, and 4-vs-0 has p ≈ 0.13
+two-sided. Read it as noise.
+
+**So the failure split was a quarter bug.** The 44 short-dt scenes are not hard:
+once they can arrive, the base solves 0.95 of them. The genuine residual is the
+129 normal-dt scenes, which the base reaches (0.98) and then fails on off-road
+and overlap (solved 0.06). The "long trips never reach" result was this bug too:
+the top-decile trips go 0.40 → 0.90 reached.
+
+**Defaults since 2026-09-24:** `median` everywhere in this pipeline — the env
+constructor, `train_safety --world_dt_method`, and new `submit_select_eval.sh`
+env files, which write the key explicitly. `select_eval.sbatch`'s fallback stays
+`first`, so an older env file without the key, requeued, finishes on the method
+it started with. To resume a `train_safety` run started before then, pass
+`--world_dt_method first`. `data/preprocess.py` keeps `first` as its own default,
+because it is shared with pretraining; the env always passes the method.
+
+**Retrained on the fixed clock (2026-09-25, `submit_retrain_worlddt.sh`, run
+`retrain_worlddt/20260924_235925_2645687`).** The 09-11 recipe unchanged except for
+the clock, 3 seeds, scored at iteration 110 on all three splits (1450 scenes x 4).
+The two evals share their base draws (5800 of 5800 episodes, 1 outcome differs).
+
+| solved (fixed clock) | failure | intermittent | success | m3 vs base (95% CI) |
+|---|---|---|---|---|
+| base | 0.288 | 0.496 | 0.997 | — |
+| ship bank l24, ramp 20 | **0.773** | **0.870** | 0.999 | **+0.0206 [+0.0184, +0.0233]**, brk 0.0003 |
+| old ft (trained on the old clock), 3-seed | 0.554 | 0.619 | 0.982 | −0.0062 [−0.0116, −0.0015] |
+| new ft (retrained), 3-seed | 0.541 | 0.638 | 0.986 | −0.0023 [−0.0068, +0.0018] |
+
+Paired, new minus old fine-tune: failure −0.013 [−0.024, −0.001], intermittent
++0.019 [+0.007, +0.031], success +0.0037 [+0.0013, +0.0062]. Retraining on the right
+clock makes the fine-tune gentler on successes, taking the corpus effect from
+significantly negative to indistinguishable from zero. It is still not a corpus
+win. The fine-tune's gain on failures (+0.25) did not depend on the clock; the
+training curve still peaks at iteration 110 (marginal −0.0056). The repair bank
+remains the only corpus-positive intervention.
+
+Why the base "solves" 0.29 of a failure split: the split was built on the old
+clock, so 44 of its 173 scenes (25%) are clock-bug failures. On the fixed clock
+the base solves 0.955 of those and **0.060** of the 129 genuine failures; the
+fine-tune goes 0.953 on the bug scenes and **0.401** on the genuine ones — a
++0.34 real gain, diluted to +0.25 in the blended number. The m2/m3 estimates are
+still UNBIASED: they are stratified estimates (weight = the stratum's corpus share
+as scanned, rate = measured now), and the bug scenes contribute identically to
+base and fine-tune. (An earlier note here claimed the weights over-count the
+failure stratum by ~0.001–0.002; that was wrong.) The re-scan only makes the
+labels mean what they say.
+
+**Next:** re-scan the splits under `median` (a quarter of `failure_heldout` is
+bug-selected, and `failure_train` presumably as well), then re-baseline the
+shipping arms (`ft`, `b_l24_r20`) against the rebuilt splits. Every earlier
+failure-set number carries a hidden ~25% ceiling.
+
+## `edge_geometry="segment"` in training (2026-09-25, built, not yet run)
+
+`--edge_geometry {point,segment}` on `train_safety` (env `DFT_EDGE_GEOMETRY`,
+default `point` = every earlier run, bit for bit). `segment` measures a corner's
+road-edge clearance to the polyline through the nearest roadgraph sample rather
+than to the sample: same sign, so the same `offroad` boundary, but no ~0.10 m
+depth overstatement, and descent toward the nearer exit 89.9% → 97.1% (see
+[The barrier is not the problem](#the-barrier-is-not-the-problem-it-was-suspected-of-being)).
+Expected to be a minority effect. It does not touch the 2.1 s excursions.
+
+**The margin is re-measured, not carried over.** 0.3 m is the human's p01
+clearance *under `point`* (0.314, job 40089). `segment` clearances are never
+larger, so 0.3 there is a stricter barrier, and the A/B would confound geometry
+with strictness. The arm keeps the **rule** instead (margin = expert p01, floored
+to the cm): `calibrate_edge_geometry.sbatch` runs `calibrate_expert --edge_geometry`
+under both geometries on the same 64 scenes, and `tools/decide_edge_margin.py`
+writes `cal/edge_margin.env` only if these gates pass:
+
+* the point control reproduces 0.314;
+* both runs pool the same expert-clean steps;
+* segment ≤ point on every step;
+* segment p01 ≥ 0.10 m.
+
+`train_safety.sbatch` sources that file via `DFT_EDGE_MARGIN_FILE`. If the file
+is set but missing, it prints `TRAINING NOT RUN` and exits 0. `decision.json`
+also reports the expert's mean barrier-gradient strength at `point@0.3`,
+`segment@<new>` and `segment@0.3`. The first two should match, which is what
+"same rule" means. The third is the literal flag flip, for scale.
+
+```bash
+bash rl/diffusion_ft/slurm/submit_edge_segment.sh                   # calibrated margin
+DFT_SEG_MARGIN=0.3 bash rl/diffusion_ft/slurm/submit_edge_segment.sh  # literal flip
+```
+
+The chain:
+
+1. `cal` (CPU).
+2. `train` (afterok:cal): the 09-11 recipe on the median clock, `base_s0..s2`.
+   Before anything is submitted, the env files are diffed against
+   `retrain_worlddt/20260924_235925_2645687/train/env`: only the edge keys, the
+   out dir and the wandb group may differ, otherwise FATAL.
+3. `eval` (afterok:train): base + ft @ iter 110, seed 4242. Its env files are
+   byte-identical to that run's `eval_new` apart from paths, so the base draws
+   are shared.
+4. `compare` (CPU): `tools/compare_select.py`, segment minus point. It takes the
+   3-seed means paired per (scene, repeat), with the stratified scene bootstrap.
+   It refuses if the two runs' base episodes disagree on more than 0.2%. A
+   self-comparison of `eval_new` reproduces `select_analysis`'s ft means exactly
+   (0.541 / 0.986 / 0.638, delta 0).
+
+Read the curves first: the same eval seed and splits make `train_log.jsonl`
+directly comparable with the reference's. Then read `eval/compare.json`. Iter 110
+is pre-registered. If segment peaks elsewhere, record it; do not move the eval.
+
+New plumbing: `sweep_safety_stopping.sh` forwards `DFT_EDGE_GEOMETRY` and
+`DFT_EDGE_MARGIN_FILE`, and takes `DFT_DEPENDENCY` and `DFT_DRY_RUN=1`, which
+writes the env files and submits nothing.
+
+## Behaviour-cloning the repair bank (2026-09-28/30) — negative; full write-up in `docs/`
+
+Distilling `b_l24_r20` (m3 +0.0209) into the base policy does not carry its gain
+into the weights. Plain BC on the bank's executed plans gives m3 +0.0012: the
+edits are under-fit at about 7% of a batch. Putting half of every batch on the
+edits fits them (edit-row loss 0.40x base) but gives m3 -0.020: failures
+0.29 -> 0.49, successes 0.997 -> 0.969, mostly off-road. A probe rules out the
+frozen prefix as the limit (`d_free == d_tf`; noise at late step t=9 is about
+17 m). The student drifts on rows the bank left alone, because it cannot see
+which of its own draws the bank would have edited.
+
+The setup, every number, the probe, what was measured vs hypothesized, and ranked
+ideas (BC policy as a proposal under the selector, preference distillation on
+(rejected draw, edit) pairs, DAgger, kept-row tether, a better teacher) are in
+[`docs/bank_bc_distillation.md`](docs/bank_bc_distillation.md). Code is
+`proposal_select --dump_bc`, `train_safety --repair_{steps,rows,split_ratio,switch_share}`,
+`tools/probe_bc_transfer.py` and `slurm/submit_bank_bc.sh`.
+
+## Diffusion-DPO on the bank's pairs (2026-10-01, built)
+
+Idea 2 of [`docs/bank_bc_distillation.md`](docs/bank_bc_distillation.md): instead of
+BC toward the edit, train on the pair (condition, **rejected** base draw, accepted
+edit) with Diffusion-DPO, the frozen base as reference. A pair says "this edit over
+THIS draw of yours", which BC on targets alone never shows the student.
+
+**Objective** (`train_safety --pref_weight`, `SafetyFineTuner._init_pref` /
+`pref_grads`, loss in `DiffusionRLActor.pref_loss`), on every Adam step:
+
+    L = mean softplus(-z) + pref_anchor_weight * base_anchor_KL(success_train kept rows)
+    z = beta * [(l_model_bad - l_ref_bad) - (l_model_good - l_ref_good)]
+
+`l` is the eps-prediction MSE (converted exactly from the checkpoint's v output),
+masked to covered steps, with ONE shared `(t, eps)` per pair for both trajectories
+and both models. At step 0 the model is the reference, so `z = 0` and the loss is
+`log 2`; the trainer checks this and exits if it does not hold.
+
+**Choices that differ from a textbook Diffusion-DPO, and why:**
+
+* `t ~ U[0, k_trainable)`, not the whole schedule. Only the last `k_trainable = 10`
+  reverse steps run the trainable copy at deploy time; a preference taught at
+  t >= 10 is taught to a step the frozen base drives. `--pref_t_max` narrows it
+  (the low-noise arm uses 3). This is also the range BC trained on.
+* The anchor is the existing frozen-base KL (`base_anchor_loss`), but charged at
+  `t ~ U[0, k_trainable)` (new `t_max` argument; `None` keeps every earlier run
+  bit-identical), on `success_train` rows the bank KEPT, with `x_t` formed from the
+  base's own draw. Failure-scene pairs are never anchored.
+* Pairs are every switched row of a solved episode, any split (572 failure + 39
+  success in the bank-BC collection: BC's 611 edit rows exactly).
+* `beta` is small here relative to the paper (2500-5000 there). With edits of ~0.3 m
+  against 2.5-17 m of noise, `|z|` likely stays << 1, the sigmoid never saturates,
+  and `beta` then acts as a gradient scale against the anchor. **Measured in the
+  smoke run (job 70446):** at beta 1, z ~ 1e-4. After one step the DPO gradient
+  norm was ~0.1 against an anchor gradient of 70-390 (times the weight of 100).
+  Under the 1.0 global-norm clip the step is then all anchor, so the plan's
+  beta 1 / 0.1 arms would re-measure the base. The run therefore uses beta 1e4
+  (DPO:anchor near the safety recipe's ~1:20) and 1e3 (10x more anchored). Both
+  are near the paper's 2500-5000. Read `pref/logit_z` and the two gradient norms
+  (`pref/grad_norm`, `pref/anchor_grad_norm`) before interpreting beta.
+* Edit weighting (arm B) up-weights model steps where `|good - bad| > delta`. The
+  bank's edits are rigid lateral shifts after a 2 s ramp, so most of the plan past
+  ~1 s is "edited": this arm mostly de-weights the ramp, not a local patch.
+
+**Data.** `proposal_select --dump_bc` now also writes `rejected`: on switched rows
+`world_to_norm(world_p)` on exactly the steps where `target = world_to_norm(edit)`,
+`x_p` elsewhere. Both sides of a pair take the same normalization path, so
+`target - rejected` is the edit and nothing else. `_init_pref` refuses data where
+they differ anywhere the arm did not edit.
+
+**Logged per iteration** (means over the iteration's steps): `pref/{loss, logit_z,
+z_abs, accuracy, good_model_loss, good_ref_loss, bad_model_loss, bad_ref_loss,
+ref_gap, init_gap, grad_norm, anchor_loss, anchor_grad_norm}`. Watch `good m-r` and
+`bad m-r` (model minus ref) separately. DPO can raise `z` by getting worse at BOTH
+trajectories, worse at the bad one faster. The CPU test reproduces this without an
+anchor: +1.04 vs +1.40 after 60 steps.
+
+**Run.** `slurm/submit_pref_dpo.sh`: recollect (bank-BC settings, seed 2718) ->
+pair check -> train 4 arms x 3 seeds (`b1e4`, `b1e3`, `lowt` and `edit` at beta 1e4; 3020 steps,
+16 pairs + 16 anchor rows/step, anchor weight 100) -> per-arm `select_eval` at
+the pre-registered iterations 50 and 150 on the bank-BC draws -> paired compares
+vs base / bank / bcd / bcsw50 -> `summary.md` -> probe (`d_rej_m`: did deploy
+samples leave the rejected draw). Tests: `slurm/test_pref_loss.sbatch`.
+The whole chain is 64 qos_general jobs against a 50-job per-user cap (array tasks
+count individually), so it is submitted in stages: `DFT_PREF_STAGE=train` (16),
+then `DFT_PREF_STAGE=eval DFT_PREF_DIR=<run> DFT_PREF_ARMS=<arm>` (12 per arm), each
+refusing up front if it would not fit. The first full run
+(`pref_dpo/20261001_230431_2632246`) died on the disk quota at collection. The
+rerun is `pref_dpo/20261002_140352_3015119`. On 10-02 it was cut to the vanilla
+arm b1e4 x 3 seeds, at most 2 GPUs, scored at iter 150 only. The low-noise and
+edit arms run only if vanilla moves the failure split, as the plan sequenced them.
+At beta 1e4, z climbs from 0 to about 20 by iteration 75, with accuracy about 0.95.
+The init check used to compare the loss with log 2, which is not beta-free: at
+beta 1e4 a 4.8e-6 float gap becomes |z| = 0.01. It now checks that the params are
+bit-identical, plus the loss gap relative to the loss.
+
+## Gated tail adapter: the repair optimizer inside the sampler (2026-10-04)
+
+Full write-up, commands and how to switch it off: `docs/adapter_distill.md`.
+
+The repair optimizer `o_lpA3` is distilled into two residual adapters, added
+after the UNet's last two up blocks. They are active only in the last K = 5
+of the 10 late sampling steps, scaled by `strength * gate`. There is one
+learned gate per plan, computed from frozen features at the first adapted
+step. Added parameters: 41,921, which is 0.13% of the denoiser. Latency is
+372.9 vs 371.8 ms per replan call at batch 32.
+
+The difference from bank BC: pairs store the frozen prefix output and the
+per-row late noise. The student therefore replays its own draw, and the loss
+is charged on the final sampled plan, not on a denoising target.
+
+* **Built.** `adapter.py`, `train_adapter.py`, the `tail_hook` in the UNet,
+  `proposal_select` arms `name=adapter:<learned|open|closed>[:strength]` with
+  `--adapter_ckpt`, and `--dump_pairs`. Chain: `slurm/submit_adapter_pilot.sh`.
+  Tests: `slurm/test_adapter.sbatch`.
+* **Splits file.** `verified_seed777/eval_splits_3strata_womd.json` is the
+  verified splits with `shard_glob` moved to `/zfsauton/datasets/womd`; the
+  eshau copy is gone.
+* **Run.** `adapter/20261004_005655_968306`. Results are in its `report.md`
+  and in the doc's results section.

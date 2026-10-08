@@ -53,7 +53,9 @@ def unit_step_equivalence() -> bool:
         t = jnp.full((shape[0],), tv, jnp.int32)
         _, _, x0 = diff.p_mean_variance(x, t, c1, c2, m)
         a = diff._ddim_update(x, t, x0, noise, eta=1.0)
-        b = diff._ddim_step_strided(x, t, t - 1, c1, c2, m, noise, eta=1.0)
+        # `_ddim_step_strided` returns (x_next, x0_pred) since the self-cond
+        # port: the sampler needs the step's clean prediction to carry forward.
+        b, _ = diff._ddim_step_strided(x, t, t - 1, c1, c2, m, noise, eta=1.0)
         worst = max(worst, float(np.max(np.abs(np.asarray(a) - np.asarray(b)))))
     print(f"  unit-step |ddim_strided - ddim_update| max = {worst:.2e}")
     return worst < 1e-5

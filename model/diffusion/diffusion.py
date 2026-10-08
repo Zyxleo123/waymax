@@ -148,8 +148,14 @@ class UNet1DConditioned(nnx.Module):
         hidden_dim: int = 512,
         groups: int = 8,
         horizon: int = 25,
+        self_cond: bool = False,
     ):
         self.in_ch = in_ch
+        # FlowMol3 self-conditioning: the denoiser additionally sees its OWN clean
+        # prediction from the previous integration step. `in_ch` stays the
+        # SEMANTIC channel count (5) -- callers size sample shapes off it and the
+        # output conv still emits 5 -- so only the stem's fan-in changes.
+        self.self_cond = bool(self_cond)
         self.time_emb_dim = time_emb_dim
         self.num_res_blocks = num_res_blocks
         self.n_down = len(ch_mult)
@@ -158,7 +164,8 @@ class UNet1DConditioned(nnx.Module):
         # Condition projection: project tokens to base_ch dimension for cross-attention
         self.cond_proj = nnx.Linear(cond_dim, base_ch, rngs=rngs)
         self.time_proj = Projector(time_emb_dim, base_ch, hidden_dim=hidden_dim, rngs=rngs)
-        self.stem = nnx.Conv(in_features=in_ch, out_features=base_ch, kernel_size=(3,), padding="SAME", rngs=rngs)
+        stem_in = in_ch * 2 if self.self_cond else in_ch
+        self.stem = nnx.Conv(in_features=stem_in, out_features=base_ch, kernel_size=(3,), padding="SAME", rngs=rngs)
 
         ch = base_ch
         down_blocks = []
@@ -204,19 +211,35 @@ class UNet1DConditioned(nnx.Module):
         self.out_norm = nnx.GroupNorm(num_features=ch, num_groups=min(groups, ch), epsilon=1e-5, rngs=rngs)
         self.out_conv = nnx.Conv(in_features=ch, out_features=in_ch, kernel_size=(3,), padding="SAME", rngs=rngs)
 
-    def __call__(self, x: jnp.ndarray, t: jnp.ndarray, c1: jnp.ndarray, c2: jnp.ndarray, c2_mask: jnp.ndarray) -> jnp.ndarray:
+    def __call__(self, x: jnp.ndarray, t: jnp.ndarray, c1: jnp.ndarray, c2: jnp.ndarray, c2_mask: jnp.ndarray,
+                 x_sc: jnp.ndarray | None = None, tail_hook=None) -> jnp.ndarray:
         """Forward pass with cross-attention conditioning.
-        
+
         Args:
-            x: [B, T, 5] input trajectory
+            x: [B, 5, T] input trajectory (channels on axis 1, horizon on axis 2)
+            x_sc: [B, 5, T] self-conditioning input -- the clean prediction from the
+                PREVIOUS integration step, or None/zeros for the first step (and for
+                the ``1 - sc_train_prob`` share of training steps). Ignored unless
+                the module was built with ``self_cond=True``.
             t: [B] timestep indices
             c1: [B, n_cond_tokens, cond_dim] condition tokens for cross-attention
             c2: [B, cond_dim] second condition tokens
             c2_mask: [B] mask for second condition tokens
+            tail_hook: optional ``hook(j, h, time_feat) -> h`` called after every up
+                block (ResBlock + FiLM), ``j`` counted from the END (-1 = the last
+                block), ``h`` ``[B, T_pad, C]`` and ``time_feat`` ``[B, base_ch]``.
+                The gated adapter (:mod:`rl.diffusion_ft.adapter`) inserts its
+                residual here. None (default) leaves the traced graph unchanged.
 
         Returns:
             [B, T, 5] denoised trajectory
         """
+        if self.self_cond:
+            # Channel-concat on axis 1. Zeros is the documented "no previous
+            # prediction" token, not a special branch, so the first integration
+            # step and the unconditioned training share use the same graph.
+            x = jnp.concatenate([x, jnp.zeros_like(x) if x_sc is None else x_sc], axis=1)
+
         divisor = 2 ** (self.n_down - 1)
         if self.horizon % divisor != 0:
             target_t = ((self.horizon // divisor) + 1) * divisor
@@ -256,6 +279,8 @@ class UNet1DConditioned(nnx.Module):
                 h = jnp.concatenate([h, skip], axis=-1)
                 h = self.up_blocks[rb_up](h, time_feat, c1)
                 h = self.up_film_blocks[rb_up](h, c2, c2_mask)
+                if tail_hook is not None:
+                    h = tail_hook(rb_up - len(self.up_blocks), h, time_feat[:, 0, :])
                 rb_up += 1
 
             h = self.upsamples[i](h)
@@ -288,11 +313,63 @@ class GaussianDiffusion(nnx.Module):
         beta_schedule: str = "cosine",
         predict_type: str = "v",
         clip_denoised: bool = False,
+        self_cond: bool = False,
+        sc_train_prob: float = 0.5,
+        distort_p: float = 0.0,
+        distort_sigma: float = 0.0,
+        distort_mode: str = "relative",
+        distort_t_max: int = -1,
+        distort_t_min: int = 0,
+        distort_channels: int = 2,
     ):
         self.denoise_fn = denoise_fn
         self.timesteps = int(timesteps)
         self.predict_type = predict_type
         self.clip_denoised = clip_denoised
+
+        # ---- FlowMol3 inference-OOD mitigations (arXiv 2508.12629) ----------
+        # Both are OFF by default, and with both off every method below is
+        # bit-for-bit the pre-existing one (the self-cond carry is a `None` leaf,
+        # which is an empty pytree, so the traced programs are unchanged).
+        #
+        # self_cond: the denoiser is fed its own clean prediction from the previous
+        #   reverse step. Training draws a Bernoulli(`sc_train_prob`) mask per
+        #   example: on the masked rows a FIRST, stop-gradient pass supplies the
+        #   input; on the rest it is zeros (which is also what the first reverse
+        #   step sees). Requires `denoise_fn` built with `self_cond=True`.
+        #
+        # distortion: sparse Gaussian kicks added to `x_t` in the LATE (low-t,
+        #   near-data) part of the chain at training time only, so the network is
+        #   asked to map an off-path state back to the SAME clean target instead of
+        #   only ever seeing exact points of the forward path. `t_distort=0.5` in
+        #   FlowMol3's flow time (t=0 noise -> t=1 data) is the low-noise half,
+        #   i.e. `t <= timesteps//2 - 1` on this DDPM index.
+        self.self_cond = bool(self_cond)
+        if self.self_cond and not bool(getattr(denoise_fn, "self_cond", False)):
+            raise ValueError(
+                "GaussianDiffusion(self_cond=True) needs a denoise_fn built with "
+                "self_cond=True (its stem takes 2*in_ch channels). Build the UNet "
+                "with self_cond=True, or expand an existing checkpoint with "
+                "rl.diffusion_ft.self_cond_init.expand_params_for_self_cond.")
+        self.sc_train_prob = float(sc_train_prob)
+        self.distort_p = float(distort_p)
+        self.distort_sigma = float(distort_sigma)
+        # "relative": sigma is a MULTIPLE of the forward noise sqrt(1-abar_t) at that
+        # timestep, so the kick is always commensurate with the noise already there
+        # and the corrected v/eps target stays O(sigma). "absolute": sigma is in the
+        # trajectory's own normalized units (1.0 == ego_range == 100 m), matching
+        # FlowMol3's fixed sigma_distort. Relative is the default because on a
+        # v-parameterized DDPM an absolute kick makes the corrected target blow up
+        # like 1/sqrt(1-abar_t), which at t=0 is a factor of ~40.
+        if distort_mode not in ("relative", "absolute"):
+            raise ValueError(f"distort_mode must be 'relative' or 'absolute', got {distort_mode!r}")
+        self.distort_mode = str(distort_mode)
+        self.distort_t_max = (self.timesteps // 2 - 1) if int(distort_t_max) < 0 else int(distort_t_max)
+        self.distort_t_min = int(distort_t_min)
+        # How many leading channels get kicked. The trajectory is
+        # [x/ego_range, y/ego_range, vx, vy, yaw/pi]; FlowMol3 distorts POSITIONS
+        # only, so 2 is the faithful port.
+        self.distort_channels = int(distort_channels)
 
         betas = make_beta_schedule(self.timesteps, beta_schedule)
         alphas = 1.0 - betas
@@ -329,13 +406,20 @@ class GaussianDiffusion(nnx.Module):
         sqrt_1mab = self._extract(self.sqrt_one_minus_alphas_cumprod.value, t, x_t.shape)
         return (x_t - sqrt_1mab * eps) / sqrt_ab
 
-    def p_mean_variance(self, x_t: jnp.ndarray, t: jnp.ndarray, cond1: jnp.ndarray, cond2: jnp.ndarray, cond2_mask: jnp.ndarray, denoise_fn=None) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-        # ``denoise_fn`` lets a caller substitute a different denoiser (e.g. the
-        # DPPO-trainable copy for the late steps) without changing default
-        # inference, which keeps using ``self.denoise_fn``.
-        fn = self.denoise_fn if denoise_fn is None else denoise_fn
-        pred = fn(x_t, t, cond1, cond2, cond2_mask)
+    def _apply_denoiser(self, fn, x_t, t, cond1, cond2, cond2_mask, x_sc):
+        """Call the denoiser, passing the self-conditioning input only when the
+        module was built for it.
 
+        Off the self-cond path this is the exact 5-argument call every caller and
+        every test double already implements, so nothing about the default
+        architecture's tracing changes.
+        """
+        if self.self_cond:
+            return fn(x_t, t, cond1, cond2, cond2_mask, x_sc)
+        return fn(x_t, t, cond1, cond2, cond2_mask)
+
+    def _pred_to_x0(self, x_t: jnp.ndarray, t: jnp.ndarray, pred: jnp.ndarray) -> jnp.ndarray:
+        """Network output -> clean-sample prediction, for every ``predict_type``."""
         if self.predict_type == "eps":
             x0_pred = self.predict_x0_from_eps(x_t, t, pred)
         elif self.predict_type == "mu":
@@ -349,6 +433,15 @@ class GaussianDiffusion(nnx.Module):
 
         if self.clip_denoised:
             x0_pred = jnp.clip(x0_pred, -1.0, 1.0)
+        return x0_pred
+
+    def p_mean_variance(self, x_t: jnp.ndarray, t: jnp.ndarray, cond1: jnp.ndarray, cond2: jnp.ndarray, cond2_mask: jnp.ndarray, denoise_fn=None, x_sc: jnp.ndarray | None = None) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        # ``denoise_fn`` lets a caller substitute a different denoiser (e.g. the
+        # DPPO-trainable copy for the late steps) without changing default
+        # inference, which keeps using ``self.denoise_fn``.
+        fn = self.denoise_fn if denoise_fn is None else denoise_fn
+        pred = self._apply_denoiser(fn, x_t, t, cond1, cond2, cond2_mask, x_sc)
+        x0_pred = self._pred_to_x0(x_t, t, pred)
 
         mean = self._extract(self.posterior_mean_coef1.value, t, x_t.shape) * x0_pred + self._extract(self.posterior_mean_coef2.value, t, x_t.shape) * x_t
         var = self._extract(self.posterior_variance.value, t, x_t.shape)
@@ -403,15 +496,43 @@ class GaussianDiffusion(nnx.Module):
         nonzero_mask = (t != 0).astype(x_t.dtype).reshape((-1, 1, 1))
         return jnp.sqrt(abar_prev) * x0_pred + dir_coeff * eps_pred + nonzero_mask * sigma * noise
 
+    def p_sample_step(self, x_t: jnp.ndarray, t: jnp.ndarray, cond1: jnp.ndarray, cond2: jnp.ndarray, cond2_mask: jnp.ndarray,
+                      noise: jnp.ndarray, eta: float = 1.0, sampling_temp: float = 1.0, denoise_fn=None,
+                      x_sc: jnp.ndarray | None = None) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        """:meth:`p_sample` that also returns the step's clean prediction.
+
+        The sampler needs that prediction as the NEXT step's self-conditioning
+        input, and the network must not be called twice to get it (nnx rng streams
+        aside, it would double the cost). ``p_sample`` is this with the second
+        element dropped, so the two cannot drift apart.
+        """
+        _, _, x0_pred = self.p_mean_variance(x_t, t, cond1, cond2, cond2_mask, denoise_fn=denoise_fn, x_sc=x_sc)
+        return self._ddim_update(x_t, t, x0_pred, noise, eta=eta, sampling_temp=sampling_temp), x0_pred
+
     def p_sample(self, x_t: jnp.ndarray, t: jnp.ndarray, cond1: jnp.ndarray, cond2: jnp.ndarray, cond2_mask: jnp.ndarray,
-                 noise: jnp.ndarray, eta: float = 1.0, sampling_temp: float = 1.0, denoise_fn=None) -> jnp.ndarray:
-        _, _, x0_pred = self.p_mean_variance(x_t, t, cond1, cond2, cond2_mask, denoise_fn=denoise_fn)
-        return self._ddim_update(x_t, t, x0_pred, noise, eta=eta, sampling_temp=sampling_temp)
+                 noise: jnp.ndarray, eta: float = 1.0, sampling_temp: float = 1.0, denoise_fn=None,
+                 x_sc: jnp.ndarray | None = None) -> jnp.ndarray:
+        return self.p_sample_step(x_t, t, cond1, cond2, cond2_mask, noise, eta=eta,
+                                  sampling_temp=sampling_temp, denoise_fn=denoise_fn, x_sc=x_sc)[0]
+
+    def _next_sc(self, x0_pred: jnp.ndarray | None) -> jnp.ndarray | None:
+        """The self-conditioning input for the next reverse step.
+
+        ``None`` off the self-cond path -- an empty pytree, so a scan/fori carry
+        that holds it is identical to one that does not. Stop-gradient matches
+        training, where the first (self-cond-producing) pass is explicitly cut off
+        from the graph; letting the gradient run back through the whole chain of
+        previous predictions would also defeat the truncated-backprop budgets the
+        unroll and DRaFT-K paths are built around.
+        """
+        if not self.self_cond:
+            return None
+        return jax.lax.stop_gradient(x0_pred)
 
     def _ddim_step_strided(self, x_t: jnp.ndarray, from_t: jnp.ndarray, to_t: jnp.ndarray,
                            cond1: jnp.ndarray, cond2: jnp.ndarray, cond2_mask: jnp.ndarray,
                            noise: jnp.ndarray, eta: float = 1.0, sampling_temp: float = 1.0,
-                           denoise_fn=None) -> jnp.ndarray:
+                           denoise_fn=None, x_sc: jnp.ndarray | None = None) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """A single eta-DDIM reverse step between *non-adjacent* timesteps ``from_t
         -> to_t`` (both ``>= 0``, ``to_t < from_t``).
 
@@ -423,7 +544,8 @@ class GaussianDiffusion(nnx.Module):
         sampler is asked to subsample the reverse chain; the trainable late steps
         keep the unit-step math untouched, so the PPO likelihood is unaffected.
         """
-        _, _, x0_pred = self.p_mean_variance(x_t, from_t, cond1, cond2, cond2_mask, denoise_fn=denoise_fn)
+        _, _, x0_pred = self.p_mean_variance(x_t, from_t, cond1, cond2, cond2_mask, denoise_fn=denoise_fn, x_sc=x_sc)
+        x0_raw = x0_pred
         sqrt_ab = self._extract(self.sqrt_alphas_cumprod.value, from_t, x_t.shape)
         sqrt_1mab = self._extract(self.sqrt_one_minus_alphas_cumprod.value, from_t, x_t.shape)
         eps_pred = (x_t - sqrt_ab * x0_pred) / sqrt_1mab
@@ -439,7 +561,9 @@ class GaussianDiffusion(nnx.Module):
         dir_coeff = jnp.sqrt(jnp.maximum(1.0 - abar_to - sigma ** 2, 0.0))
         # Callers only use this for the frozen prefix, where every ``to_t >= 1`` (the
         # late/unit region owns ``t=0``), so noise is always injected here.
-        return jnp.sqrt(abar_to) * x0_pred + dir_coeff * eps_pred + sigma * noise
+        # ``x0_raw`` (pre-temperature) is the network's own clean prediction and is
+        # what the next step self-conditions on; the returned state is unchanged.
+        return jnp.sqrt(abar_to) * x0_pred + dir_coeff * eps_pred + sigma * noise, x0_raw
 
     def _sample_impl(self, shape: Tuple[int, int, int], cond1: jnp.ndarray, cond2: jnp.ndarray, cond2_mask: jnp.ndarray, 
                      rng: jax.Array, eta: float = 1.0, sampling_temp: float = 1.0, temp_mode: str = "uniform") -> jnp.ndarray:
@@ -449,19 +573,90 @@ class GaussianDiffusion(nnx.Module):
         num_steps = self.timesteps
         temp_sched = self._temp_schedule(sampling_temp, temp_mode, num_steps)
 
-        def body(i: int, carry: tuple[jnp.ndarray, jax.Array]) -> tuple[jnp.ndarray, jax.Array]:
-            x_curr, key = carry
+        def body(i: int, carry) -> tuple:
+            x_curr, sc, key = carry
             timestep = num_steps - 1 - i
             t = jnp.full((batch_size,), timestep, dtype=jnp.int32)
             key, step_key = jax.random.split(key)
             noise = jax.random.normal(step_key, shape, dtype=jnp.float32)
             eff_temp = temp_sched[i]
-            return self.p_sample(x_curr, t, cond1, cond2, cond2_mask, noise, eta=eta, sampling_temp=eff_temp), key
+            x_next, x0_pred = self.p_sample_step(
+                x_curr, t, cond1, cond2, cond2_mask, noise, eta=eta, sampling_temp=eff_temp, x_sc=sc)
+            return x_next, self._next_sc(x0_pred), key
 
-        x_final, _ = jax.lax.fori_loop(0, num_steps, body, (x_init, key_steps))
+        # `sc` is None off the self-cond path: an empty pytree, so this carry is
+        # the two-element one this loop has always had.
+        sc0 = jnp.zeros(shape, dtype=jnp.float32) if self.self_cond else None
+        x_final, _sc, _ = jax.lax.fori_loop(0, num_steps, body, (x_init, sc0, key_steps))
         return x_final
 
-    def _compute_loss_per_example(self, x0: jnp.ndarray, cond1: jnp.ndarray, cond2: jnp.ndarray, cond2_mask: jnp.ndarray, noise: jnp.ndarray, t: jnp.ndarray, denoise_fn=None, time_weight: jnp.ndarray | None = None) -> jnp.ndarray:
+    def distortion_enabled(self) -> bool:
+        return self.distort_p > 0.0 and self.distort_sigma > 0.0
+
+    def _draw_distortion(self, x_t: jnp.ndarray, t: jnp.ndarray, key: jax.Array) -> jnp.ndarray:
+        """FlowMol3's late-stage geometry distortion, as an additive ``[B, C, T]``.
+
+        ``M_i ~ Bernoulli(p_distort)`` over WAYPOINTS (the waypoint is this model's
+        "atom": one masked waypoint is kicked on all its distorted channels at
+        once, which is the local, correctable defect the paper perturbs), times
+        ``eps ~ N(0, sigma^2)`` on the first ``distort_channels`` channels, gated to
+        ``distort_t_min <= t <= distort_t_max``.
+
+        In ``relative`` mode sigma is scaled by ``sqrt(1 - abar_t)``, the forward
+        noise already present at that timestep.
+        """
+        kb, kn = jax.random.split(key)
+        b, c, tt = x_t.shape
+        mask_bt = jax.random.bernoulli(kb, self.distort_p, (b, 1, tt)).astype(x_t.dtype)
+        eps = jax.random.normal(kn, x_t.shape, dtype=x_t.dtype)
+        ch = (jnp.arange(c) < self.distort_channels).astype(x_t.dtype)[None, :, None]
+        sigma = jnp.asarray(self.distort_sigma, x_t.dtype)
+        if self.distort_mode == "relative":
+            sigma = sigma * self._extract(self.sqrt_one_minus_alphas_cumprod.value, t, x_t.shape)
+        active = ((t >= self.distort_t_min) & (t <= self.distort_t_max)).astype(x_t.dtype).reshape((b, 1, 1))
+        return active * mask_bt * ch * sigma * eps
+
+    def _distorted_target(self, target: jnp.ndarray, t: jnp.ndarray, d: jnp.ndarray) -> jnp.ndarray:
+        """Correct the regression target for a distortion ``d`` added to ``x_t``.
+
+        The whole point of the technique is that the network must map the
+        DISTORTED state back to the SAME clean trajectory, so the clean target is
+        held fixed and the parameterized target is re-derived from it. Leaving the
+        target alone would instead teach the network to REPRODUCE the kick:
+        with an unchanged ``v`` target the optimum satisfies
+        ``x0_pred = x0 + sqrt(abar)*d``, i.e. the drift is propagated rather than
+        corrected -- exactly backwards.
+
+            mu :  target = x0                                 (no correction)
+            eps:  target = noise + d / sqrt(1 - abar)
+            v  :  target = v_std + sqrt(abar) * d / sqrt(1 - abar)
+        """
+        if self.predict_type == "mu":
+            return target
+        sqrt_ab = self._extract(self.sqrt_alphas_cumprod.value, t, target.shape)
+        sqrt_1mab = self._extract(self.sqrt_one_minus_alphas_cumprod.value, t, target.shape)
+        if self.predict_type == "eps":
+            return target + d / sqrt_1mab
+        return target + sqrt_ab * d / sqrt_1mab
+
+    def _self_cond_train_input(self, fn, x_t, t, cond1, cond2, cond2_mask, key) -> jnp.ndarray:
+        """The self-conditioning input for a TRAINING step.
+
+        FlowMol3 splits training 50/50: on one half the network is scored on its
+        zero-self-cond prediction, on the other half a FIRST pass supplies the
+        input and is kept out of the gradient graph. The coin is flipped PER
+        EXAMPLE here rather than per step, which costs a second denoiser
+        evaluation on every step (the first pass runs for the whole batch and is
+        then masked) but gives a lower-variance estimate and keeps the program
+        shape static under jit/pmap.
+        """
+        zeros = jnp.zeros_like(x_t)
+        pred0 = fn(x_t, t, cond1, cond2, cond2_mask, zeros)
+        x0_0 = self._pred_to_x0(x_t, t, pred0)
+        use = jax.random.bernoulli(key, self.sc_train_prob, (x_t.shape[0], 1, 1))
+        return jax.lax.stop_gradient(jnp.where(use, x0_0, zeros))
+
+    def _compute_loss_per_example(self, x0: jnp.ndarray, cond1: jnp.ndarray, cond2: jnp.ndarray, cond2_mask: jnp.ndarray, noise: jnp.ndarray, t: jnp.ndarray, denoise_fn=None, time_weight: jnp.ndarray | None = None, key_aug: jax.Array | None = None) -> jnp.ndarray:
         """Per-example diffusion loss, averaged over channels and time but NOT
         over the batch. Returns ``[B]``. ``_compute_loss`` is its batch-mean.
 
@@ -475,7 +670,6 @@ class GaussianDiffusion(nnx.Module):
         """
         fn = self.denoise_fn if denoise_fn is None else denoise_fn
         x_t = self.q_sample(x0, t, noise=noise)
-        pred = fn(x_t, t, cond1, cond2, cond2_mask)
 
         if self.predict_type == "eps":
             target = noise
@@ -488,6 +682,22 @@ class GaussianDiffusion(nnx.Module):
         else:
             raise ValueError(f"Unsupported predict_type: {self.predict_type}")
 
+        needs_key = self.distortion_enabled() or self.self_cond
+        if needs_key and key_aug is None:
+            raise ValueError(
+                "self_cond / distortion need `key_aug`; call through loss()/"
+                "loss_per_example(), which derives it from the loss rng.")
+        if self.distortion_enabled():
+            d = self._draw_distortion(x_t, t, jax.random.fold_in(key_aug, 1))
+            x_t = x_t + d
+            target = self._distorted_target(target, t, d)
+
+        x_sc = None
+        if self.self_cond:
+            x_sc = self._self_cond_train_input(
+                fn, x_t, t, cond1, cond2, cond2_mask, jax.random.fold_in(key_aug, 2))
+        pred = self._apply_denoiser(fn, x_t, t, cond1, cond2, cond2_mask, x_sc)
+
         se = (pred - target) ** 2
         if time_weight is None:
             return jnp.mean(se, axis=tuple(range(1, se.ndim)))  # mean over C, T -> [B]
@@ -498,15 +708,20 @@ class GaussianDiffusion(nnx.Module):
         den = jnp.maximum(jnp.sum(w), 1e-8) * se.shape[1]
         return num / den
 
-    def _compute_loss(self, x0: jnp.ndarray, cond1: jnp.ndarray, cond2: jnp.ndarray, cond2_mask: jnp.ndarray, noise: jnp.ndarray, t: jnp.ndarray) -> jnp.ndarray:
-        return jnp.mean(self._compute_loss_per_example(x0, cond1, cond2, cond2_mask, noise, t))
+    def _compute_loss(self, x0: jnp.ndarray, cond1: jnp.ndarray, cond2: jnp.ndarray, cond2_mask: jnp.ndarray, noise: jnp.ndarray, t: jnp.ndarray, key_aug: jax.Array | None = None) -> jnp.ndarray:
+        return jnp.mean(self._compute_loss_per_example(x0, cond1, cond2, cond2_mask, noise, t, key_aug=key_aug))
 
     def _loss_impl(self, x0: jnp.ndarray, cond1: jnp.ndarray, cond2: jnp.ndarray, cond2_mask: jnp.ndarray, rng: jax.Array, per_example: bool = False, denoise_fn=None, time_weight: jnp.ndarray | None = None) -> jnp.ndarray:
         batch = x0.shape[0]
         key_t, key_noise = jax.random.split(rng)
+        # `fold_in` branches a THIRD stream off `rng` without consuming it, so the
+        # `t` and `eps` draws above are bit-for-bit what they were before
+        # distortion/self-conditioning existed -- which is what makes the
+        # flags-off path a usable equivalence reference.
+        key_aug = jax.random.fold_in(rng, 0x5C0D)
         t = jax.random.randint(key_t, (batch,), 0, self.timesteps, dtype=jnp.int32)
         noise = jax.random.normal(key_noise, x0.shape, dtype=jnp.float32)
-        per = self._compute_loss_per_example(x0, cond1, cond2, cond2_mask, noise, t, denoise_fn=denoise_fn, time_weight=time_weight)
+        per = self._compute_loss_per_example(x0, cond1, cond2, cond2_mask, noise, t, denoise_fn=denoise_fn, time_weight=time_weight, key_aug=key_aug)
         return per if per_example else jnp.mean(per)
 
     def _resample_impl(self, proposals: jnp.ndarray, cond1: jnp.ndarray, cond2: jnp.ndarray, cond2_mask: jnp.ndarray, n_timesteps: int, rng: jax.Array, noise_scale: float = 1.0, eta: float = 1.0, sampling_temp: float = 1.0, temp_mode: str = "uniform") -> jnp.ndarray:
@@ -517,16 +732,19 @@ class GaussianDiffusion(nnx.Module):
         x = self.q_sample(proposals, t0, noise=q_noise)
         temp_sched = self._temp_schedule(sampling_temp, temp_mode, n_timesteps)
 
-        def body(i: int, carry: tuple[jnp.ndarray, jax.Array]) -> tuple[jnp.ndarray, jax.Array]:
-            x_curr, key = carry
+        def body(i: int, carry) -> tuple:
+            x_curr, sc, key = carry
             timestep = n_timesteps - 1 - i
             t = jnp.full((batch_size,), timestep, dtype=jnp.int32)
             key, step_key = jax.random.split(key)
             noise = jax.random.normal(step_key, proposals.shape, dtype=jnp.float32)
             eff_temp = temp_sched[i]
-            return self.p_sample(x_curr, t, cond1, cond2, cond2_mask, noise, eta=eta, sampling_temp=eff_temp), key
+            x_next, x0_pred = self.p_sample_step(
+                x_curr, t, cond1, cond2, cond2_mask, noise, eta=eta, sampling_temp=eff_temp, x_sc=sc)
+            return x_next, self._next_sc(x0_pred), key
 
-        x, _ = jax.lax.fori_loop(0, n_timesteps, body, (x, key_steps))
+        sc0 = jnp.zeros(proposals.shape, dtype=jnp.float32) if self.self_cond else None
+        x, _sc, _ = jax.lax.fori_loop(0, n_timesteps, body, (x, sc0, key_steps))
         return x
 
     def sample(
@@ -584,7 +802,7 @@ class GaussianDiffusion(nnx.Module):
 
     def _posterior_mean_std(
         self, x_t: jnp.ndarray, t: jnp.ndarray, cond1: jnp.ndarray, cond2: jnp.ndarray,
-        cond2_mask: jnp.ndarray, denoise_fn=None,
+        cond2_mask: jnp.ndarray, denoise_fn=None, x_sc: jnp.ndarray | None = None,
     ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
         """DDPM reverse-transition mean and std at step ``t``.
 
@@ -594,7 +812,7 @@ class GaussianDiffusion(nnx.Module):
         ``t=0``; callers floor it for likelihoods). Equivalent to the eta=1 DDIM
         update the default sampler uses, so likelihoods are consistent with it.
         """
-        mean, var, x0_pred = self.p_mean_variance(x_t, t, cond1, cond2, cond2_mask, denoise_fn=denoise_fn)
+        mean, var, x0_pred = self.p_mean_variance(x_t, t, cond1, cond2, cond2_mask, denoise_fn=denoise_fn, x_sc=x_sc)
         std = jnp.sqrt(jnp.maximum(var, 0.0))
         return mean, std, x0_pred
 
@@ -634,15 +852,21 @@ class GaussianDiffusion(nnx.Module):
         sigma_floor: float = 0.1,
         prefix_len: int | None = None,
         denoise_fn=None,
+        x_sc: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         """Log-prob of the reverse transition ``x_t -> x_prev`` at step ``t``.
+
+        Under self-conditioning the transition is ALSO a function of the previous
+        step's clean prediction, so ``x_sc`` must be the value the sampler used --
+        it is recorded in the trace as ``x_sc`` for exactly this reason. Passing
+        the wrong one (or ``None``) silently evaluates a different policy.
 
         Converts the current prediction to ``x0`` and then to the posterior mean
         (see :meth:`_posterior_mean_std`), floors the std at ``sigma_floor`` for a
         stable likelihood, and averages the Gaussian log density over channels and
         the executed time prefix. Returns ``[B]``.
         """
-        mean, std, _ = self._posterior_mean_std(x_t, t, cond1, cond2, cond2_mask, denoise_fn=denoise_fn)
+        mean, std, _ = self._posterior_mean_std(x_t, t, cond1, cond2, cond2_mask, denoise_fn=denoise_fn, x_sc=x_sc)
         std_lp = jnp.maximum(std, sigma_floor)
         ld = self._gaussian_logdensity(x_prev, mean, std_lp)
         return self._reduce_logdensity(ld, prefix_len)
@@ -706,6 +930,12 @@ class GaussianDiffusion(nnx.Module):
         key_late)`` to the return; passing those back as ``x_prefix``/``key_late``
         skips the early steps and reproduces the same late chain -- a gradient
         pass then pays ``k`` denoiser evals instead of ``timesteps``.
+
+        Under ``self_cond`` the late chain also needs the prefix's last clean
+        prediction, so ``x_prefix`` becomes the PAIR ``(x_{k-1}, x0_hat_{k})``
+        instead of a bare array. It stays a single opaque pytree argument, so every
+        caller that just stores and hands it back is unaffected; only code that
+        indexes into it would have to change, and nothing does.
         """
         batch_size = shape[0]
         num_steps = self.timesteps
@@ -721,10 +951,15 @@ class GaussianDiffusion(nnx.Module):
 
         temp_sched = self._temp_schedule(sampling_temp, temp_mode, num_steps)
         if x_prefix is not None:
-            x, key = x_prefix, key_late
+            if self.self_cond:
+                x, sc = x_prefix
+            else:
+                x, sc = x_prefix, None
+            key = key_late
         else:
             key_x, key_steps = jax.random.split(rng)
             x = jax.random.normal(key_x, shape, dtype=jnp.float32)
+            sc = jnp.zeros(shape, dtype=jnp.float32) if self.self_cond else None
 
         # --- early (frozen) steps: compact loop, no trace --------------------- #
         if x_prefix is not None:
@@ -732,18 +967,18 @@ class GaussianDiffusion(nnx.Module):
         elif not stride_frozen:
             # Full unit-step chain (t = num_steps-1 .. k), bit-identical to before.
             def body(i, carry):
-                x_curr, key = carry
+                x_curr, sc_curr, key = carry
                 timestep = num_steps - 1 - i
                 t = jnp.full((batch_size,), timestep, dtype=jnp.int32)
                 key, step_key = jax.random.split(key)
                 noise = jax.random.normal(step_key, shape, dtype=jnp.float32)
-                x_next = self.p_sample(
+                x_next, x0_pred = self.p_sample_step(
                     x_curr, t, cond1, cond2, cond2_mask, noise,
-                    eta=eta, sampling_temp=temp_sched[i],
+                    eta=eta, sampling_temp=temp_sched[i], x_sc=sc_curr,
                 )
-                return x_next, key
+                return x_next, self._next_sc(x0_pred), key
 
-            x, key = jax.lax.fori_loop(0, n_early, body, (x, key_steps))
+            x, sc, key = jax.lax.fori_loop(0, n_early, body, (x, sc, key_steps))
         else:
             # DDIM-subsampled frozen prefix: n_frozen strided steps from the noisiest
             # timestep down to x_{k-1} (the input the unit-step late region expects).
@@ -764,20 +999,20 @@ class GaussianDiffusion(nnx.Module):
             to_arr = jnp.asarray(to_ts, dtype=jnp.int32)
 
             def fbody(i, carry):
-                x_curr, key = carry
+                x_curr, sc_curr, key = carry
                 from_t = jnp.full((batch_size,), from_arr[i], dtype=jnp.int32)
                 to_t = jnp.full((batch_size,), to_arr[i], dtype=jnp.int32)
                 key, step_key = jax.random.split(key)
                 noise = jax.random.normal(step_key, shape, dtype=jnp.float32)
-                x_next = self._ddim_step_strided(
+                x_next, x0_pred = self._ddim_step_strided(
                     x_curr, from_t, to_t, cond1, cond2, cond2_mask, noise,
-                    eta=eta, sampling_temp=sampling_temp,
+                    eta=eta, sampling_temp=sampling_temp, x_sc=sc_curr,
                 )
-                return x_next, key
+                return x_next, self._next_sc(x0_pred), key
 
-            x, key = jax.lax.fori_loop(0, n_frozen, fbody, (x, key_steps))
+            x, sc, key = jax.lax.fori_loop(0, n_frozen, fbody, (x, sc, key_steps))
 
-        prefix_out = (x, key)
+        prefix_out = ((x, sc) if self.self_cond else x, key)
 
         # --- late (trainable) steps: record transitions ---------------------- #
         # Collection (rl_mode) runs the sequential late chain as a compiled
@@ -790,12 +1025,12 @@ class GaussianDiffusion(nnx.Module):
             ts = jnp.arange(k - 1, -1, -1, dtype=jnp.int32)  # timesteps k-1 .. 0
 
             def late_body(carry, timestep):
-                x_in, key = carry
+                x_in, sc_in, key = carry
                 t = jnp.full((batch_size,), timestep, dtype=jnp.int32)
                 key, step_key = jax.random.split(key)
                 noise = jax.random.normal(step_key, shape, dtype=jnp.float32)
                 mean, _var, _x0 = self.p_mean_variance(
-                    x_in, t, cond1, cond2, cond2_mask, denoise_fn=trainable_denoise_fn)
+                    x_in, t, cond1, cond2, cond2_mask, denoise_fn=trainable_denoise_fn, x_sc=sc_in)
                 std = jnp.sqrt(jnp.maximum(_var, 0.0))
                 # Exploration noise on every trainable step, including t=0.
                 std_s = jnp.maximum(std, sigma_sample_floor)
@@ -803,16 +1038,21 @@ class GaussianDiffusion(nnx.Module):
                 std_lp = jnp.maximum(std, sigma_logprob_floor)
                 lp = self._reduce_logdensity(
                     self._gaussian_logdensity(x_out, mean, std_lp), prefix_len)
-                return (x_out, key), (x_in, x_out, t, mean, std_s, lp)
+                # `sc_in`, not the new prediction, is recorded: it is the input
+                # this transition was computed from, and re-evaluating the
+                # log-prob needs exactly that.
+                return (x_out, self._next_sc(_x0), key), (x_in, x_out, t, mean, std_s, lp, sc_in)
 
-            (x, _key), (xt_s, xprev_s, t_s, mean_s, std_s, lp_s) = jax.lax.scan(
-                late_body, (x, key), ts)
+            (x, _sc, _key), (xt_s, xprev_s, t_s, mean_s, std_s, lp_s, sc_s) = jax.lax.scan(
+                late_body, (x, sc, key), ts)
             trace = {"x_t": xt_s, "x_prev": xprev_s, "timestep": t_s,
                      "mean": mean_s, "std": std_s, "log_prob": lp_s}
+            if self.self_cond:
+                trace["x_sc"] = sc_s
             return (x, trace, prefix_out) if return_prefix else (x, trace)
 
         # --- late (trainable) steps: unrolled, record transitions ------------ #
-        xt_l, xprev_l, t_l, mean_l, std_l, lp_l = [], [], [], [], [], []
+        xt_l, xprev_l, t_l, mean_l, std_l, lp_l, sc_l = [], [], [], [], [], [], []
         for j in range(k):
             i = n_early + j
             timestep = num_steps - 1 - i  # runs k-1 .. 0
@@ -824,9 +1064,11 @@ class GaussianDiffusion(nnx.Module):
             # ONE denoiser call per step; both the update and the recorded
             # posterior stats derive from this single prediction (calling the
             # network twice would perturb the trajectory via its nnx rng streams).
+            sc_in = sc
             mean, _var, x0_pred = self.p_mean_variance(
-                x_in, t, cond1, cond2, cond2_mask, denoise_fn=trainable_denoise_fn
+                x_in, t, cond1, cond2, cond2_mask, denoise_fn=trainable_denoise_fn, x_sc=sc_in
             )
+            sc = self._next_sc(x0_pred)
             std = jnp.sqrt(jnp.maximum(_var, 0.0))
 
             if rl_mode:
@@ -847,6 +1089,7 @@ class GaussianDiffusion(nnx.Module):
 
             xt_l.append(x_in); xprev_l.append(x_out); t_l.append(t)
             mean_l.append(mean); std_l.append(rec_std); lp_l.append(lp)
+            sc_l.append(sc_in)
             x = x_out
 
         def _stack(lst, empty_shape):
@@ -860,6 +1103,8 @@ class GaussianDiffusion(nnx.Module):
             "std": _stack(std_l, (0,) + tuple(shape)),
             "log_prob": jnp.stack(lp_l, axis=0) if lp_l else jnp.zeros((0, batch_size), jnp.float32),
         }
+        if self.self_cond:
+            trace["x_sc"] = _stack(sc_l, (0,) + tuple(shape))
         return (x, trace, prefix_out) if return_prefix else (x, trace)
 
     def resample(

@@ -83,6 +83,14 @@ class DiffusionPolicy(nnx.Module):
         predict_type: str = "v",
         predict_horizon: int = 25,
         subgoal_conditioned: bool = False,
+        self_cond: bool = False,
+        sc_train_prob: float = 0.5,
+        distort_p: float = 0.0,
+        distort_sigma: float = 0.0,
+        distort_mode: str = "relative",
+        distort_t_max: int = -1,
+        distort_t_min: int = 0,
+        distort_channels: int = 2,
         **kwargs: Any,
     ) -> None:
         del kwargs
@@ -110,6 +118,14 @@ class DiffusionPolicy(nnx.Module):
         if self.subgoal_conditioned:
             self.subgoal_encoder = MLP([2, hidden_dim, hidden_dim, cond_dim], rngs=rngs)
 
+        # FlowMol3 inference-OOD options (arXiv 2508.12629). All default off, and
+        # off they leave both the parameter tree and the traced programs exactly as
+        # they were -- a checkpoint trained without them still loads and samples
+        # bit-identically. `self_cond` is the one that changes the parameter tree
+        # (the stem's fan-in doubles); see
+        # `rl.diffusion_ft.self_cond_init` for the zero-initialized expansion that
+        # turns a base checkpoint into a self-cond one without changing its outputs.
+        self.self_cond = bool(self_cond)
         denoise_fn = UNet1DConditioned(
             in_ch=target_dim,
             cond_dim=cond_dim,
@@ -117,12 +133,21 @@ class DiffusionPolicy(nnx.Module):
             time_emb_dim=cond_dim,
             horizon=predict_horizon,
             hidden_dim=hidden_dim,
+            self_cond=self_cond,
             rngs=rngs,
         )
         self.diffusion = GaussianDiffusion(
             denoise_fn=denoise_fn,
             timesteps=100,
             predict_type=predict_type,
+            self_cond=self_cond,
+            sc_train_prob=sc_train_prob,
+            distort_p=distort_p,
+            distort_sigma=distort_sigma,
+            distort_mode=distort_mode,
+            distort_t_max=distort_t_max,
+            distort_t_min=distort_t_min,
+            distort_channels=distort_channels,
         )
 
         self._mesh: Optional[Mesh] = None
@@ -231,6 +256,7 @@ class DiffusionPolicy(nnx.Module):
         self, x_t: jnp.ndarray, x_prev: jnp.ndarray, t: jnp.ndarray,
         cond: jnp.ndarray, inst_cond: jnp.ndarray, inst_cond_mask: jnp.ndarray, *,
         sigma_floor: float = 0.1, prefix_len: int | None = None, trainable_denoise_fn=None,
+        x_sc: jnp.ndarray | None = None,
     ) -> jnp.ndarray:
         """Recompute the transition log-prob ``[B]`` for a stored transition.
 
@@ -240,6 +266,7 @@ class DiffusionPolicy(nnx.Module):
         return self.diffusion.transition_log_prob(
             x_t, x_prev, t, cond1=cond, cond2=inst_cond, cond2_mask=inst_cond_mask,
             sigma_floor=sigma_floor, prefix_len=prefix_len, denoise_fn=trainable_denoise_fn,
+            x_sc=x_sc,
         )
 
     def _resample_from_condition_impl(

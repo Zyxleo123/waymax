@@ -49,6 +49,10 @@
 #     DFT_SELECT_BANK="tw0.85,tw0.7,lat0.25,lat-0.25" bash ...
 #   # re-analyze only:
 #   sbatch rl/diffusion_ft/slurm/select_analysis.sbatch <select_dir>/analyze.env
+#   # REACTIVE NPCs: use submit_reactive_select.sh, which runs the rails and the
+#   # idm_brake arms as two sibling jobs. `overlap` is a DIFFERENT metric under
+#   # DFT_SIM_AGENTS=idm_brake, so nothing there is comparable to a run above and
+#   # `base` has to be inside the same job.
 set -euo pipefail
 ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
@@ -57,7 +61,9 @@ VDIR=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verifie
 SPLITS3="${DFT_SPLITS3_JSON:-$VDIR/eval_splits_3strata.json}"
 RUN=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
 CKPTS="${DFT_SELECT_CKPTS:-$RUN/base_s0/iter_000110 $RUN/base_s1/iter_000110 $RUN/base_s2/iter_000110}"
-FT_ARMS="${DFT_FT_ARMS:-ft,bf_cons=ft:cons:20,bf_cons10=ft:cons:10,bf_margin=ft:margin:20}"
+# `-`, not `:-`: an explicitly EMPTY DFT_FT_ARMS means "no fine-tune arms" (a
+# base/bank-only job still needs one checkpoint dir, but never loads it).
+FT_ARMS="${DFT_FT_ARMS-ft,bf_cons=ft:cons:20,bf_cons10=ft:cons:10,bf_margin=ft:margin:20}"
 BASE_ARMS="${DFT_BASE_ARMS:-base,bb_cons=base2:cons:20,bfull_cons=basefull:cons:20,bank_cons10=bank:cons:10,bank_cons=bank:cons:20}"
 SEED="${DFT_SELECT_SEED:-4242}"
 REPEATS="${DFT_SELECT_REPEATS:-4}"
@@ -70,9 +76,14 @@ ENV_DIR="$SEL_DIR/env"; mkdir -p "$ENV_DIR" "$SEL_DIR/tasks" "$ROOT/logs/dft"
 
 [[ "$SEED" != "777" && "$SEED" != "12345" ]] || {
   echo "FATAL: seed $SEED reuses selection draws (777 = splits, 12345 = training eval)" >&2; exit 1; }
-for c in $CKPTS; do
-  [[ -s "$c/tparams.npz" ]] || { echo "FATAL: missing $c/tparams.npz" >&2; exit 1; }
-done
+# With DFT_SELECT_DEP set the checkpoints may not exist YET (a training array
+# upstream writes them); the batch job re-checks at start and exits 0 with the
+# reason if one is still missing.
+if [[ -z "${DFT_SELECT_DEP:-}" ]]; then
+  for c in $CKPTS; do
+    [[ -s "$c/tparams.npz" ]] || { echo "FATAL: missing $c/tparams.npz" >&2; exit 1; }
+  done
+fi
 if [[ -n "${DFT_SELECT_SMOKE:-}" ]]; then
   REPEATS=1; SHARDS=1; CKPTS="${CKPTS%% *}"; CAP="${DFT_SELECT_CAP:-4}"; CHUNK=4
   echo "SMOKE: 1 checkpoint, 1 repeat, 1 shard, $CAP scenes per split"
@@ -90,17 +101,25 @@ kv() { printf "%s='%s'\n" "$1" "${2//\'/\'\\\'\'}"; }
 SB_FLAGS=()
 [[ -n "$EXCLUDE" ]] && SB_FLAGS+=(--exclude="$EXCLUDE")
 
-DEP=()
+DEPS=()
 if [[ ! -s "$SPLITS3" ]]; then
   BID=$(sb --parsable rl/diffusion_ft/slurm/build_intermittent.sbatch "DFT_SPLITS3_JSON=$SPLITS3")
-  DEP=(--dependency="afterok:${BID}")
+  DEPS+=("afterok:${BID}")
   echo "build   -> job $BID (CPU) -> $SPLITS3"
 fi
+# A caller's own upstream (e.g. a gate job: DFT_SELECT_DEP=afterok:<id>). Pair it
+# with DFT_REQUIRE_GATE so the tasks read the gate's ANSWER, not just its exit.
+[[ -n "${DFT_SELECT_DEP:-}" ]] && DEPS+=("$DFT_SELECT_DEP")
+DEP=()
+if ((${#DEPS[@]})); then DEP=(--dependency="$(IFS=,; echo "${DEPS[*]}")"); fi
 
 i=0; first=1
 for c in $CKPTS; do
   tag="$(basename "$(dirname "$c")")_$(basename "$c")"
-  arms="$FT_ARMS"; [[ "$first" == 1 ]] && arms="$BASE_ARMS,$FT_ARMS"
+  arms="$FT_ARMS"; [[ "$first" == 1 ]] && arms="$BASE_ARMS${FT_ARMS:+,$FT_ARMS}"
+  if [[ -z "$arms" ]]; then
+    echo "skip    $c: no arms for it (DFT_FT_ARMS is empty)"; first=0; continue
+  fi
   for ((s = 0; s < SHARDS; s++)); do
     d="$SEL_DIR/tasks/${tag}_shard${s}"; mkdir -p "$d"
     {
@@ -120,12 +139,33 @@ for c in $CKPTS; do
       kv DFT_SELECT_BANK "${DFT_SELECT_BANK:-tw0.85,tw1.15,lat0.25,lat-0.25,tw0.7,tw1.3,lat0.5,lat-0.5}"
       kv DFT_SELECT_RAMP "${DFT_SELECT_RAMP:-10}"
       kv DFT_SELECT_BANKS "${DFT_SELECT_BANKS:-}"
+      kv DFT_SELECT_BANK_RAMPS "${DFT_SELECT_BANK_RAMPS:-}"
+      kv DFT_SELECT_BANK_BLENDS "${DFT_SELECT_BANK_BLENDS:-}"
+      kv DFT_SELECT_BANK_NEIGHBORS "${DFT_SELECT_BANK_NEIGHBORS:-}"
+      kv DFT_SELECT_BANK_OPTS "${DFT_SELECT_BANK_OPTS:-}"
+      kv DFT_SELECT_OPT_CFG "${DFT_SELECT_OPT_CFG:-}"
+      kv DFT_SELECT_BANK_OPT_CFGS "${DFT_SELECT_BANK_OPT_CFGS:-}"
+      kv DFT_SELECT_BANK_PREFER "${DFT_SELECT_BANK_PREFER:-}"
+      kv DFT_SELECT_ES "${DFT_SELECT_ES:-}"
+      kv DFT_DUMP_TRAJ "${DFT_DUMP_TRAJ:-0}"
       kv DFT_SELECT_TOL_M "${DFT_SELECT_TOL_M:-1.0}"
       kv DFT_SELECT_MARGIN_M "${DFT_SELECT_MARGIN_M:-0.3}"
       kv DFT_SELECT_DELTA_M "${DFT_SELECT_DELTA_M:-0.2}"
       # rollout shape = the stopping sweep's eval exactly
       kv DFT_K_TRAINABLE 10; kv DFT_PREFIX_LEN 5; kv DFT_SIGMA_FLOOR 1e-4
       kv DFT_REPLAN 10; kv DFT_MAX_REPLANS 8
+      # `idm` makes the other agents reactive, which changes what `overlap`
+      # means -- so it changes every number in the run, not just the arms'
+      # relative order. Keep BASE_ARMS in the same job when setting it.
+      kv DFT_SIM_AGENTS "${DFT_SIM_AGENTS:-none}"
+      # Which velocity the policy is shown for its own executed steps. Like
+      # sim_agents it changes every arm, so `base` belongs in the same job.
+      kv DFT_EGO_VEL_SOURCE "${DFT_EGO_VEL_SOURCE:-commanded}"
+      # The plan's world time grid. `median` (default since 2026-09-24, validated
+      # by jobs 62629-62634) is the scene's own clock; `first` reproduces every
+      # earlier result. Written explicitly, so a requeue can never switch methods.
+      kv DFT_WORLD_DT_METHOD "${DFT_WORLD_DT_METHOD:-median}"
+      kv DFT_REQUIRE_GATE "${DFT_REQUIRE_GATE:-}"
     } > "$ENV_DIR/$i.env"
     # Cheap invariant: source what we just wrote in a CLEAN shell and require
     # every key to come back byte-identical. Catches any value that needs quoting
@@ -143,6 +183,7 @@ for c in $CKPTS; do
   first=0
 done
 
+(( i > 0 )) || { echo "FATAL: no tasks to submit (no arms for any checkpoint)" >&2; exit 1; }
 AID=$(sb --parsable ${DEP[@]+"${DEP[@]}"} ${SB_FLAGS[@]+"${SB_FLAGS[@]}"} \
   --array="0-$((i - 1))%${MAX_CONCURRENT}" --job-name=dft_select \
   rl/diffusion_ft/slurm/select_eval.sbatch "$ENV_DIR")
@@ -151,6 +192,8 @@ AENV="$SEL_DIR/analyze.env"
   echo "DFT_SELECT_REPEATS=$REPEATS"; } > "$AENV"
 GID=$(sb --parsable --dependency="afterok:${AID}" rl/diffusion_ft/slurm/select_analysis.sbatch "$AENV")
 echo
+# Record the array id so a caller can chain onto it without guessing from squeue.
+echo "$AID" > "$SEL_DIR/jobid.txt"
 echo "score   -> array $AID ($i tasks, %$MAX_CONCURRENT, GPU, exclude=${EXCLUDE:-none})"
 echo "analyze -> job $GID (CPU, afterok:$AID)"
 echo "out     -> $SEL_DIR/select_summary.{json,png}"

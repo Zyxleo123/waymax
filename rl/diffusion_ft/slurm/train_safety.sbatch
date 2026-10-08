@@ -184,6 +184,41 @@ DFT_EDGE_TAU="${DFT_EDGE_TAU:-0.15}"
 DFT_AGENT_TAU="${DFT_AGENT_TAU:-0.25}"
 DFT_AGENT_GEOMETRY="${DFT_AGENT_GEOMETRY:-exact}"
 DFT_N_DISCS="${DFT_N_DISCS:-5}"
+# Shape of the barrier. `softplus` (default, and what every run on record used)
+# never reaches zero: a corner or an agent comfortably clear of the margin still
+# contributes value and gradient, and since the barrier is SUMMED over 4 corners
+# x N agents x T steps that epsilon scales with the scene's traffic density and
+# length rather than with anything the policy did. `hinge2` is the
+# quadratic-smoothed hinge -- same knee width, same unbounded ramp, still C^1,
+# but exactly zero value and gradient at/past the margin. The margins were
+# calibrated under softplus; measure the difference with
+# tests/probe_barrier_tail.py before flipping this.
+DFT_BARRIER_SHAPE="${DFT_BARRIER_SHAPE:-softplus}"
+# How a corner's road-edge clearance is measured (SafetyLossConfig.edge_geometry).
+# `point` (default, every run on record) is waymax's distance to the nearest
+# roadgraph SAMPLE; `segment` is the distance to the polyline through it. Same
+# sign, so the same `offroad` boundary; only the magnitude near an edge moves,
+# and it only ever shrinks -- so DFT_EDGE_MARGIN (calibrated under `point`) means
+# a stricter barrier under `segment` unless it is re-measured.
+DFT_EDGE_GEOMETRY="${DFT_EDGE_GEOMETRY:-point}"
+# A file holding `DFT_EDGE_MARGIN=<m>`, written by calibrate_edge_geometry.sbatch
+# ONLY when its gate passes; sourced here so the measured margin overrides the
+# env file's. Set but missing = the calibration's gate failed (or never ran):
+# say so and exit 0 rather than train on a margin nobody measured.
+DFT_EDGE_MARGIN_FILE="${DFT_EDGE_MARGIN_FILE:-}"
+if [[ -n "$DFT_EDGE_MARGIN_FILE" ]]; then
+  if [[ ! -s "$DFT_EDGE_MARGIN_FILE" ]]; then
+    echo "TRAINING NOT RUN: DFT_EDGE_MARGIN_FILE=$DFT_EDGE_MARGIN_FILE does not exist --"
+    echo "  the edge-margin calibration's gate failed or it never ran; see its .out"
+    echo "  and decision.json next to that path."
+    exit 0
+  fi
+  # shellcheck disable=SC1090
+  source "$DFT_EDGE_MARGIN_FILE"
+  [[ "$DFT_EDGE_MARGIN" =~ ^[0-9]*\.?[0-9]+$ ]] || {
+    echo "FATAL: $DFT_EDGE_MARGIN_FILE set DFT_EDGE_MARGIN='$DFT_EDGE_MARGIN'" >&2; exit 1; }
+  echo "edge margin from $DFT_EDGE_MARGIN_FILE: $DFT_EDGE_MARGIN"
+fi
 
 # ---- which part of the candidate each term is charged on ---------------------
 # Two different time bases, so two different units (see `_init_windows`):
@@ -213,6 +248,30 @@ DFT_PRESERVE_REPLAY_USES="${DFT_PRESERVE_REPLAY_USES:-10}"
 DFT_REPAIR_DATA="${DFT_REPAIR_DATA:-}"
 DFT_REPAIR_WEIGHT="${DFT_REPAIR_WEIGHT:-0.0}"
 DFT_REPAIR_BATCH="${DFT_REPAIR_BATCH:-16}"
+# Distillation knobs (2026-09-28). Defaults reproduce every earlier repair arm.
+# STEPS = Adam steps per iteration on the repair term; ROWS=solved keeps only rows
+# whose episode solved (proposal_select --dump_bc data); SPLIT_RATIO fixes the
+# per-batch mix by collection split ('failure_train=1,success_train=1').
+DFT_REPAIR_STEPS="${DFT_REPAIR_STEPS:-1}"
+DFT_REPAIR_ROWS="${DFT_REPAIR_ROWS:-all}"
+DFT_REPAIR_SPLIT_RATIO="${DFT_REPAIR_SPLIT_RATIO:-}"
+# Fixed share of each repair batch from rows the arm EDITED (0 = no such pool).
+DFT_REPAIR_SWITCH_SHARE="${DFT_REPAIR_SWITCH_SHARE:-0.0}"
+# ---- Diffusion-DPO on bank pairs (2026-10-01; train_safety._init_pref) -------
+# DATA = proposal_select --dump_bc rows that carry `rejected`. WEIGHT 0 = off.
+# T_MAX -1 = k_trainable; EDIT_WEIGHT 0 = no edit up-weighting.
+DFT_PREF_DATA="${DFT_PREF_DATA:-}"
+DFT_PREF_WEIGHT="${DFT_PREF_WEIGHT:-0.0}"
+DFT_PREF_BETA="${DFT_PREF_BETA:-1.0}"
+DFT_PREF_BATCH="${DFT_PREF_BATCH:-16}"
+DFT_PREF_ANCHOR_BATCH="${DFT_PREF_ANCHOR_BATCH:-16}"
+DFT_PREF_ANCHOR_WEIGHT="${DFT_PREF_ANCHOR_WEIGHT:-100}"
+DFT_PREF_STEPS="${DFT_PREF_STEPS:-1}"
+DFT_PREF_ROWS="${DFT_PREF_ROWS:-solved}"
+DFT_PREF_T_MIN="${DFT_PREF_T_MIN:-0}"
+DFT_PREF_T_MAX="${DFT_PREF_T_MAX:--1}"
+DFT_PREF_EDIT_WEIGHT="${DFT_PREF_EDIT_WEIGHT:-0.0}"
+DFT_PREF_EDIT_DELTA_M="${DFT_PREF_EDIT_DELTA_M:-0.1}"
 # ---- transition replay (2026-09-14) ------------------------------------------
 # The collection rollout's OWN reverse-diffusion transitions, kept one per datum
 # and replayed later. The safety loss is charged on the clean prediction reached
@@ -291,6 +350,31 @@ DFT_ITERS="${DFT_ITERS:-500}"
 DFT_EPOCHS="${DFT_EPOCHS:-1}"
 DFT_MAX_REPLANS="${DFT_MAX_REPLANS:-8}"
 DFT_REPLAN="${DFT_REPLAN:-10}"
+# ---- how the other agents move ---------------------------------------------
+# `none` log-replays every non-ego object (what every run before 2026-09-19
+# used): it repeats its recorded pose and cannot see the ego. `idm` hands them
+# to waymax's IDMRoutePolicy -- each stays on its own logged path and modulates
+# only its speed against whatever box is ahead of it, the ego included.
+#
+# THIS CHANGES WHAT `overlap` MEANS. A run under `idm` is not comparable to the
+# curve of a run under `none`; it needs its own base arm. Both the value and the
+# neighbour source below are echoed into the log so no curve is ever read
+# without knowing which sim produced it.
+DFT_SIM_AGENTS="${DFT_SIM_AGENTS:-none}"
+# Where the SAFETY LOSS reads the other agents' boxes: `log` = the recorded
+# motion, `sim` = where the NPCs actually were when the collected episode was
+# driven. Under DFT_SIM_AGENTS=none the two hold the same motion and `sim` is a
+# no-op (useful only as an equivalence control). Under `idm` they differ, and
+# `log` charges the candidate for a hazard that braked out of existence.
+# Incompatible with DFT_TB_WEIGHT>0 -- the trainer refuses at startup rather
+# than silently mixing two neighbour sources inside one objective.
+DFT_NEIGHBOR_SOURCE="${DFT_NEIGHBOR_SOURCE:-log}"
+# How each scene's world step is read off its timestamps. `median` is the fix
+# (2026-09-24; jobs 62629-62634: 44/173 failure_heldout scenes ran at ~0.75x
+# under `first`, solved 0.01 -> 0.95 once fixed). Submitters write it explicitly;
+# the fallback stays `first` so an OLDER env file without the key, requeued or
+# resumed, keeps the clock its run started on. See compute_world_dt_seconds.
+DFT_WORLD_DT_METHOD="${DFT_WORLD_DT_METHOD:-first}"
 DFT_LR="${DFT_LR:-1e-5}"
 # 100, not 10. At 10 the run spent 90-95% of its wall clock evaluating (see the
 # DFT_SPLIT_CAP note): 70 eval points against 2.1 h of training. 100 still gives
@@ -343,17 +427,28 @@ DFT_WANDB_NAME="${DFT_WANDB_NAME:-}"
 
 echo "host=${SLURMD_NODENAME:-unknown} gpu=${CUDA_VISIBLE_DEVICES:-unset}" \
      "mem_fraction=$XLA_PYTHON_CLIENT_MEM_FRACTION"
+# sacct is dead here: the .out is the only record of the node and the request.
+nvidia-smi -L 2>/dev/null || echo "nvidia-smi: unavailable"
+echo "request: cpus=${SLURM_CPUS_PER_TASK:-?} mem=${SLURM_MEM_PER_NODE:-?}M job=${SLURM_JOB_ID:-?} array_task=${SLURM_ARRAY_TASK_ID:-none}"
 echo "out_dir=$DFT_OUT_DIR iters=$DFT_ITERS lr=$DFT_LR k_trainable=$DFT_K_TRAINABLE"
 echo "anchor_weight=$DFT_ANCHOR_WEIGHT safety_weight=$DFT_SAFETY_WEIGHT" \
      "bc_weight=$DFT_BC_WEIGHT base_anchor_weight=$DFT_BASE_ANCHOR_WEIGHT" \
      "base_anchor_success_only=$DFT_BASE_ANCHOR_SUCCESS_ONLY"
+echo "pref_weight=$DFT_PREF_WEIGHT beta=$DFT_PREF_BETA batch=$DFT_PREF_BATCH" \
+     "anchor=$DFT_PREF_ANCHOR_WEIGHT x $DFT_PREF_ANCHOR_BATCH steps=$DFT_PREF_STEPS" \
+     "rows=$DFT_PREF_ROWS t=[$DFT_PREF_T_MIN,$DFT_PREF_T_MAX)" \
+     "edit_weight=$DFT_PREF_EDIT_WEIGHT@${DFT_PREF_EDIT_DELTA_M}m data=${DFT_PREF_DATA:-none}"
 echo "margins edge=$DFT_EDGE_MARGIN agent=$DFT_AGENT_MARGIN geom=$DFT_AGENT_GEOMETRY" \
-     "tau edge=$DFT_EDGE_TAU agent=$DFT_AGENT_TAU"
+     "tau edge=$DFT_EDGE_TAU agent=$DFT_AGENT_TAU shape=$DFT_BARRIER_SHAPE" \
+     "edge_geom=$DFT_EDGE_GEOMETRY"
 echo "windows safety=$DFT_SAFETY_WINDOW world-steps (0=executed, -1=full)" \
      "anchor=$DFT_ANCHOR_WINDOW model-steps (-1=full horizon, 0=executed)"
 echo "safety_rows=$DFT_SAFETY_ROWS preserve_weight=$DFT_PRESERVE_WEIGHT" \
      "preserve_scenes=$DFT_PRESERVE_SCENES risk=${DFT_PRESERVE_RISK:-none}"
 echo "sigma_floor=$DFT_SIGMA_FLOOR replan=$DFT_REPLAN max_replans=$DFT_MAX_REPLANS"
+echo "sim_agents=$DFT_SIM_AGENTS neighbor_source=$DFT_NEIGHBOR_SOURCE" \
+     "(overlap under idm is NOT the same metric as under none)"
+echo "world_dt_method=$DFT_WORLD_DT_METHOD (first = the pre-2026-09-24 clock)"
 echo "collect_steps=$DFT_COLLECT_STEPS eval_steps=$DFT_EVAL_STEPS (0=full chain)"
 echo "grad_accum=$DFT_GRAD_ACCUM eval_seed=$DFT_EVAL_SEED" \
      "eval_repeats=$DFT_EVAL_REPEATS eval_base=$DFT_EVAL_BASE"
@@ -393,6 +488,13 @@ if [[ "$DFT_REPAIR_WEIGHT" != "0" && "$DFT_REPAIR_WEIGHT" != "0.0" ]] \
   echo "  (either the repair search found no verified repair, or it did not run -- see its .out)"
   exit 0
 fi
+# Same gate for the preference term: no collected pairs, nothing to learn.
+if [[ "$DFT_PREF_WEIGHT" != "0" && "$DFT_PREF_WEIGHT" != "0.0" ]] \
+   && ! compgen -G "$DFT_PREF_DATA" > /dev/null; then
+  echo "TRAINING NOT RUN: pref_weight=$DFT_PREF_WEIGHT but no pair data matches '$DFT_PREF_DATA'"
+  echo "  (the collection did not run or wrote nothing -- see its .out)"
+  exit 0
+fi
 if ! (dd if=/dev/zero of="$DFT_OUT_DIR/.probe" bs=1M count=8 status=none && \
       rm -f "$DFT_OUT_DIR/.probe"); then
   echo "FATAL: cannot write 8 MB to $DFT_OUT_DIR (quota?)" >&2; exit 1
@@ -401,6 +503,8 @@ fi
 ARGS=(--ckpt "$DFT_CKPT" --out_dir "$DFT_OUT_DIR"
       --iters "$DFT_ITERS" --epochs "$DFT_EPOCHS"
       --max_replans "$DFT_MAX_REPLANS" --replan_interval_steps "$DFT_REPLAN"
+      --sim_agents "$DFT_SIM_AGENTS" --neighbor_source "$DFT_NEIGHBOR_SOURCE"
+      --world_dt_method "$DFT_WORLD_DT_METHOD"
       --lr "$DFT_LR" --k_trainable "$DFT_K_TRAINABLE" --prefix_len "$DFT_PREFIX_LEN"
       --sigma_floor "$DFT_SIGMA_FLOOR"
       --collect_steps "$DFT_COLLECT_STEPS" --eval_steps "$DFT_EVAL_STEPS"
@@ -411,6 +515,7 @@ ARGS=(--ckpt "$DFT_CKPT" --out_dir "$DFT_OUT_DIR"
       --bc_weight "$DFT_BC_WEIGHT" --base_anchor_weight "$DFT_BASE_ANCHOR_WEIGHT"
       --edge_margin "$DFT_EDGE_MARGIN" --agent_margin "$DFT_AGENT_MARGIN"
       --edge_tau "$DFT_EDGE_TAU" --agent_tau "$DFT_AGENT_TAU"
+      --barrier_shape "$DFT_BARRIER_SHAPE" --edge_geometry "$DFT_EDGE_GEOMETRY"
       # `=` form: both take -1, and a bare `--flag -1` is what argparse misread
       # as an option string in job 43942.
       --safety_window="$DFT_SAFETY_WINDOW" --anchor_window="$DFT_ANCHOR_WINDOW"
@@ -423,7 +528,16 @@ ARGS=(--ckpt "$DFT_CKPT" --out_dir "$DFT_OUT_DIR"
       --preserve_replay_per_iter "$DFT_PRESERVE_REPLAY_PER_ITER"
       --preserve_replay_uses "$DFT_PRESERVE_REPLAY_USES"
       --repair_data "$DFT_REPAIR_DATA" --repair_weight "$DFT_REPAIR_WEIGHT"
-      --repair_batch "$DFT_REPAIR_BATCH"
+      --repair_batch "$DFT_REPAIR_BATCH" --repair_steps "$DFT_REPAIR_STEPS"
+      --repair_rows "$DFT_REPAIR_ROWS" --repair_split_ratio "$DFT_REPAIR_SPLIT_RATIO"
+      --repair_switch_share "$DFT_REPAIR_SWITCH_SHARE"
+      --pref_data "$DFT_PREF_DATA" --pref_weight "$DFT_PREF_WEIGHT"
+      --pref_beta "$DFT_PREF_BETA" --pref_batch "$DFT_PREF_BATCH"
+      --pref_anchor_batch "$DFT_PREF_ANCHOR_BATCH"
+      --pref_anchor_weight "$DFT_PREF_ANCHOR_WEIGHT" --pref_steps "$DFT_PREF_STEPS"
+      --pref_rows "$DFT_PREF_ROWS" --pref_t_min "$DFT_PREF_T_MIN"
+      --pref_t_max="$DFT_PREF_T_MAX" --pref_edit_weight "$DFT_PREF_EDIT_WEIGHT"
+      --pref_edit_delta_m "$DFT_PREF_EDIT_DELTA_M"
       --tb_weight "$DFT_TB_WEIGHT" --tb_capacity "$DFT_TB_CAPACITY"
       --tb_batch "$DFT_TB_BATCH" --tb_store_per_replan "$DFT_TB_STORE_PER_REPLAN"
       --tb_max_uses "$DFT_TB_MAX_USES" --tb_min_size "$DFT_TB_MIN_SIZE"

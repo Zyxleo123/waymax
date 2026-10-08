@@ -41,3 +41,12 @@ done
   --out "$SEL_DIR/select_summary.json"
 "$PY" -m rl.diffusion_ft.tools.plot_select --in_json "$SEL_DIR/select_summary.json" \
   --out_png "$SEL_DIR/select_summary.png"
+# Rows from runners that record the termination-aware flags get a second summary
+# scored on them (tools/select_analysis.py --term); older rows are left alone.
+first_rows=("$SEL_DIR"/tasks/*/rows.jsonl)
+line1="$(head -n 1 "${first_rows[0]}")"
+if [[ "$line1" == *'"solved_term"'* ]]; then
+  "$PY" -m rl.diffusion_ft.tools.select_analysis --splits_json "$SPLITS_JSON" \
+    --rows "$SEL_DIR/tasks/*/rows.jsonl" --repeats "$REPEATS" --term \
+    --out "$SEL_DIR/select_summary_term.json"
+fi

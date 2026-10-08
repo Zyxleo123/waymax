@@ -236,6 +236,22 @@ class SafetyLossConfig:
     # overhang instead of 0.28 m); that is what put the expert's p0.1 agent
     # clearance at -3.62 m, far past anything a pair of cars can explain.
     adaptive_discs: bool = True
+    # --- barrier shape --- #
+    # Which one-sided barrier both terms use (:func:`barrier`). "softplus" has
+    # infinite support: a corner or an agent that is *comfortably clear* still
+    # contributes a small cost and a small gradient, and because the barrier is
+    # summed over 4 corners x N agents x T steps that epsilon is multiplied by a
+    # number that grows with how crowded and how long the scene is -- so a
+    # trivially safe scene is charged for its traffic density rather than for
+    # anything the policy did. "hinge2" is the quadratic-smoothed hinge: same
+    # knee width, same unbounded ramp, same C^1 smoothness, but *exactly* zero
+    # value and zero gradient at and beyond the margin, so only what is actually
+    # inside the margin is ever charged.
+    #
+    # Left at "softplus" so no calibrated number changes silently -- every
+    # margin in this file, and every run on record, was measured under it. The
+    # tail's actual size is measured by tests/probe_barrier_tail.py.
+    barrier_shape: str = "softplus"
     # Altitude stretch used when associating roadgraph points, so an overpass
     # directly above does not capture the query. Matches waymax's default.
     z_stretch: float = 2.0
@@ -248,16 +264,65 @@ class SafetyLossConfig:
 # --------------------------------------------------------------------------- #
 # Shaping
 # --------------------------------------------------------------------------- #
-def barrier(clearance: jax.Array, margin: float, tau: float) -> jax.Array:
-    """One-sided smooth barrier: ~0 when clear, ~``margin - clearance`` when not.
+def barrier(
+    clearance: jax.Array, margin: float, tau: float, shape: str = "softplus"
+) -> jax.Array:
+    """One-sided barrier: ~0 when clear, ~``margin - clearance`` when not.
 
-    ``tau * softplus((margin - c) / tau)``. Written through ``jax.nn.softplus``
-    (which is the numerically stable ``log1p(exp(-|z|)) + max(z, 0)`` form) so
-    that a deep violation -- ``c`` tens of metres negative, which happens on the
-    broken records in the failure set -- does not overflow to ``inf`` and poison
-    the whole batch's gradient with NaN.
+    Both shapes share the same asymptote -- gradient magnitude saturating at 1
+    (times the weight) once deep inside, so a trajectory that starts in
+    violation keeps being pushed out -- and differ only in what happens on the
+    *clear* side of the margin.
+
+    ``"softplus"`` (default, and what every calibrated number was measured
+        under): ``tau * softplus((margin - c) / tau)``. Written through
+        ``jax.nn.softplus`` (the stable ``log1p(exp(-|z|)) + max(z, 0)`` form)
+        so a deep violation -- ``c`` tens of metres negative, which happens on
+        the broken records in the failure set -- does not overflow to ``inf``
+        and poison the whole batch's gradient with NaN. Its support is
+        **infinite**: the value at the margin is ``tau*ln2`` and it decays only
+        like ``tau*exp(-(c - margin)/tau)`` past it, so every corner and every
+        agent in the scene contributes a small nonzero cost and a small nonzero
+        gradient no matter how far away it is. Because the barrier is *summed*
+        over 4 corners and over all N agent pairs and all T steps, that per-term
+        epsilon is multiplied by 4*N*T -- which is how a scene with nothing
+        wrong in it can still be charged (see
+        ``tests/probe_barrier_tail.py``).
+
+    ``"hinge2"``: quadratic-smoothed hinge with **compact support**. With
+        ``z = margin - c``::
+
+            0                z <= 0
+            z**2 / (2*tau)   0 < z < tau
+            z - tau/2        z >= tau
+
+        Exactly zero, with exactly zero gradient, anywhere at or beyond the
+        margin -- an agent 5 m away is not a hazard and contributes nothing, so
+        the loss stops scaling with how crowded the scene is. It is still C^1
+        (value and slope match at both joins), so there is no ``max`` kink to
+        differentiate through, which is the property the softplus was chosen
+        for in the first place. ``tau`` keeps its meaning as the knee width; the
+        value *at* the margin drops from ``tau*ln2`` to 0, and the deep ramp is
+        offset by ``tau/2`` relative to softplus's.
+
+    ``"hinge"``: the unsmoothed ``max(0, margin - c)``, kink and all. Not for
+        training -- it exists so the probe can quote the exact
+        violating-side-only cost as a reference point.
     """
-    return tau * jax.nn.softplus((margin - clearance) / tau)
+    z = (margin - clearance) / tau
+    if shape == "softplus":
+        return tau * jax.nn.softplus(z)
+    if shape == "hinge2":
+        # Clip before squaring: the quadratic branch is only ever *selected* on
+        # z in (0, 1), but jnp.where evaluates both branches, and a record with
+        # c = -1e6 would square to inf there and NaN the gradient of the branch
+        # that was selected.
+        zq = jnp.clip(z, 0.0, 1.0)
+        return tau * jnp.where(z < 1.0, 0.5 * zq * zq, z - 0.5)
+    if shape == "hinge":
+        return tau * jnp.maximum(z, 0.0)
+    raise ValueError(
+        f"barrier shape must be 'softplus', 'hinge2' or 'hinge', got {shape!r}")
 
 
 # --------------------------------------------------------------------------- #
@@ -797,7 +862,10 @@ def safety_terms(
     poses are not the policy's doing -- including them would score a phantom).
 
     Returns a dict with, per world-step ``[B, T]``: ``loss`` (the total),
-    ``edge_loss`` / ``agent_loss``, and the *hard* clearances ``c_edge`` /
+    ``edge_loss`` / ``agent_loss``, their ``*_tail_loss`` counterparts (the
+    part of each charged to geometry already clear of the margin -- zero by
+    construction under a compact-support ``barrier_shape``), and the *hard*
+    clearances ``c_edge`` /
     ``c_agent`` (min over corners / over all valid agent pairs) whose signs are
     what get compared against waymax's ``offroad`` / ``overlap`` flags. Plus
     ``total`` (scalar) and per-world ``[B]`` sums.
@@ -816,7 +884,8 @@ def safety_terms(
         edge_geometry=cfg.edge_geometry,
     )                                                                # [B, T, 4]
     edge_bt = cfg.edge_weight * jnp.sum(
-        barrier(c_edge_corners, cfg.edge_margin_m, cfg.edge_tau_m), axis=-1
+        barrier(c_edge_corners, cfg.edge_margin_m, cfg.edge_tau_m,
+                cfg.barrier_shape), axis=-1
     )
     edge_bt = edge_bt * step_mask
 
@@ -832,7 +901,8 @@ def safety_terms(
     else:
         raise ValueError(
             f"agent_geometry must be 'exact' or 'disc', got {cfg.agent_geometry!r}")
-    pair_barrier = barrier(gaps, cfg.agent_margin_m, cfg.agent_tau_m)
+    pair_barrier = barrier(gaps, cfg.agent_margin_m, cfg.agent_tau_m,
+                           cfg.barrier_shape)
     agent_bt = cfg.agent_weight * jnp.sum(
         jnp.where(pair_valid, pair_barrier, 0.0), axis=(-3, -2, -1)
     )
@@ -844,9 +914,28 @@ def safety_terms(
     c_edge_bt = jnp.min(c_edge_corners, axis=-1)
     c_agent_bt = jnp.min(jnp.where(pair_valid, gaps, jnp.inf), axis=(-3, -2, -1))
 
+    # --- how much of the loss is TAIL, i.e. charged to geometry that is
+    # already clear of the margin? Under "softplus" this is nonzero by
+    # construction (infinite support) and grows with the number of corners,
+    # agents and steps summed over, so a scene can be charged for its traffic
+    # density rather than for its geometry; under a compact-support shape it is
+    # exactly zero. Reported, not differentiated -- it is the diagnostic that
+    # says whether the shape choice can matter at all on this data.
+    # tests/probe_barrier_tail.py measures the same split offline, per scene.
+    edge_tail_bt = cfg.edge_weight * jnp.sum(
+        jnp.where(c_edge_corners >= cfg.edge_margin_m,
+                  barrier(c_edge_corners, cfg.edge_margin_m, cfg.edge_tau_m,
+                          cfg.barrier_shape), 0.0), axis=-1) * step_mask
+    agent_tail_bt = cfg.agent_weight * jnp.sum(
+        jnp.where(pair_valid & (gaps >= cfg.agent_margin_m), pair_barrier, 0.0),
+        axis=(-3, -2, -1)) * step_mask
+
     loss_bt = edge_bt + agent_bt
     return {
         "loss": loss_bt,
+        "edge_tail_loss": edge_tail_bt,
+        "agent_tail_loss": agent_tail_bt,
+        "tail_loss": edge_tail_bt + agent_tail_bt,
         "edge_loss": edge_bt,
         "agent_loss": agent_bt,
         "c_edge": c_edge_bt,

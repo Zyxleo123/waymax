@@ -9,6 +9,8 @@
 #   # finer sweep near the interesting region:
 #   DFT_LATERAL="0,0.1,0.2,0.3,0.5,0.75,1.0" \
 #     bash rl/diffusion_ft/slurm/submit_probe_logreplay_collision.sh
+#   # reproduce the 2026-08-30 single-arm numbers exactly:
+#   DFT_SIM_AGENTS=none bash rl/diffusion_ft/slurm/submit_probe_logreplay_collision.sh
 set -euo pipefail
 
 ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
@@ -21,7 +23,8 @@ ENVF="$ROOT/logs/dft/env/lrprobe_${STAMP}.env"
   echo "DFT_TFRECORD=${DFT_TFRECORD:-/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord}"
   echo "DFT_INDICES=${DFT_INDICES:-0-31}"
   echo "DFT_LATERAL=${DFT_LATERAL:-0,0.25,0.5,1.0,1.5,2.0,3.0}"
-  echo "DFT_DELAY=${DFT_DELAY:-0,1,2,3,5}"
+  echo "DFT_DELAY=${DFT_DELAY:-0,2,5,10,20,40}"
+  echo "DFT_SIM_AGENTS=${DFT_SIM_AGENTS:-none,idm_brake}"
   echo "DFT_PROBE_OUT=${DFT_PROBE_OUT:-runs/dft_logreplay_probe/collision_vs_deviation_$STAMP.json}"
 } > "$ENVF"
 echo "Wrote env file: $ENVF"

@@ -59,6 +59,8 @@ def _tuner(*, bc_weight, anchor_weight, safety_weight=1.0, calls=None):
                              safety_weight=safety_weight)
     t.objcfg = SimpleNamespace(safety_weight=safety_weight)
     t.unroll_steps = 0
+    # neighbor_source=log (the default): the barrier reads the log, not the sim.
+    t._neighbor_from_sim = False
     # Whole-horizon anchor window (None), as `_init_windows` resolves --anchor_window -1.
     t._anchor_tw = None
 
@@ -83,7 +85,10 @@ def run(tuner, ctx, bc_ctx):
     orig = T.candidate_safety
     T.candidate_safety = lambda cfg, world, **kw: {
         "total": jnp.asarray(2.0), "edge_loss": jnp.zeros(1),
-        "agent_loss": jnp.zeros(1)}
+        "agent_loss": jnp.zeros(1),
+        # Diagnostics `_loss_for` reports (barrier tail, 09-15; neighbour count);
+        # none of them enters `total`.
+        "tail_loss": jnp.zeros(1), "loss": jnp.zeros(1), "n_neighbors": jnp.asarray(0.0)}
     try:
         fn = tuner._loss_for(state=None, ctx=ctx, rng=jax.random.PRNGKey(0),
                              bc_ctx=bc_ctx)

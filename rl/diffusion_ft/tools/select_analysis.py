@@ -33,6 +33,12 @@ Per policy and split:
 
 Duplicate rows (a chunk re-run after a torn write) are resolved last-wins.
 
+``--term`` scores the ``*_term`` columns instead (runner rows from 2026-09-30 on):
+the flags counted only up to the step the env terminated the row. The legacy
+columns keep counting while a finished row is driven on for the rest of its
+batch, so they charge e.g. an off-road AFTER the goal. Rows without the columns
+are an error under ``--term``, never a silent fall-back to the legacy ones.
+
     python -m rl.diffusion_ft.tools.select_analysis --splits_json S \\
         --rows DIR/*/rows.jsonl --out DIR/select_summary.json
 """
@@ -51,8 +57,9 @@ STRATA2 = ("failure_heldout", "success_heldout")
 METRICS = ("solved", "offroad", "overlap", "reached")
 
 
-def load_rows(paths):
-    """{(arm, ckpt): {split: {scene: {repeat: row}}}}, last write wins."""
+def load_rows(paths, term: bool = False):
+    """{(arm, ckpt): {split: {scene: {repeat: row}}}}, last write wins. ``term``
+    swaps each row's ``*_term`` flags in for the legacy ones (see module doc)."""
     out: dict = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
     seeds = set()
     for p in paths:
@@ -61,6 +68,11 @@ def load_rows(paths):
                 r = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if term:
+                if "solved_term" not in r:
+                    raise SystemExit(f"--term: {p} has rows without solved_term "
+                                     f"(written before the runner recorded it)")
+                r = {**r, **{m: r[f"{m}_term"] for m in METRICS}}
             seeds.add(int(r["seed"]))
             out[(r["arm"], r.get("ckpt", ""))][r["split"]][int(r["scene_id"])][int(r["repeat"])] = r
     if len(seeds) > 1:
@@ -244,11 +256,13 @@ def main():
     p.add_argument("--repeats", type=int, default=4)
     p.add_argument("--n_boot", type=int, default=2000)
     p.add_argument("--out", required=True)
+    p.add_argument("--term", action="store_true",
+                   help="score the termination-aware *_term flags (see module doc)")
     a = p.parse_args()
     paths = sorted({f for g in a.rows for f in glob.glob(g)})
     if not paths:
         raise SystemExit(f"no rows match {a.rows}")
-    rows = load_rows(paths)
+    rows = load_rows(paths, term=a.term)
     spec = json.loads(Path(a.splits_json).read_text())
     # arm -> its alternative, read from the runner's own meta. Needed so the
     # selection gap is only reported against an oracle the arm was offered.
@@ -262,6 +276,7 @@ def main():
                 continue
     res = analyze(rows, spec, repeats=a.repeats, n_boot=a.n_boot, alt_of=alt_of)
     res["rows"] = paths
+    res["flags"] = "term" if a.term else "legacy"
     Path(a.out).write_text(json.dumps(res, indent=1))
 
     def line(label, r):

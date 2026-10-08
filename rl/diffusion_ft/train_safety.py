@@ -36,6 +36,13 @@ Proteina-Complexa's ``bondunroll`` (see
 :mod:`rl.diffusion_ft.unrolled_prediction`): corrupt the expert future to a
 random low-noise timestep, unroll ``K`` reverse steps back down, and score that
 endpoint. One gradient step then costs ``K`` network evaluations instead of 100,
+which until 2026-09-14 did NOT make it faster: the unroll ran through
+``_loss_for``'s un-jitted closure and re-traced the whole graph once per context
+per iteration, measuring 34.5 s/iter against the jitted free-running path's 5.96.
+It now shares ``_free_core``; ``--unroll_eager`` restores the old closure as the
+equivalence reference (``tests/test_unroll_jit.py`` pins the key streams equal).
+The arithmetic below was always right, but read any pre-09-14 timing as measuring
+tracing overhead rather than the method,
 and the state the denoiser sees is anchored to ground truth rather than to the
 policy's own high-noise prefix. ``K=1`` degenerates to the one-step posterior
 mean, which is the Jensen-gap control worth running as an ablation arm.
@@ -137,15 +144,32 @@ import jax.numpy as jnp
 import numpy as np
 
 from rl.diffusion_ft.checkpoint import DEFAULT_CHECKPOINT_PATH, load_diffusion_checkpoint
-from rl.diffusion_ft.env import DiffusionWaymaxEnv
+from data.preprocess import WORLD_DT_METHODS
+from rl.diffusion_ft.env import EGO_VEL_SOURCES, DiffusionWaymaxEnv
 from rl.diffusion_ft.reward import RewardConfig
 from rl.diffusion_ft.rl_actor import DiffusionRLActor
 from rl.diffusion_ft.safety_loss import SafetyLossConfig, expert_clean_mask
 from rl.diffusion_ft.safety_objective import SafetyObjectiveConfig, candidate_safety
+from rl.diffusion_ft.sim_agents import SIM_AGENT_CHOICES
 from rl.diffusion_ft.scene_sampler import SceneSampler
 from rl.diffusion_ft.transition_buffer import TransitionBuffer
 from rl.diffusion_ft.unrolled_prediction import unroll_timestep_grid
 from rl.diffusion_ft.train_dppo import load_batch
+
+
+def _kv_ratio(spec: str) -> dict[str, float]:
+    """``'failure_train=1,success_train=1'`` -> ordered ``{split: weight}``; '' -> {}."""
+    out: dict[str, float] = {}
+    for tok in [t.strip() for t in str(spec or "").split(",") if t.strip()]:
+        if "=" not in tok:
+            raise SystemExit(f"--repair_split_ratio: '{tok}' is not split=weight")
+        k, v = tok.split("=", 1)
+        if float(v) < 0:
+            raise SystemExit(f"--repair_split_ratio: negative weight in '{tok}'")
+        out[k.strip()] = float(v)
+    if out and sum(out.values()) <= 0:
+        raise SystemExit("--repair_split_ratio: weights sum to 0")
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -226,7 +250,8 @@ class SafetyFineTuner:
         self.sl_cfg = SafetyLossConfig(
             edge_margin_m=args.edge_margin, agent_margin_m=args.agent_margin,
             edge_tau_m=args.edge_tau, agent_tau_m=args.agent_tau,
-            n_discs=args.n_discs, agent_geometry=args.agent_geometry)
+            n_discs=args.n_discs, agent_geometry=args.agent_geometry,
+            barrier_shape=args.barrier_shape, edge_geometry=args.edge_geometry)
         self.objcfg = SafetyObjectiveConfig(
             safety=self.sl_cfg, safety_weight=args.safety_weight,
             anchor_weight=args.anchor_weight)
@@ -264,7 +289,33 @@ class SafetyFineTuner:
 
         self.env = DiffusionWaymaxEnv(
             self.ckpt, reward_config=RewardConfig(), max_num_objects=n_obj,
-            replan_interval_steps=args.replan_interval_steps, seed=args.seed)
+            replan_interval_steps=args.replan_interval_steps, seed=args.seed,
+            sim_agents=args.sim_agents, ego_vel_source=args.ego_vel_source,
+            world_dt_method=args.world_dt_method)
+        # Read at TRACE time inside `_free_core`, so it must be settled before
+        # the first gradient and never change afterwards -- one executable is
+        # compiled against one neighbour source.
+        self._neighbor_from_sim = (args.neighbor_source == "sim")
+        if self._neighbor_from_sim and args.sim_agents == "none":
+            print("[safety] NOTE --neighbor_source=sim under --sim_agents=none: "
+                  "log-replayed NPCs put the same motion in both sources, so "
+                  "this is a no-op that only costs a slice. It is allowed as an "
+                  "equivalence control.", flush=True)
+        if self._neighbor_from_sim and float(getattr(args, "tb_weight", 0.0)) > 0:
+            # `buffer_grads` reloads its scenes by id at timestep 0, so their
+            # `sim_trajectory` holds nothing -- the NPC motion the transition was
+            # recorded under is not stored. The replay term would silently keep
+            # reading the log while the on-policy term reads the sim, and the
+            # objective would be two different objectives added together.
+            raise SystemExit(
+                "--neighbor_source=sim is incompatible with --tb_weight>0: the "
+                "transition buffer reloads scenes at timestep 0 and cannot "
+                "reconstruct the NPC motion its transitions were recorded "
+                "under. Run one or the other.")
+        print(f"[safety] sim_agents={self.env.sim_agents} "
+              f"neighbor_source={args.neighbor_source} "
+              f"ego_vel_source={self.env.ego_vel_source} "
+              f"world_dt_method={self.env.world_dt_method}", flush=True)
         # DDIM striding of the frozen prefix, resolved once. `None` = full chain.
         # Two values, because the training passes and the eval measure different
         # things: collection/gradient may run an approximation of the policy,
@@ -345,6 +396,7 @@ class SafetyFineTuner:
         self._init_windows()
         self._init_preserve()
         self._init_repair()
+        self._init_pref()
         self._init_transition_buffer()
         steps_per_iter = ("all contexts -> 1 step/iter" if args.grad_accum <= 0
                           else f"{args.grad_accum} ctx/step")
@@ -857,7 +909,13 @@ class SafetyFineTuner:
         total = terms["total"]
         return total, {"tb_safety": total,
                        "tb_edge": jnp.sum(terms["edge_loss"]) / max(n, 1),
-                       "tb_agent": jnp.sum(terms["agent_loss"]) / max(n, 1)}
+                       "tb_agent": jnp.sum(terms["agent_loss"]) / max(n, 1),
+                       # Named apart from the policy term's `tail_share`: both
+                       # land in the same row, and a replay arm's buffer states
+                       # are not the states the on-policy term scored.
+                       "tb_tail_share": (jnp.sum(terms["tail_loss"])
+                                         / jnp.maximum(jnp.sum(terms["loss"]),
+                                                       1e-8))}
 
     def _tb_grad_fn(self):
         if self._jit_tb is None:
@@ -932,21 +990,78 @@ class SafetyFineTuner:
         if int(a.grad_accum) != 0 or int(a.epochs) != 1 or self.unroll_steps:
             raise SystemExit("--repair_weight supports only --grad_accum 0 --epochs 1 "
                              "and free-running proposals (one Adam step per iteration)")
-        parts = {k: [] for k in ("cond1", "cond2", "mask", "target", "valid", "scene_id")}
+        rows_mode = str(getattr(a, "repair_rows", "all"))
+        ratio = _kv_ratio(getattr(a, "repair_split_ratio", ""))
+        keys = ["cond1", "cond2", "mask", "target", "valid", "scene_id", "switched"]
+        # `proposal_select --dump_bc` files carry the episode outcome and the
+        # split per row; counterfactual repairs are all verified and carry neither.
+        if rows_mode == "solved":
+            keys.append("ep_solved")
+        if ratio:
+            keys.append("split")
+        parts = {k: [] for k in keys}
         rt = []
         for f in paths:
             z = np.load(f)
+            n_f = z["target"].shape[0]
             for k in parts:
                 # `valid` marks the model steps the repair target is real on. A
                 # file written before that mask existed carries a frozen tail past
                 # the scenario end, so refuse it rather than train on it.
+                if k == "switched" and k not in z.files:
+                    parts[k].append(np.ones(n_f, bool))      # a verified repair IS an edit
+                    continue
                 if k not in z.files:
                     raise SystemExit(f"{f} has no '{k}' array -- rebuild the repair data "
-                                     f"(it predates the covered-steps mask)")
+                                     + ("(it predates the covered-steps mask)" if k == "valid" else
+                                        f"(needed by --repair_rows {rows_mode} / "
+                                        f"--repair_split_ratio; only proposal_select "
+                                        f"--dump_bc writes it)"))
                 parts[k].append(z[k])
             if "rt_err" in z.files:
                 rt.append(np.asarray(z["rt_err"]))
         self._repair = {k: np.concatenate(v, axis=0) for k, v in parts.items()}
+        n_all = self._repair["target"].shape[0]
+        if rows_mode == "solved":
+            # Filtered BC: only the rollouts whose whole episode solved.
+            keep = self._repair.pop("ep_solved").astype(bool)
+            self._repair = {k: v[keep] for k, v in self._repair.items()}
+        # Row pools per split, sampled at a fixed mix per batch -- otherwise the mix
+        # is whatever the collection happened to produce.
+        self._repair_pools = None
+        # `--repair_switch_share S`: a fixed S of every batch from the rows where
+        # the arm EDITED the plan, the rest from the kept rows. Uniform sampling
+        # leaves the edits at ~7% of a batch, next to rows whose target is the
+        # base's own sample (bank_bc 09-29: their loss was still falling at 3000
+        # steps).
+        share = float(getattr(a, "repair_switch_share", 0.0))
+        if not 0.0 <= share < 1.0:
+            raise SystemExit(f"--repair_switch_share must be in [0, 1), got {share}")
+        B = int(a.repair_batch)
+        n_sw = int(round(B * share))
+        sw_all = self._repair["switched"].astype(bool)
+        if n_sw and not sw_all.any():
+            raise SystemExit("--repair_switch_share > 0 but no row is switched")
+        rest = ~sw_all if n_sw else np.ones(len(sw_all), bool)
+        if ratio:
+            split = self._repair.pop("split")
+            missing = set(ratio) - set(np.unique(split).tolist())
+            if missing:
+                raise SystemExit(f"--repair_split_ratio names {sorted(missing)} but the "
+                                 f"data holds only {sorted(np.unique(split).tolist())}")
+            tot = sum(ratio.values())
+            counts = [int(round((B - n_sw) * w / tot)) for w in ratio.values()]
+            counts[-1] = (B - n_sw) - sum(counts[:-1])
+            self._repair_pools = [(s if not n_sw else f"{s}/kept",
+                                   np.nonzero((split == s) & rest)[0], c)
+                                  for s, c in zip(ratio, counts)]
+        elif n_sw:
+            self._repair_pools = [("kept", np.nonzero(rest)[0], B - n_sw)]
+        if n_sw:
+            self._repair_pools.insert(0, ("switched", np.nonzero(sw_all)[0], n_sw))
+        for s, ix, c in self._repair_pools or []:
+            if c > 0 and len(ix) == 0:
+                raise SystemExit(f"repair pool '{s}' is asked for {c}/batch but holds no rows")
         # A training scene id must never be a held-out one: repairs are searched on
         # the training pools, and this re-checks it against the splits in use.
         if a.splits_json:
@@ -959,18 +1074,37 @@ class SafetyFineTuner:
             if leak:
                 raise SystemExit(f"--repair_data holds {len(leak)} held-out scene(s) -- refusing")
         rt_max = np.nanmax(np.stack(rt), axis=0).tolist() if rt else None
-        print(f"[safety] REPAIR weight={self.repair_weight} targets="
-              f"{self._repair['target'].shape[0]} from "
-              f"{len(np.unique(self._repair['scene_id']))} scenes, batch={a.repair_batch}, "
+        n_kept = self._repair["target"].shape[0]
+        if n_kept == 0:
+            raise SystemExit(f"--repair_rows {rows_mode} kept 0 of {n_all} rows")
+        print(f"[safety] REPAIR weight={self.repair_weight} targets={n_kept} "
+              f"(of {n_all}, rows={rows_mode}) from "
+              f"{len(np.unique(self._repair['scene_id']))} scenes, batch={a.repair_batch}"
+              f" x {int(getattr(a, 'repair_steps', 1))} step(s)/iter, "
+              f"switched {float(self._repair['switched'].mean()):.3f}, "
               f"covered steps {float(self._repair['valid'].mean()):.3f}; "
               f"world<->norm round-trip max err (pos, vel, yaw) = {rt_max}", flush=True)
+        if self._repair_pools is not None:
+            sw = self._repair["switched"]
+            print("[safety] REPAIR per-batch mix: " + "  ".join(
+                f"{s} {c}/batch from {len(ix)} rows (switched {float(sw[ix].mean()):.3f})"
+                for s, ix, c in self._repair_pools), flush=True)
 
-    def repair_grads(self, it: int):
+    def repair_grads(self, it: int, sub: int = 0):
+        """Gradient of the late-step denoising loss on one batch of repair rows.
+
+        ``sub`` indexes the extra steps of ``--repair_steps``; ``sub=0`` draws
+        exactly the batch every earlier run drew at iteration ``it``."""
         a = self.args
         R = self._repair
         n = R["target"].shape[0]
-        rng = np.random.default_rng(int(a.data_seed) * 15485863 + 7 * int(it))
-        idx = rng.choice(n, size=int(a.repair_batch), replace=n < int(a.repair_batch))
+        rng = np.random.default_rng(int(a.data_seed) * 15485863 + 7 * int(it)
+                                    + 1000003 * int(sub))
+        if self._repair_pools is None:
+            idx = rng.choice(n, size=int(a.repair_batch), replace=n < int(a.repair_batch))
+        else:
+            idx = np.concatenate([rng.choice(ix, size=c, replace=len(ix) < c)
+                                  for _, ix, c in self._repair_pools if c > 0])
         if self._jit_repair is None:
             self._jit_repair = jax.jit(jax.value_and_grad(self.actor.late_denoise_loss))
         self.rng, rk = jax.random.split(self.rng)
@@ -980,6 +1114,196 @@ class SafetyFineTuner:
             jnp.asarray(R["mask"][idx]), jnp.ones(len(idx), jnp.float32), rk,
             jnp.asarray(R["valid"][idx], jnp.float32))
         return grads, float(np.asarray(loss))
+
+    # ------------------------------------------------------------------ #
+    # Diffusion-DPO on (condition, rejected base draw, accepted edit) pairs
+    # (`--pref_weight`, 2026-10-01)
+    # ------------------------------------------------------------------ #
+    # Repaired-trajectory BC (`--repair_*`, bank_bc 09-28/30) teaches "go to the
+    # edit" and never shows the student the draw the edit replaced: weak pressure
+    # moved nothing, strong pressure shifted the whole conditional and broke
+    # successes (docs/bank_bc_distillation.md, idea 2). A pair says "this edit
+    # over THIS draw of yours", relative to the frozen base. Pairs are the rows
+    # where the arm switched (`target` = the edit, `rejected` = the base draw,
+    # same normalization path, see `proposal_select._bc_rows`). The tether is the
+    # existing frozen-base KL (`base_anchor_loss`), on success_train rows only --
+    # the success-only grouping -- so a failure scene's pair is never pulled back
+    # toward the draw it is moving off. Both terms share every Adam step.
+    def _init_pref(self):
+        a = self.args
+        self.pref_weight = float(getattr(a, "pref_weight", 0.0))
+        self._pref = None
+        self._jit_pref = self._jit_pref_anchor = None
+        self._pref_init_checked = False
+        if self.pref_weight <= 0:
+            return
+        import glob as _glob
+        paths = sorted(_glob.glob(str(a.pref_data)))
+        if not paths:
+            raise SystemExit(f"--pref_weight > 0 but --pref_data matches nothing: {a.pref_data}")
+        if int(a.grad_accum) != 0 or int(a.epochs) != 1 or self.unroll_steps:
+            raise SystemExit("--pref_weight supports only --grad_accum 0 --epochs 1 "
+                             "and free-running proposals (one Adam step per iteration)")
+        keys = ["cond1", "cond2", "mask", "target", "rejected", "valid", "scene_id",
+                "switched", "split", "ep_solved", "rt_err_m"]
+        parts = {k: [] for k in keys}
+        for f in paths:
+            z = np.load(f)
+            for k in keys:
+                if k not in z.files:
+                    raise SystemExit(
+                        f"{f} has no '{k}' array -- preference pairs need "
+                        + ("the rejected base draw, which `proposal_select --dump_bc` "
+                           "stores since 2026-10-01; recollect" if k == "rejected"
+                           else "`proposal_select --dump_bc` data"))
+                parts[k].append(z[k])
+        R = {k: np.concatenate(v, axis=0) for k, v in parts.items()}
+        n_all = R["target"].shape[0]
+        sw = R["switched"].astype(bool)
+        # ---- the one preflight: both sides are the same object --------------
+        if R["target"].shape != R["rejected"].shape:
+            raise SystemExit(f"target {R['target'].shape} != rejected {R['rejected'].shape}")
+        diff = np.abs(R["target"] - R["rejected"])                       # [N, T, 5]
+        kept_gap = float(diff[~sw].max()) if (~sw).any() else 0.0
+        unc = ~R["valid"].astype(bool)                                  # [N, T]
+        unc_gap = float(diff[sw][unc[sw]].max()) if (unc[sw]).any() else 0.0
+        if kept_gap > 0 or unc_gap > 0:
+            raise SystemExit(f"--pref_data: target != rejected where the arm did not edit "
+                             f"(kept rows {kept_gap:.3g}, uncovered steps {unc_gap:.3g}); "
+                             f"the pair would differ by more than the edit")
+        ego_range = float(self.ckpt.preprocess_cfg.ego_range)
+        d_m = np.linalg.norm((R["target"] - R["rejected"])[..., :2], axis=-1) * ego_range
+        rows_mode = str(getattr(a, "pref_rows", "solved"))
+        pair = sw & (R["ep_solved"].astype(bool) if rows_mode == "solved" else True)
+        edit_peak = d_m.max(axis=1)
+        if not pair.any():
+            raise SystemExit(f"--pref_rows {rows_mode}: no switched row to make a pair from")
+        if (edit_peak[pair] <= 0).any():
+            raise SystemExit(f"{int((edit_peak[pair] <= 0).sum())} switched rows carry no "
+                             f"edit on covered steps -- not a pair")
+        # Step weights: the covered-steps mask, x (1 + lambda) where the pair
+        # differs by more than delta (`--pref_edit_weight`, arm B). lambda = 0
+        # is plain masking.
+        lam = float(getattr(a, "pref_edit_weight", 0.0))
+        dlt = float(getattr(a, "pref_edit_delta_m", 0.1))
+        R["step_w"] = (R["valid"].astype(np.float32)
+                       * (1.0 + lam * (d_m > dlt).astype(np.float32)))
+        anchor = (R["split"] == "success_train") & ~sw
+        self._pref_ix = np.nonzero(pair)[0]
+        self._pref_anchor_ix = np.nonzero(anchor)[0]
+        self.pref_anchor_weight = float(getattr(a, "pref_anchor_weight", 0.0))
+        if self.pref_anchor_weight > 0 and not len(self._pref_anchor_ix):
+            raise SystemExit("--pref_anchor_weight > 0 but the data holds no kept "
+                             "success_train row to anchor on")
+        if a.splits_json:
+            spec = self._read_splits_spec(a.splits_json)
+            held = set()
+            for n, v in spec["splits"].items():
+                if n.endswith("_heldout"):
+                    held |= {int(i) for i in v["scene_ids"]}
+            leak = held & set(int(i) for i in R["scene_id"].tolist())
+            if leak:
+                raise SystemExit(f"--pref_data holds {len(leak)} held-out scene(s) -- refusing")
+        T_max = int(getattr(a, "pref_t_max", -1))
+        self.pref_t = (int(getattr(a, "pref_t_min", 0)),
+                       int(self.actor.k_trainable) if T_max < 0 else T_max)
+        if not 0 <= self.pref_t[0] < self.pref_t[1] <= int(self.actor.diffusion.timesteps):
+            raise SystemExit(f"--pref_t_min/--pref_t_max: empty or out-of-range t "
+                             f"window {self.pref_t}")
+        keep = ("cond1", "cond2", "mask", "target", "rejected", "step_w")
+        self._pref = {k: R[k] for k in keep}
+        pk = self._pref_ix
+        q = lambda x: " / ".join(f"{v:.2f}" for v in np.quantile(x, [0.1, 0.5, 0.9]))
+        w_sw = R["step_w"][pk]
+        print(f"[safety] PREF weight={self.pref_weight} beta={a.pref_beta} "
+              f"pairs={len(pk)} (switched {int(sw.sum())} of {n_all} rows, rows={rows_mode}; "
+              f"{len(np.unique(R['scene_id'][pk]))} scenes; by split "
+              + ", ".join(f"{s} {int((R['split'][pk] == s).sum())}"
+                          for s in np.unique(R["split"][pk]))
+              + f")  anchor rows={len(self._pref_anchor_ix)} (success_train kept) "
+              f"x {self.pref_anchor_weight}", flush=True)
+        print(f"[safety] PREF batch {a.pref_batch} pairs + {a.pref_anchor_batch} anchor rows "
+              f"x {int(getattr(a, 'pref_steps', 1))} step(s)/iter; t ~ U[{self.pref_t[0]}, {self.pref_t[1]}) "
+              f"(k_trainable {self.actor.k_trainable}); anchor t ~ U[0, "
+              f"{self.actor.k_trainable})", flush=True)
+        print(f"[safety] PREF pair check: target/rejected {R['target'].shape[1:]} both, "
+              f"identical off the edit; edit peak |d| p10/50/90 = {q(edit_peak[pk])} m; "
+              f"round trip of the rejected draw p50/p99/max = "
+              f"{np.quantile(R['rt_err_m'][pk], 0.5):.3f} / "
+              f"{np.quantile(R['rt_err_m'][pk], 0.99):.3f} / {R['rt_err_m'][pk].max():.3f} m",
+              flush=True)
+        print(f"[safety] PREF step weights: edit_weight {lam} above {dlt} m -> "
+              f"{float((w_sw > 1).sum() / max((w_sw > 0).sum(), 1)):.3f} of covered pair "
+              f"steps up-weighted", flush=True)
+
+    def pref_grads(self, it: int, sub: int = 0):
+        """Gradient of ``pref_loss + pref_anchor_weight * base_anchor`` on one
+        batch of pairs and one batch of success rows, and its diagnostics."""
+        import functools
+        import optax
+        a = self.args
+        P = self._pref
+        rng = np.random.default_rng(int(a.data_seed) * 32452843 + 11 * int(it)
+                                    + 1000033 * int(sub))
+        nb, na = int(a.pref_batch), int(a.pref_anchor_batch)
+        ix = rng.choice(self._pref_ix, size=nb, replace=len(self._pref_ix) < nb)
+        if self._jit_pref is None:
+            self._jit_pref = jax.jit(jax.value_and_grad(functools.partial(
+                self.actor.pref_loss, beta=float(a.pref_beta), t_min=self.pref_t[0],
+                t_max=self.pref_t[1]), has_aux=True))
+        self.rng, kp, ka = jax.random.split(self.rng, 3)
+        tr = lambda x: jnp.transpose(jnp.asarray(x, jnp.float32), (0, 2, 1))
+        (loss, aux), g = self._jit_pref(
+            self.actor._tparams, tr(P["target"][ix]), tr(P["rejected"][ix]),
+            jnp.asarray(P["cond1"][ix]), jnp.asarray(P["cond2"][ix]),
+            jnp.asarray(P["mask"][ix]), jnp.asarray(P["step_w"][ix]), kp)
+        m = {f"pref/{k}": float(np.asarray(v)) for k, v in aux.items()}
+        m["pref/loss"] = float(np.asarray(loss))
+        m["pref/grad_norm"] = float(np.asarray(optax.global_norm(g)))
+        if not self._pref_init_checked:
+            # The plan's one sanity check: on a fresh start the model IS the
+            # reference, so z = 0 and the loss is log 2. Only fp noise may differ.
+            self._pref_init_checked = True
+            if self._adam_steps == 0:
+                # What must hold is that the trainable copy IS the base: its params
+                # bit-identical. The LOSS is only equal up to float noise -- the two
+                # forwards trace differently (params traced vs module constants), and
+                # job 71201 measured a 4.8e-6 gap on a 0.013 loss. beta multiplies
+                # that into z (|z| 0.01 at beta 1e4, loss 0.696 vs log 2 = 0.693), so
+                # "loss == log 2" is not a beta-free test. Check the params exactly
+                # and the loss gap relative to the loss, which no beta touches.
+                from flax import nnx
+                _, fp, _ = nnx.split(self.actor.frozen_denoise, nnx.Param, ...)
+                a_l, b_l = (jax.tree_util.tree_leaves(x) for x in (self.actor._tparams, fp))
+                same = len(a_l) == len(b_l) and all(
+                    np.array_equal(np.asarray(x), np.asarray(y)) for x, y in zip(a_l, b_l))
+                rel = m["pref/init_gap"] / max(m["pref/good_ref_loss"], 1e-12)
+                print(f"[safety] PREF init check: params identical to the base {same}; "
+                      f"max |model - ref| loss {m['pref/init_gap']:.2e} = {rel:.1e} of the "
+                      f"ref loss (float noise); at beta {a.pref_beta} that is |z| "
+                      f"{m['pref/z_abs']:.2e}, loss {m['pref/loss']:.6f} vs log 2 "
+                      f"{np.log(2.0):.6f}", flush=True)
+                if not same or rel > 1e-2:
+                    raise SystemExit("[safety] PREF init check FAILED: the trainable copy "
+                                     "is not the reference at step 0")
+        lam = self.pref_anchor_weight
+        m["pref/anchor_loss"] = m["pref/anchor_grad_norm"] = 0.0
+        if lam > 0 and na > 0:
+            ia = rng.choice(self._pref_anchor_ix, size=na,
+                            replace=len(self._pref_anchor_ix) < na)
+            if self._jit_pref_anchor is None:
+                self._jit_pref_anchor = jax.jit(jax.value_and_grad(functools.partial(
+                    self.actor.base_anchor_loss, t_max=int(self.actor.k_trainable))))
+            # x_t is formed from the base's own draw (`rejected` == `target` on a
+            # kept row): the tether is charged where the base puts its mass.
+            al, ga = self._jit_pref_anchor(
+                self.actor._tparams, jnp.asarray(P["rejected"][ia], jnp.float32),
+                jnp.asarray(P["cond1"][ia]), jnp.asarray(P["cond2"][ia]),
+                jnp.asarray(P["mask"][ia]), jnp.ones(na, jnp.float32), ka)
+            m["pref/anchor_loss"] = float(np.asarray(al))
+            m["pref/anchor_grad_norm"] = float(np.asarray(optax.global_norm(ga)))
+            g = jax.tree_util.tree_map(lambda x, y: x + lam * y, g, ga)
+        return g, m
 
     def preserve_ids(self, it: int) -> tuple[list[int], int]:
         """Scene ids for this iteration's preservation batch, and how many are replay.
@@ -1068,6 +1392,49 @@ class SafetyFineTuner:
         (loss, aux), grads = self._jit_preserve(self.actor._tparams, dyn, n=n)
         return grads, loss, aux
 
+    def _neighbor_state(self, state):
+        """The state the safety term reads the OTHER agents' boxes off.
+
+        ``--neighbor_source log`` (the default) returns ``None``, which is what
+        ``candidate_safety`` already meant by "read ``log_trajectory``" -- the
+        gradient is then byte-for-byte what it was.
+
+        ``sim`` splices the env's post-rollout ``sim_trajectory`` (and its
+        timestep) into the caller's state and hands that back. The substitution
+        is deliberate and cheap: the loaded state ALREADY carries a
+        ``sim_trajectory`` of that exact shape through every jitted gradient, so
+        this costs nothing extra, and ``candidate_safety`` keeps reading the ego
+        extents, the ego z and the roadgraph off the untouched ``log_trajectory``
+        while the neighbours come from the executed motion.
+
+        Correctness rests on the gradient pass running AFTER the collection
+        rollout: by then the window every context scores has been driven, so the
+        NPCs' reactive poses are written. `neighbor_window` raises on a window
+        past ``timestep`` rather than reading invalid placeholders and reporting
+        a clear road -- see its precondition.
+
+        Staleness is one policy update, exactly like the contexts themselves:
+        the neighbours reacted to the collection-time weights, not to the
+        candidate the gradient is currently proposing. Making them react to the
+        live candidate would mean re-stepping the simulator inside the gradient
+        at every step, and the IDM's lead selection is an argmin over an overlap
+        indicator -- zero gradient almost everywhere -- so the extra fidelity
+        would buy no extra signal, only cost.
+        """
+        if not self._neighbor_from_sim:
+            return None
+        end = self.env.sim_state
+        # Canonicalize both spliced leaves to the dtypes the loaded state already
+        # carries. `_free_core` is jitted on `state`; a leaf whose abstract
+        # signature flips between iterations (weak-typed host int vs int32 device
+        # array) recompiles the whole gradient, which is the bug bench job 51578
+        # found in `dyn` and the reason that dict is canonicalized too.
+        return state.replace(
+            sim_trajectory=jax.tree_util.tree_map(
+                lambda new, old: jnp.asarray(new, dtype=old.dtype),
+                end.sim_trajectory, state.sim_trajectory),
+            timestep=jnp.asarray(end.timestep, dtype=jnp.int32))
+
     def _loss_for(self, state, ctx, rng, bc_ctx=None):
         aw = self.args.anchor_weight
         bw = float(getattr(self.args, "bc_weight", 0.0))
@@ -1151,7 +1518,9 @@ class SafetyFineTuner:
             terms = candidate_safety(self.objcfg, world, state=state, t0=ctx.t0,
                                      n_steps=ctx.n_steps,
                                      alive_b=(ctx.alive if ctx.safety_alive is None
-                                              else ctx.safety_alive))
+                                              else ctx.safety_alive),
+                                     neighbor_state=(state if self._neighbor_from_sim
+                                                     else None))
             safety = terms["total"]
             tw = self._anchor_tw
             anchor = (self.actor._expert_loss(params, expert, ctx.alive, tw)
@@ -1170,12 +1539,17 @@ class SafetyFineTuner:
                            "base_anchor": base_anchor,
                            "edge": jnp.sum(terms["edge_loss"]) / max(ctx.n_steps, 1),
                            "agent": jnp.sum(terms["agent_loss"]) / max(ctx.n_steps, 1),
+                           "tail_share": (jnp.sum(terms["tail_loss"])
+                                          / jnp.maximum(jnp.sum(terms["loss"]),
+                                                        1e-8)),
+                           "n_neighbors": terms["n_neighbors"],
                            "t_start": t_start_mean}
         return loss_fn
 
     # ------------------------------------------------------------------ #
     def _free_core(self, params, state, dyn, keys, *, n_steps, h,
-                   has_expert, has_bc, has_base, has_prefix=False):
+                   has_expert, has_bc, has_base, has_prefix=False,
+                   has_unroll=False):
         """Free-running safety loss as a pure function of ``params`` + arrays.
 
         The traced twin of :meth:`_loss_for`'s ``loss_fn`` for ``unroll_steps==0``:
@@ -1194,7 +1568,22 @@ class SafetyFineTuner:
         # `t0` is traced (dyn), so one executable serves all replans; it used to
         # be static and compiled once per replan index (~6 min at startup).
         t0 = dyn["t0"]
-        if has_prefix:
+        if has_unroll:
+            # Teacher-forced unroll (`--unroll_steps K`). Routed through here
+            # rather than through `_loss_for`'s eager closure since 2026-09-14:
+            # that closure re-traced the whole unrolled sampler + geometry graph
+            # once PER CONTEXT PER ITERATION, and measured on the first proposal
+            # sweep it cost 34.5 s/iter against the jitted free-running path's
+            # 5.96 -- i.e. the "cheap" proposal, whose whole claim is K network
+            # evaluations instead of 100, ran 6x SLOWER than the thing it was
+            # meant to undercut. The arithmetic was never wrong; the tracing
+            # overhead simply dwarfed it.
+            traj_ncT = self.actor.unrolled_sample_for(
+                params, dyn["cond1"], dyn["cond2"], dyn["mask"],
+                dyn["x0_bct"], dyn["t_grid"], keys["propose"],
+                grad_steps=self.unroll_grad_steps,
+                eta=float(self.args.unroll_eta))
+        elif has_prefix:
             traj_ncT = self.actor.sample_late_for(
                 params, dyn["cond1"], dyn["cond2"], dyn["mask"],
                 dyn["x_prefix"], dyn["key_late"])
@@ -1203,8 +1592,15 @@ class SafetyFineTuner:
                 params, dyn["cond1"], dyn["cond2"], dyn["mask"], keys["propose"])
         world = self.env.norm_to_world_with(jnp.transpose(traj_ncT, (0, 2, 1)),
                                              dyn["aux"])
+        # `self._neighbor_from_sim` is read at TRACE time and baked into the
+        # executable, which is correct because it is set once at startup. The
+        # caller has already spliced the executed NPC motion into `state`
+        # (`_neighbor_state`), so the neighbours come off `state.sim_trajectory`
+        # and the ego extents / z / roadgraph still come off `log_trajectory`.
         terms = candidate_safety(self.objcfg, world, state=state, t0=t0,
-                                 n_steps=n_steps, alive_b=dyn["safety_alive"])
+                                 n_steps=n_steps, alive_b=dyn["safety_alive"],
+                                 neighbor_state=(state if self._neighbor_from_sim
+                                                 else None))
         safety = terms["total"]
         tw = self._anchor_tw
         anchor = (self.actor._expert_loss(
@@ -1225,7 +1621,27 @@ class SafetyFineTuner:
                "base_anchor": base_anchor,
                "edge": jnp.sum(terms["edge_loss"]) / max(n_steps, 1),
                "agent": jnp.sum(terms["agent_loss"]) / max(n_steps, 1),
-               "t_start": jnp.asarray(float(self.actor.diffusion.timesteps - 1))}
+               # Fraction of the safety loss charged to corners/agents that are
+               # already CLEAR of their margin -- the softplus barrier's tail,
+               # which scales with how many agents and steps were summed over
+               # rather than with anything the policy did. Exactly 0 under a
+               # compact-support `--barrier_shape`; read it on the softplus arm
+               # to know whether the shape can matter here at all.
+               "tail_share": (jnp.sum(terms["tail_loss"])
+                              / jnp.maximum(jnp.sum(terms["loss"]), 1e-8)),
+               # Valid ego-neighbour pairs per scored step. The agent barrier
+               # reads 0 both on an empty road and on a misaddressed neighbour
+               # window, and under `--neighbor_source sim` the second is a real
+               # possibility (`sim_trajectory` is invalid past `timestep`). This
+               # is the number that separates them, so it belongs in the curve
+               # rather than in an assertion that only fires in eager mode.
+               "n_neighbors": terms["n_neighbors"],
+               # The noise level the gradient was actually taken from. Under the
+               # unroll that is the drawn corruption level (per-sample, so report
+               # its mean); free-running always enters at the top of the chain.
+               "t_start": (jnp.mean(dyn["t_grid"][0].astype(jnp.float32))
+                           if has_unroll
+                           else jnp.asarray(float(self.actor.diffusion.timesteps - 1)))}
         return total, aux
 
     def _free_grad_fn(self):
@@ -1234,7 +1650,7 @@ class SafetyFineTuner:
             self._jit_free_grad = jax.jit(
                 jax.value_and_grad(self._free_core, has_aux=True),
                 static_argnames=("n_steps", "h", "has_expert", "has_bc",
-                                 "has_base", "has_prefix"))
+                                 "has_base", "has_prefix", "has_unroll"))
         return self._jit_free_grad
 
     def _grads_for(self, state, ctx, rng, bc_ctx=None, propose_key=None):
@@ -1253,7 +1669,11 @@ class SafetyFineTuner:
         # unconditionally keeps the traced program and the eager unroll path
         # agreeing on which chain the objective is defined over.
         self.actor.num_sample_steps = self._steps_train
-        if self.unroll_steps:
+        # `--unroll_eager` keeps the pre-2026-09-14 un-jitted closure. It is the
+        # equivalence reference for the jitted branch below, not a mode to train
+        # in: it re-traces once per context per iteration (34.5 s/iter measured,
+        # vs 5.96 jitted).
+        if self.unroll_steps and bool(getattr(self.args, "unroll_eager", False)):
             return self.actor.safety_grads(self._loss_for(state, ctx, rng, bc_ctx))
 
         aw = float(self.args.anchor_weight)
@@ -1274,6 +1694,20 @@ class SafetyFineTuner:
             rng, k_bc = jax.random.split(rng)
         if has_base:
             rng, k_base = jax.random.split(rng)
+        # The unroll draws its corruption level from the stream NEXT, before the
+        # proposal key -- the same order and the same reassignment `_loss_for`
+        # uses, so the jitted and eager paths agree seed-for-seed and
+        # `--unroll_eager` stays a usable reference. Drawn out here rather than
+        # inside the traced core for the reason that docstring gives: a
+        # `value_and_grad` that re-traces must not silently change its objective.
+        x0_bct = t_grid = None
+        if self.unroll_steps:
+            rng, key_t = jax.random.split(rng)
+            t_start_b = jax.random.randint(
+                key_t, (int(ctx.cond1.shape[0]),),
+                self.t_end + 1, self.t_start_max + 1, dtype=jnp.int32)
+            t_grid = unroll_timestep_grid(t_start_b, self.unroll_steps, self.t_end)
+            x0_bct = self._expert_x0_bct(ctx)
         # `propose_key` pins the full-chain sample's key (equivalence bench only).
         k_propose = rng if propose_key is None else propose_key
         # Inactive branches never execute (static flag), but their keys still
@@ -1308,9 +1742,14 @@ class SafetyFineTuner:
                "bc_target": bc_target, "bc_cond1": bc_cond1, "bc_cond2": bc_cond2,
                "bc_mask": bc_mask, "bc_alive": bc_alive,
                "t0": jnp.asarray(ctx.t0, jnp.int32)}
-        has_prefix = ctx.x_prefix is not None
+        has_unroll = bool(self.unroll_steps)
+        # The unrolled proposal replaces the sampler, so a stored frozen prefix
+        # is meaningless there (nothing runs the 100-step chain under gradient).
+        has_prefix = ctx.x_prefix is not None and not has_unroll
         if has_prefix:
             dyn["x_prefix"], dyn["key_late"] = ctx.x_prefix, ctx.key_late
+        if has_unroll:
+            dyn["x0_bct"], dyn["t_grid"] = x0_bct, t_grid
 
         # Canonicalize to device arrays of their own dtype. The first replan's
         # context differs from later ones in some leaf's abstract signature
@@ -1322,7 +1761,7 @@ class SafetyFineTuner:
         (loss, aux), grads = self._free_grad_fn()(
             self.actor._tparams, state, dyn, keys,
             n_steps=ctx.n_steps, h=h, has_expert=has_expert, has_bc=has_bc,
-            has_base=has_base, has_prefix=has_prefix)
+            has_base=has_base, has_prefix=has_prefix, has_unroll=has_unroll)
         return grads, loss, aux
 
     # ------------------------------------------------------------------ #
@@ -2115,7 +2554,12 @@ class SafetyFineTuner:
                "splits": str(self.args.splits),
                "splits_json": str(self.args.splits_json),
                "eval_scenes": int(self.args.eval_scenes),
-               "data_seed": int(self.args.data_seed)}
+               "data_seed": int(self.args.data_seed),
+               # The simulator settings change the base's own scores too; a
+               # reference taken under another clock or agent model is stale.
+               "world_dt_method": self.env.world_dt_method,
+               "ego_vel_source": self.env.ego_vel_source,
+               "sim_agents": self.env.sim_agents}
         if cache.exists():
             try:
                 blob = json.loads(cache.read_text())
@@ -2311,6 +2755,13 @@ class SafetyFineTuner:
             # Row outcomes of THIS policy's rollout, captured before any later
             # rollout (bc, preservation) overwrites `_last_scene`.
             roll_scene = dict(self._last_scene)
+            # Same hazard, same fix: `_neighbor_state` reads `self.env.sim_state`,
+            # and the BC and preservation passes below each roll the env again --
+            # the preservation pass on a DIFFERENT batch of scenes entirely. Taken
+            # here, the neighbours are the ones THIS policy's contexts were
+            # collected against. `state` unchanged under the default.
+            _ns = self._neighbor_state(state)
+            grad_state = state if _ns is None else _ns
             n_broken = self.note_broken(roll_scene["solved"], roll_scene["clean"])
             n_safety_rows = -1.0
             if getattr(a, "safety_rows", "all") == "unsolved":
@@ -2348,7 +2799,7 @@ class SafetyFineTuner:
             # random-walk distance -- while averaging each step over a single
             # replan window.
             accum = len(contexts) if a.grad_accum <= 0 else int(a.grad_accum)
-            if pres_ctx or self.repair_weight > 0 or self.tb is not None:
+            if pres_ctx or self.repair_weight > 0 or self.pref_weight > 0 or self.tb is not None:
                 accum = 10 ** 9   # one step at the end, with the extra terms' grads added
             # A pure-replay arm (`--safety_weight 0 --tb_weight 1`) has no
             # on-policy term left to differentiate, and paying 100 denoiser evals
@@ -2369,7 +2820,8 @@ class SafetyFineTuner:
                     if skip_policy_term:
                         hist.append({k: 0.0 for k in
                                      ("loss", "safety", "anchor", "bc",
-                                      "base_anchor", "edge", "agent", "t_start")})
+                                      "base_anchor", "edge", "agent",
+                                      "tail_share", "n_neighbors", "t_start")})
                         continue
                     self.rng, rk = jax.random.split(self.rng)
                     # Paired by replan index so each step sees the human's
@@ -2378,7 +2830,7 @@ class SafetyFineTuner:
                     # so it may hold fewer contexts than the log pass.
                     bc_ctx = (bc_contexts[int(j) % len(bc_contexts)]
                               if bc_contexts else None)
-                    grads, loss, aux = self._grads_for(state, ctx, rk, bc_ctx)
+                    grads, loss, aux = self._grads_for(grad_state, ctx, rk, bc_ctx)
                     hist.append({"loss": float(np.asarray(loss)),
                                  **{k: float(np.asarray(v)) for k, v in aux.items()}})
                     buf = (grads if buf is None else
@@ -2390,8 +2842,10 @@ class SafetyFineTuner:
                         buf, nbuf = None, 0
             p_hist = []
             repair_loss = 0.0
+            pref_hist: list[dict] = []
             tb_m: dict[str, float] = {}
-            has_extra = bool(pres_ctx) or self.repair_weight > 0 or self.tb is not None
+            has_extra = (bool(pres_ctx) or self.repair_weight > 0 or self.pref_weight > 0
+                         or self.tb is not None)
             if buf is not None or has_extra:      # partial group at the end
                 if buf is None:
                     # Pure-replay arm: start the step from an explicit zero rather
@@ -2414,6 +2868,11 @@ class SafetyFineTuner:
                     rg, repair_loss = self.repair_grads(it)
                     rw = self.repair_weight
                     g = jax.tree_util.tree_map(lambda x, y: x + rw * y, g, rg)
+                if self.pref_weight > 0:
+                    fg, fm = self.pref_grads(it)
+                    pref_hist.append(fm)
+                    fw = self.pref_weight
+                    g = jax.tree_util.tree_map(lambda x, y: x + fw * y, g, fg)
                 tbg = None
                 if self.tb is not None:
                     tbg, tb_m = self.buffer_grads(it)
@@ -2425,8 +2884,28 @@ class SafetyFineTuner:
                 # take an Adam step on an all-zero gradient, which is not a no-op
                 # once the moments are warm and would miscount `adam_steps`, the
                 # x-axis that sets how far the weights have travelled.
-                if buf is not None or pn or self.repair_weight > 0 or tbg is not None:
+                if (buf is not None or pn or self.repair_weight > 0 or self.pref_weight > 0
+                        or tbg is not None):
                     step_hist.append(self.actor.apply_safety_grads(g))
+                # `--repair_steps K`: K-1 further Adam steps on the repair term
+                # alone, each on a fresh batch. Distilling a dataset of 10^4 rows at
+                # one batch per iteration would need an iteration -- and a rollout --
+                # per step.
+                if self.repair_weight > 0 and int(getattr(a, "repair_steps", 1)) > 1:
+                    r_losses = [repair_loss]
+                    for sub in range(1, int(a.repair_steps)):
+                        rg, rl = self.repair_grads(it, sub)
+                        step_hist.append(self.actor.apply_safety_grads(
+                            jax.tree_util.tree_map(lambda y: rw * y, rg)))
+                        r_losses.append(rl)
+                    repair_loss = float(np.mean(r_losses))
+                # `--pref_steps K`: same, for the preference term (+ its anchor).
+                if self.pref_weight > 0 and int(getattr(a, "pref_steps", 1)) > 1:
+                    for sub in range(1, int(a.pref_steps)):
+                        fg, fm = self.pref_grads(it, sub)
+                        pref_hist.append(fm)
+                        step_hist.append(self.actor.apply_safety_grads(
+                            jax.tree_util.tree_map(lambda y: fw * y, fg)))
             if not hist:
                 print(f"[safety] iter {it}: no live contexts, skipping", flush=True)
                 continue
@@ -2461,6 +2940,14 @@ class SafetyFineTuner:
                    "repair_share": (self.repair_weight * repair_loss
                                     / (self.repair_weight * repair_loss + s_mean)
                                     if self.repair_weight * repair_loss + s_mean > 0 else 0.0),
+                   # Diffusion-DPO (`--pref_weight`): means over this iteration's
+                   # steps. `pref/logit_z` > 0 and `pref/accuracy` -> 1 mean the
+                   # model now denoises the edit better than the rejected draw,
+                   # RELATIVE to the base. Compare `pref/grad_norm` with
+                   # `pref/anchor_grad_norm` x weight for the balance of the two
+                   # terms -- the anchor's VALUE is ~0 by construction.
+                   **({k: float(np.mean([h[k] for h in pref_hist])) for k in pref_hist[0]}
+                      if pref_hist else {}),
                    "replay_added": n_broken, "replay_size": len(self._replay),
                    # Transition replay. `tb_age` is the number to watch: it is how
                    # many iterations old, on average, the sampler states the
@@ -2498,9 +2985,21 @@ class SafetyFineTuner:
                    "n_grads": len(hist),
                    "safety_first": hist[0]["safety"], "safety_last": hist[-1]["safety"],
                    "edge_last": hist[-1]["edge"], "agent_last": hist[-1]["agent"],
+                   # Mean over the iteration's grad steps, not the last one: the
+                   # tail share moves with which scenes were in the minibatch
+                   # (it scales with their traffic density), which is exactly
+                   # the quantity in question, so a single step is noisy.
+                   "tail_share": float(np.mean(
+                       [float(h["tail_share"]) for h in hist])),
                    "anchor_last": hist[-1].get("anchor", 0.0),
                    "anchor_share": (a_term / (a_term + s_term)
                                     if a_term + s_term > 0 else 0.0),
+                   # Valid ego-neighbour pairs per scored step. Watch it on any
+                   # `--neighbor_source sim` run: 0 there means the agent barrier
+                   # was charged against nothing, which the loss curve alone
+                   # cannot distinguish from an empty road.
+                   "n_neighbors": float(np.mean(
+                       [float(h.get("n_neighbors", 0.0)) for h in hist])),
                    "t_start_mean": hist[-1]["t_start"],
                    "grad_norm": step_hist[-1]["grad_norm"] if step_hist else 0.0,
                    **{f"roll_{k}": v for k, v in roll_m.items()}}
@@ -2546,7 +3045,19 @@ class SafetyFineTuner:
                 wandb.log(row, step=it)
             print(f"[safety] iter {it:>4} safety {row['safety_first']:.4f}->"
                   f"{row['safety_last']:.4f} |g| {row['grad_norm']:.2e} "
-                  f"ctx {row['n_ctx']} ({row['iter_s']}s)"
+                  # Share of the safety loss charged to geometry ALREADY CLEAR
+                  # of its margin -- the softplus barrier's infinite tail,
+                  # summed over 4 corners x N agents x T steps, so it grows with
+                  # the scene's traffic rather than with anything the policy
+                  # did. Exactly 0 under a compact-support --barrier_shape. On
+                  # the console because it is the number that says whether the
+                  # shape can matter on this data at all.
+                  f"tail {row['tail_share']:.3f} "
+                  + (f"PREF loss {row['pref/loss']:.4f} z {row['pref/logit_z']:+.2e} "
+                     f"acc {row['pref/accuracy']:.2f} |g| {row['pref/grad_norm']:.1e}"
+                     f"/{row['pref/anchor_grad_norm']:.1e} "
+                     if "pref/loss" in row else "")
+                  + f"ctx {row['n_ctx']} ({row['iter_s']}s)"
                   + (f"  EVAL solved {row.get('eval_solved_rate', float('nan')):.3f}"
                      f" reached {row.get('eval_reached_rate', float('nan')):.3f}"
                      f" offroad {row.get('eval_offroad_rate', float('nan')):.3f}"
@@ -2602,6 +3113,7 @@ class SafetyFineTuner:
             {"base_ckpt": self.args.ckpt, "k_trainable": self.args.k_trainable,
              "anchor_weight": self.args.anchor_weight,
              "edge_margin_m": self.args.edge_margin,
+             "edge_geometry": getattr(self.args, "edge_geometry", "point"),
              "agent_margin_m": self.args.agent_margin,
              "unroll_steps": self.unroll_steps,
              "unroll_grad_steps": (self.unroll_grad_steps if self.unroll_steps else None),
@@ -2617,6 +3129,14 @@ class SafetyFineTuner:
              "preserve_weight": float(getattr(self.args, "preserve_weight", 0.0)),
              "repair_weight": float(getattr(self.args, "repair_weight", 0.0)),
              "repair_data": str(getattr(self.args, "repair_data", "")),
+             "repair_steps": int(getattr(self.args, "repair_steps", 1)),
+             "repair_rows": str(getattr(self.args, "repair_rows", "all")),
+             "repair_split_ratio": str(getattr(self.args, "repair_split_ratio", "")),
+             "repair_switch_share": float(getattr(self.args, "repair_switch_share", 0.0)),
+             **{k: getattr(self.args, k, None) for k in (
+                 "pref_weight", "pref_data", "pref_beta", "pref_batch",
+                 "pref_anchor_batch", "pref_anchor_weight", "pref_steps", "pref_rows",
+                 "pref_t_min", "pref_t_max", "pref_edit_weight", "pref_edit_delta_m")},
              "tb_weight": float(getattr(self.args, "tb_weight", 0.0)),
              "tb_capacity": int(getattr(self.args, "tb_capacity", 0)),
              "tb_batch": int(getattr(self.args, "tb_batch", 0)),
@@ -2722,6 +3242,46 @@ def build_argparser():
     p.add_argument("--epochs", type=int, default=1)
     p.add_argument("--max_replans", type=int, default=8)
     p.add_argument("--replan_interval_steps", type=int, default=10)
+    # ---- how the OTHER agents move ----------------------------------------- #
+    # "none" log-replays them (every result before 2026-09-19): each non-ego
+    # object repeats its recorded pose and cannot see the ego at all. "idm"
+    # hands them to waymax's IDMRoutePolicy -- each stays on its OWN logged path
+    # and modulates only its speed against whatever box is ahead of it, the ego
+    # included. Longitudinal reactivity: a car brakes for the ego, it never
+    # steers around it.
+    #
+    # This changes what `overlap` MEANS, so it changes every collision number a
+    # run reports. Measured motivation: log-replay rails charge the ego 0.031 ->
+    # 0.719 collision purely for running LATE (probe_logreplay_collision, the
+    # delay sweep), which is the failure mode a slow policy actually has, while
+    # 1 m of lateral offset costs one scene in 32.
+    p.add_argument("--sim_agents", type=str, default="none",
+                   choices=SIM_AGENT_CHOICES)
+    # Where the SAFETY LOSS reads the other agents' boxes. "log" is the recorded
+    # motion; "sim" is where the NPCs actually were when the collected episode
+    # was driven (`sim_trajectory` of the state the rollout ended in). Under
+    # `--sim_agents none` the two are the same motion and this is a no-op. Under
+    # `--sim_agents idm` they are not, and reading "log" charges the candidate
+    # for a hazard that braked its way out of existence.
+    p.add_argument("--neighbor_source", type=str, default="log",
+                   choices=("log", "sim"))
+    # Which velocity the policy is SHOWN for its own executed steps. "commanded"
+    # (every result before 2026-09-23) is what it wrote, which overstates what
+    # its positions drive by 13-23%; "realised" is the executed positions'
+    # backward difference, so `ego_state` stops reporting a speed the car is not
+    # doing. See env._splice_sim_into_log_batched.
+    p.add_argument("--ego_vel_source", type=str, default="commanded",
+                   choices=EGO_VEL_SOURCES)
+    # How each scene's world step is read off its log timestamps -- the grid the
+    # plan is resampled onto, one point per executed log step. "first" (every
+    # result before 2026-09-24) takes the FIRST pair, ~0.075 s in 44/173
+    # failure_heldout scenes, which executes their plan at ~0.75x; 43 of the 44
+    # never reach. "median" is the scene's median step, the default since the
+    # A/B (jobs 62629-62634): those 44 go 0.01 -> 0.95 solved, nothing else moves.
+    # RESUMING a run started before 2026-09-24? pass --world_dt_method first.
+    # See data.preprocess.compute_world_dt_seconds.
+    p.add_argument("--world_dt_method", type=str, default="median",
+                   choices=WORLD_DT_METHODS)
     p.add_argument("--lr", type=float, default=1e-5)
     p.add_argument("--k_trainable", type=int, default=10)
     p.add_argument("--prefix_len", type=int, default=5)
@@ -2834,6 +3394,33 @@ def build_argparser():
                    help="softplus knee width (m) on the road-edge barrier")
     p.add_argument("--agent_tau", type=float, default=0.25,
                    help="softplus knee width (m) on the agent-gap barrier")
+    p.add_argument("--barrier_shape", type=str, default="softplus",
+                   choices=("softplus", "hinge2", "hinge"),
+                   help="shape of the one-sided barrier. `softplus` (default, "
+                        "and what every run on record used) has INFINITE "
+                        "support: a corner or an agent comfortably clear of the "
+                        "margin still contributes, and since the barrier is "
+                        "summed over 4 corners x N agents x T steps that "
+                        "epsilon scales with how crowded and how long the scene "
+                        "is rather than with anything the policy did. `hinge2` "
+                        "is the quadratic-smoothed hinge: same knee width, same "
+                        "unbounded ramp, still C^1, but exactly zero value AND "
+                        "zero gradient at or beyond the margin. Measure the "
+                        "difference first with tests/probe_barrier_tail.py -- "
+                        "the margins were calibrated under softplus.")
+    # See `SafetyLossConfig.edge_geometry`. The sign -- and so agreement with
+    # waymax's `offroad` -- is identical under both; only the magnitude moves.
+    p.add_argument("--edge_geometry", type=str, default="point",
+                   choices=("point", "segment"),
+                   help="how a corner's road-edge clearance is measured once the "
+                        "nearest roadgraph sample is found. `point` (default, and "
+                        "what every run on record used) is waymax's distance to "
+                        "that SAMPLE: it overstates clearance by up to half the "
+                        "~1 m sample spacing and jumps where the polyline is "
+                        "crossed between samples. `segment` measures to the "
+                        "incident polyline segment instead. --edge_margin was "
+                        "calibrated under `point`; recalibrate it for `segment` "
+                        "(slurm/calibrate_edge_geometry.sbatch) before comparing.")
     # See `SafetyFineTuner._init_windows` for the two time bases.
     p.add_argument("--safety_window", type=int, default=0,
                    help="WORLD steps of the candidate the safety term scores. "
@@ -2888,6 +3475,47 @@ def build_argparser():
                    help="weight on the late-step denoising loss toward VERIFIED repairs "
                         "(see `SafetyFineTuner._init_repair`). 0 = off.")
     p.add_argument("--repair_batch", type=int, default=16)
+    p.add_argument("--repair_steps", type=int, default=1,
+                   help="Adam steps per iteration on the repair term, each on a fresh "
+                        "batch (the first shares its step with every other term; the "
+                        "rest are repair-only). 1 = every earlier run")
+    p.add_argument("--repair_rows", choices=("all", "solved"), default="all",
+                   help="'solved' keeps only rows whose EPISODE solved (filtered BC); "
+                        "needs proposal_select --dump_bc data (ep_solved)")
+    p.add_argument("--repair_split_ratio", default="",
+                   help="fixed per-batch mix by collection split, e.g. "
+                        "'failure_train=1,success_train=1'. '' = uniform over rows")
+    p.add_argument("--repair_switch_share", type=float, default=0.0,
+                   help="fixed share of every repair batch drawn from rows where the arm "
+                        "EDITED the plan (`switched`); the rest follows --repair_split_ratio "
+                        "over the kept rows. 0 = no switched pool (every earlier run)")
+    # --- Diffusion-DPO on bank pairs (`SafetyFineTuner._init_pref`) ----------- #
+    p.add_argument("--pref_data", default="",
+                   help="glob of proposal_select --dump_bc bc_data/<arm>/*.npz carrying "
+                        "`rejected` (collected 2026-10-01 or later)")
+    p.add_argument("--pref_weight", type=float, default=0.0,
+                   help="weight on the Diffusion-DPO objective (pairs + its success "
+                        "anchor) next to every other term. 0 = off")
+    p.add_argument("--pref_beta", type=float, default=1.0,
+                   help="DPO beta: z = beta * [(l_bad - l_bad_ref) - (l_good - l_good_ref)]")
+    p.add_argument("--pref_batch", type=int, default=16, help="pairs per step")
+    p.add_argument("--pref_anchor_batch", type=int, default=16,
+                   help="success_train kept rows per step for the anchor")
+    p.add_argument("--pref_anchor_weight", type=float, default=100.0,
+                   help="weight on base_anchor_loss over the success rows (100 = the "
+                        "safety recipe's --base_anchor_weight). 0 = no anchor")
+    p.add_argument("--pref_steps", type=int, default=1,
+                   help="Adam steps per iteration on the preference objective")
+    p.add_argument("--pref_rows", choices=("all", "solved"), default="solved",
+                   help="pairs from switched rows of solved episodes only, or all")
+    p.add_argument("--pref_t_min", type=int, default=0)
+    p.add_argument("--pref_t_max", type=int, default=-1,
+                   help="exclusive upper end of the pair's t draw; -1 = k_trainable "
+                        "(the steps the trainable copy drives). Low-noise arm: smaller")
+    p.add_argument("--pref_edit_weight", type=float, default=0.0,
+                   help="lambda: model steps where |good - bad| > --pref_edit_delta_m "
+                        "weigh 1 + lambda in both denoising losses. 0 = off")
+    p.add_argument("--pref_edit_delta_m", type=float, default=0.1)
     # --- transition replay (rl/diffusion_ft/transition_buffer.py) ------------ #
     # The collection rollout's own reverse-diffusion transitions, stored one per
     # datum and replayed later. The safety loss is then charged on the CLEAN
@@ -2895,6 +3523,10 @@ def build_argparser():
     # network eval) or after a short unroll (K>1) -- so the state the denoiser is
     # corrected at is one the deployed sampler actually visited, instead of the
     # `q_sample(x0_expert, t)` a teacher-forced unroll substitutes for it.
+    p.add_argument("--unroll_eager", action=argparse.BooleanOptionalAction,
+                   default=False,
+                   help="run the teacher-forced unroll through the old un-jitted "
+                        "closure (the equivalence reference; ~6x slower per iter)")
     p.add_argument("--tb_weight", type=float, default=0.0,
                    help="weight on the replayed-transition safety term. 0 = off "
                         "(and nothing is stored, so the run is unchanged).")

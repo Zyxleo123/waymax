@@ -4,8 +4,8 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
-#SBATCH --time=2:00:00
+#SBATCH --mem=48G
+#SBATCH --time=4:00:00
 #SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
 #SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
 #
@@ -24,8 +24,11 @@
 # and naming a QOS this account has no association for fails submission with a
 # bare "Invalid qos specification".
 #
-# 2h (not winnability's 1h): this runs ~12 full-episode replays of the batch,
-# one per perturbation level, where winnability runs one.
+# 4h and 48G (was 2h/32G): DFT_SIM_AGENTS now defaults to running every
+# perturbation level under BOTH agent models, so this is ~24 full-episode replays
+# rather than ~12, and the IDM arm additionally builds an
+# (B, N, N, lookahead, 5) pairwise box tensor at every world step to find each
+# agent's leader. Set DFT_SIM_AGENTS=none to get the old single-arm cost back.
 set -euo pipefail
 
 ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
@@ -49,12 +52,17 @@ export TF_CPP_MIN_LOG_LEVEL="${TF_CPP_MIN_LOG_LEVEL:-2}"
 DFT_TFRECORD="${DFT_TFRECORD:-/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord}"
 DFT_INDICES="${DFT_INDICES:-0-31}"
 DFT_LATERAL="${DFT_LATERAL:-0,0.25,0.5,1.0,1.5,2.0,3.0}"
-DFT_DELAY="${DFT_DELAY:-0,1,2,3,5}"
+DFT_DELAY="${DFT_DELAY:-0,2,5,10,20,40}"
+# Which non-ego agent models to run: `none` = log replay (every result before
+# 2026-09-19), `idm_brake` = braking-only IDM, `idm` = waymax stock, which races
+# every unobstructed car toward 108 km/h (see rl/diffusion_ft/sim_agents.py and
+# job 58076). Two arms by default, so each case is paired.
+DFT_SIM_AGENTS="${DFT_SIM_AGENTS:-none,idm_brake}"
 DFT_PROBE_OUT="${DFT_PROBE_OUT:-runs/dft_logreplay_probe/collision_vs_deviation.json}"
 
 echo "=== log-replay collision probe: $(date) on $(hostname) ==="
 echo "tfrecord=$DFT_TFRECORD indices=$DFT_INDICES"
-echo "lateral=[$DFT_LATERAL] delay=[$DFT_DELAY]"
+echo "lateral=[$DFT_LATERAL] delay=[$DFT_DELAY] sim_agents=[$DFT_SIM_AGENTS]"
 echo
 
 "$PYTHON" -m rl.diffusion_ft.tests.probe_logreplay_collision \
@@ -62,6 +70,7 @@ echo
   --indices "$DFT_INDICES" \
   --lateral "$DFT_LATERAL" \
   --delay "$DFT_DELAY" \
+  --sim_agents "$DFT_SIM_AGENTS" \
   --out "$DFT_PROBE_OUT"
 
 echo "=== exit $? ==="

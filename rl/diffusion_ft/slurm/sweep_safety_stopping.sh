@@ -134,6 +134,13 @@ ALL_ARMS=(
   "bc300_s1|DFT_SAFETY_WINDOW=0,DFT_BC_WEIGHT=300,DFT_BASE_ANCHOR_WEIGHT=0.0,DFT_SEED=1,DFT_DATA_SEED=1"
   "bc300_s2|DFT_SAFETY_WINDOW=0,DFT_BC_WEIGHT=300,DFT_BASE_ANCHOR_WEIGHT=0.0,DFT_SEED=2,DFT_DATA_SEED=2"
 )
+# A caller's own arm table (space-separated 'tag|K=V,K=V'), for a recipe that is
+# this one plus shared overrides -- those go in DFT_EXTRA_ENV_FILE, appended to
+# every arm's env file before the arm's own lines, so values may hold commas.
+if [[ -n "${DFT_ARM_SPECS:-}" ]]; then read -ra ALL_ARMS <<< "$DFT_ARM_SPECS"; fi
+if [[ -n "${DFT_EXTRA_ENV_FILE:-}" && ! -s "$DFT_EXTRA_ENV_FILE" ]]; then
+  echo "FATAL: DFT_EXTRA_ENV_FILE=$DFT_EXTRA_ENV_FILE is missing or empty" >&2; exit 1
+fi
 
 WANT="${DFT_ARMS:-}"
 ARMS=()
@@ -155,11 +162,15 @@ SB_FLAGS=()
 [[ -n "${DFT_NODELIST:-}" ]]  && SB_FLAGS+=(--nodelist="$DFT_NODELIST")
 [[ -n "${DFT_EXCLUDE:-}" ]]   && SB_FLAGS+=(--exclude="$DFT_EXCLUDE")
 [[ -n "${DFT_TIME:-}" ]]      && SB_FLAGS+=(--time="$DFT_TIME")
+# A caller's upstream, e.g. the calibration that writes DFT_EDGE_MARGIN_FILE.
+[[ -n "${DFT_DEPENDENCY:-}" ]] && SB_FLAGS+=(--dependency="$DFT_DEPENDENCY")
 
 echo "sweep     -> $BASE_OUT"
 echo "arms      -> $N (2 configs x 3 seeds), at most $MAX_CONCURRENT at once"
 echo "schedule  -> $ITERS iters, eval+keep every $EVAL_EVERY  (16 eval points)"
 echo "splits    -> failure_heldout,success_heldout only (marginal needs no more)"
+echo "sim       -> sim_agents=${DFT_SIM_AGENTS:-none} neighbor_source=${DFT_NEIGHBOR_SOURCE:-log} world_dt=${DFT_WORLD_DT_METHOD:-median}"
+echo "edge      -> geometry=${DFT_EDGE_GEOMETRY:-point} margin=${DFT_EDGE_MARGIN_FILE:-${DFT_EDGE_MARGIN:-0.3}}"
 echo
 
 MANIFEST="$BASE_OUT/arms.txt"; : > "$MANIFEST"
@@ -198,6 +209,10 @@ for spec in "${ARMS[@]}"; do
     echo "DFT_AGENT_TAU=${DFT_AGENT_TAU:-0.25}"
     echo "DFT_AGENT_GEOMETRY=${DFT_AGENT_GEOMETRY:-exact}"
     echo "DFT_N_DISCS=${DFT_N_DISCS:-5}"
+    # 2026-09-25. `point` reproduces every earlier sweep. A non-empty margin file
+    # overrides DFT_EDGE_MARGIN inside the job (see train_safety.sbatch).
+    echo "DFT_EDGE_GEOMETRY=${DFT_EDGE_GEOMETRY:-point}"
+    echo "DFT_EDGE_MARGIN_FILE=${DFT_EDGE_MARGIN_FILE:-}"
     echo "DFT_ANCHOR_WINDOW=-1"
     echo "DFT_K_TRAINABLE=${DFT_K_TRAINABLE:-10}"
     echo "DFT_PREFIX_LEN=${DFT_PREFIX_LEN:-5}"
@@ -218,6 +233,13 @@ for spec in "${ARMS[@]}"; do
     # PINNED across every arm: the eval has to be the same measurement, or the
     # seed replicates measure the eval instead of the run.
     echo "DFT_EVAL_SEED=12345"
+    # The clock (2026-09-24): `median` unless told otherwise. The 09-11 sweep ran
+    # `first`; DFT_WORLD_DT_METHOD=first reproduces it.
+    echo "DFT_WORLD_DT_METHOD=${DFT_WORLD_DT_METHOD:-median}"
+    # The simulator (2026-09-25): forwarded so a sweep can run the same recipe
+    # against reactive NPCs. Defaults reproduce every earlier sweep (rails).
+    echo "DFT_SIM_AGENTS=${DFT_SIM_AGENTS:-none}"
+    echo "DFT_NEIGHBOR_SOURCE=${DFT_NEIGHBOR_SOURCE:-log}"
     echo "DFT_EVAL_REPEATS=1"
     echo "DFT_EVAL_BASE=1"
     echo "DFT_RESUME=1"
@@ -225,6 +247,9 @@ for spec in "${ARMS[@]}"; do
     echo "DFT_WANDB_PROJECT=${DFT_WANDB_PROJECT:-diffusion_ft_safety}"
     echo "DFT_WANDB_GROUP=$GROUP"
     echo "DFT_WANDB_NAME=$TAG"
+    if [[ -n "${DFT_EXTRA_ENV_FILE:-}" ]]; then
+      echo "# --- shared overrides: $DFT_EXTRA_ENV_FILE ---"; cat "$DFT_EXTRA_ENV_FILE"
+    fi
     echo "# --- arm: $TAG ---"
     IFS=',' read -ra KV <<< "$OVR"; for kv in "${KV[@]}"; do echo "$kv"; done
   } > "$ENV_DIR/${IDX_N}.env"
@@ -232,12 +257,18 @@ for spec in "${ARMS[@]}"; do
   IDX_N=$((IDX_N + 1))
 done
 echo
+# Write the env files and stop, so a caller can check them before anything queues.
+if [[ -n "${DFT_DRY_RUN:-}" ]]; then
+  echo "DRY RUN: env files in $ENV_DIR, nothing submitted"; exit 0
+fi
 
 ARRAY_ID=$(env -i HOME="$HOME" PATH="$PATH" USER="${USER:-}" \
   sbatch --parsable "${SB_FLAGS[@]}" \
     --array="0-$((N - 1))%${MAX_CONCURRENT}" --job-name="dft_stop" \
     rl/diffusion_ft/slurm/train_safety.sbatch "$ENV_DIR")
 echo "submitted array $ARRAY_ID  (${N} tasks, %${MAX_CONCURRENT})"
+# Record the array id so a caller can chain onto it without guessing from squeue.
+echo "$ARRAY_ID" > "$BASE_OUT/jobid.txt"
 echo
 cat <<EOF
 read it (per-seed curves; is there a peak at the SAME iter in all three?):

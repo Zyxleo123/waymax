@@ -253,6 +253,84 @@ def test_barrier_shape() -> bool:
     return ok
 
 
+def test_compact_barrier() -> bool:
+    """`hinge2` is the softplus's contract minus the tail: zero past the margin.
+
+    The three properties that make the compact-support shape a drop-in rather
+    than a different loss are asserted separately, because they fail
+    independently:
+
+      * it is **exactly** zero, in value AND gradient, at and beyond the margin
+        -- that is the whole point, and it is what makes a scene with nothing
+        inside a margin cost nothing no matter how many agents it has;
+      * it is still C^1 at both joins, so there is no ``max`` kink to
+        differentiate through (the property the softplus was chosen for);
+      * it still ramps unboundedly with gradient saturating at 1, so a
+        trajectory that starts deep in violation is still pushed out -- and it
+        does not overflow on the broken records whose clearance is tens of
+        metres negative.
+    """
+    m, tau = 0.5, 0.15
+    ok = True
+    clear = jnp.linspace(m, m + 8.0, 2001)
+    for sh in ("hinge2", "hinge"):
+        v = np.asarray(barrier(clear, m, tau, sh))
+        g = np.asarray(jax.vmap(jax.grad(lambda c: barrier(c, m, tau, sh)))(clear))
+        ok &= report(f"{sh}: zero past margin", float(np.abs(v).max()) == 0.0,
+                     f"max |barrier| on [margin, margin+8] = {np.abs(v).max():.1e}")
+        # The unsmoothed hinge is excused at c == margin EXACTLY, and only
+        # there: that is its kink, where jnp.maximum hands out the subgradient
+        # 0.5. It is why `hinge` is a reference point and not a training shape.
+        gg = g if sh == "hinge2" else g[1:]
+        ok &= report(f"{sh}: zero gradient past margin",
+                     float(np.abs(gg).max()) == 0.0,
+                     f"max |d/dc| on {'[' if sh == 'hinge2' else '('}margin, "
+                     f"margin+8] = {np.abs(gg).max():.1e}"
+                     + ("" if sh == "hinge2" else
+                        f"; subgradient AT the kink = {abs(float(g[0])):.2f}"))
+    # The softplus, on the same interval, is NOT zero -- this is the misfire the
+    # probe measures, asserted here so the contrast is not folklore.
+    vs = float(np.abs(np.asarray(barrier(clear, m, tau, "softplus"))).max())
+    ok &= report("softplus tail is real", vs > 1e-3,
+                 f"softplus at the margin = {vs:.4f} (= tau*ln2), and it decays "
+                 f"only like exp(-(c-m)/tau) past it")
+
+    # C^1 at both joins: sample the derivative on a fine grid and bound the jump.
+    cs = jnp.linspace(m - 3 * tau, m + tau, 30001)
+    g2 = np.asarray(jax.vmap(jax.grad(lambda c: barrier(c, m, tau, "hinge2")))(cs))
+    jump2 = float(np.abs(np.diff(g2)).max())
+    gh = np.asarray(jax.vmap(jax.grad(lambda c: barrier(c, m, tau, "hinge")))(cs))
+    jumph = float(np.abs(np.diff(gh)).max())
+    ok &= report("hinge2 is C^1", jump2 < 1e-2,
+                 f"max gradient step {jump2:.2e} (grid {4*tau/30000:.1e} m) vs "
+                 f"the unsmoothed hinge's {jumph:.2f}")
+
+    deep = float(barrier(jnp.asarray(-10.0), m, tau, "hinge2"))
+    huge = float(barrier(jnp.asarray(-1e6), m, tau, "hinge2"))
+    hgrad = float(jax.grad(lambda c: barrier(c, m, tau, "hinge2"))(jnp.asarray(-1e6)))
+    ok &= report("hinge2 ramps inside", abs(deep - (m + 10.0 - tau / 2)) < 1e-3,
+                 f"barrier(-10 m) = {deep:.4f} ~ margin + 10 - tau/2 = "
+                 f"{m + 10.0 - tau/2:.4f}")
+    ok &= report("hinge2 survives a broken record",
+                 np.isfinite(huge) and abs(hgrad + 1.0) < 1e-6,
+                 f"barrier(-1e6) = {huge:.3e}, d/dc = {hgrad:.3f} (finite, "
+                 f"saturated -- the clip in the quadratic branch)")
+
+    ok &= report("unknown shape rejected",
+                 _raises(lambda: barrier(jnp.asarray(0.0), m, tau, "gaussian")),
+                 "barrier(..., shape='gaussian') raises rather than silently "
+                 "falling back to softplus")
+    return ok
+
+
+def _raises(fn) -> bool:
+    try:
+        fn()
+    except ValueError:
+        return True
+    return False
+
+
 def test_terms_and_gradient() -> bool:
     """Shapes flow, the gradient is finite and local, and descent does the work.
 
@@ -541,6 +619,7 @@ def main() -> None:
         ("exact box gap", test_exact_box_gap),
         ("exact gap gradient", test_exact_gap_gradient),
         ("barrier shape", test_barrier_shape),
+        ("compact barrier", test_compact_barrier),
         ("terms + gradient", test_terms_and_gradient),
     ):
         print(f"\n[{name}]")

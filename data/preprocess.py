@@ -48,7 +48,38 @@ def extract_ego_index(state: datatypes.SimulatorState) -> jax.Array:
     return jnp.argmax(is_sdc.astype(jnp.int32), axis=-1)
 
 
-def compute_world_dt_seconds(state: datatypes.SimulatorState, fallback_dt: float = 0.1) -> jax.Array:
+# How `compute_world_dt_seconds` reads a scene's dt off its timestamps.
+WORLD_DT_METHODS = ("first", "median")
+
+
+def compute_world_dt_seconds(state: datatypes.SimulatorState, fallback_dt: float = 0.1,
+                             method: str = "first") -> jax.Array:
+    """Per-scene world step, seconds, ``[B]``; ``fallback_dt`` where no valid,
+    increasing timestamp pair exists (e.g. ScenarioMax's all-zero column).
+
+    ``method``:
+
+    * ``"first"`` (the default, and every result before 2026-09-24) -- the dt of
+      the FIRST valid pair.
+    * ``"median"`` -- the median over every valid pair.
+
+    WHY IT MATTERS AT INFERENCE. ``_preprocess_single_batch`` lays the policy's
+    plan onto a ``k * world_dt`` grid (``world_t_seconds``), and the env then
+    advances ONE log step per grid point. WOMD tf_example timestamps are real
+    and not quite uniform, and in some scenes the first interval is short
+    (p50 0.075 s, where the median step is 0.100 s and 80 steps span 8.0 s), so
+    under ``"first"`` those scenes execute the plan at ~0.75x while its velocity
+    field still reports full speed. Measured 2026-09-23 on ``failure_heldout``:
+    44/173 scenes, and 43 of those 44 never reach the goal (4/129 of the rest
+    do not); 0/120 ``success_heldout`` and 0/96 ``intermittent_heldout`` scenes
+    have a short first pair, because the base fails every one of them.
+
+    Training is barely touched either way: targets are resampled on the stamped
+    time base (``ego_source_time_seconds``), which uses this value only as the
+    step-index fallback; here it also bounds the anchor draw. Only this JAX path
+    has the option -- ``data/preprocess_cached.py`` and ``vla/preprocess.py``
+    keep their own ``"first"`` copies.
+    """
     ego_idx = extract_ego_index(state)
     ego_ts_us = _gather_ego(state.log_trajectory.timestamp_micros, ego_idx).astype(jnp.float32)
     ego_valid = _gather_ego(state.log_trajectory.valid, ego_idx)
@@ -57,9 +88,14 @@ def compute_world_dt_seconds(state: datatypes.SimulatorState, fallback_dt: float
     valid_pair = ego_valid[:, 1:] & ego_valid[:, :-1] & (dt > 0.0)
     any_valid = jnp.any(valid_pair, axis=-1)
 
-    first_idx = _first_true_index(valid_pair)
-    first_dt = jnp.take_along_axis(dt, first_idx[:, None], axis=1)[:, 0]
-    return jnp.where(any_valid, first_dt, jnp.full_like(first_dt, fallback_dt))
+    if method == "first":
+        first_idx = _first_true_index(valid_pair)
+        est = jnp.take_along_axis(dt, first_idx[:, None], axis=1)[:, 0]
+    elif method == "median":
+        est = jnp.nanmedian(jnp.where(valid_pair, dt, jnp.nan), axis=-1)
+    else:
+        raise ValueError(f"world dt method must be one of {WORLD_DT_METHODS}, got {method!r}")
+    return jnp.where(any_valid, est, jnp.full_like(est, fallback_dt))
 
 
 def ego_source_time_seconds(
@@ -403,10 +439,11 @@ def _preprocess_single_batch(
     anchor_step_override: int | None = None,
     goal_step_override: int | None = None,
     goal_xy_override: jax.Array | None = None,
+    world_dt_method: str = "first",
 ) -> tuple[PreprocessBatch, jax.Array]:
     bsz = state.log_trajectory.x.shape[0]
     ego_idx = extract_ego_index(state)
-    world_dt_b = compute_world_dt_seconds(state, cfg.world_dt_fallback)
+    world_dt_b = compute_world_dt_seconds(state, cfg.world_dt_fallback, world_dt_method)
 
     total_horizon_s = cfg.predict_horizon * cfg.model_dt
     horizon_world_steps_b = jnp.ceil(total_horizon_s / jnp.maximum(world_dt_b, 1e-3)).astype(jnp.int32)
@@ -529,7 +566,9 @@ def preprocess_simulator_state(
     anchor_step_override: int | None = None,
     goal_step_override: int | None = None,
     goal_xy_override: jax.Array | None = None,
+    world_dt_method: str = "first",
 ) -> tuple[PreprocessBatch, jax.Array]:
+    """``world_dt_method``: see :func:`compute_world_dt_seconds`."""
     if state.log_trajectory.x.ndim < 3:
         raise ValueError("Expected batched SimulatorState with shape [..., N, T].")
 
@@ -537,7 +576,9 @@ def preprocess_simulator_state(
         n_devices = state.log_trajectory.x.shape[0]
         keys = jax.random.split(rng, n_devices)
         return jax.vmap(
-            lambda s, k, t, t_g, g: preprocess_simulator_state(s, k, cfg, t, t_g, g)
+            lambda s, k, t, t_g, g: preprocess_simulator_state(
+                s, k, cfg, t, t_g, g, world_dt_method=world_dt_method)
         )(state, keys, anchor_step_override, goal_step_override, goal_xy_override)
 
-    return _preprocess_single_batch(state, rng, cfg, anchor_step_override, goal_step_override, goal_xy_override)
+    return _preprocess_single_batch(state, rng, cfg, anchor_step_override, goal_step_override,
+                                    goal_xy_override, world_dt_method=world_dt_method)

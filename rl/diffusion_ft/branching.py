@@ -96,26 +96,110 @@ def time_warp(world_bw5, alpha: float, *, ramp_steps: int, dt: float):
     return fd_velocity(w, dt)
 
 
-def lateral_shift(world_bw5, amp_m: float, *, ramp_steps: int, dt: float):
+def lateral_shift(world_bw5, amp_m: float, *, ramp_steps: int, dt: float,
+                  blend: str = "cubic"):
     """Shift the path ``amp_m`` metres along its left normal (negative = right).
 
-    The offset follows a smoothstep from 0 at the anchor to ``amp_m`` at
-    ``ramp_steps`` and then holds, so position, heading and lateral velocity are
-    all continuous at the join. Heading gains ``atan(d offset / d arclength)``,
-    the slope of the offset path; the arclength is floored so a near-stationary
-    car does not get a 90-degree yaw from a tiny step.
+    The offset eases in from 0 at the anchor to ``amp_m`` at ``ramp_steps`` and
+    then holds. Heading gains ``atan(d offset / d arclength)``, the slope of the
+    offset path; the arclength is floored so a near-stationary car does not get a
+    90-degree yaw from a tiny step.
+
+    ``blend`` picks the easing, and the choice is a comfort decision, not a
+    cosmetic one -- the env executes through ``StateDynamics``, which teleports
+    the ego to whatever states it is handed, so nothing downstream rejects an
+    infeasible edit:
+
+    * ``cubic`` (default, the historical behaviour) is the smoothstep
+      ``3u^2 - 2u^3``. It is C1: position, heading and lateral VELOCITY are
+      continuous at the join, but acceleration is NOT -- it steps from 0 to
+      ``6|A|/T^2`` at the anchor and back at the end (T = ramp_steps * dt).
+      An acceleration step is an unbounded jerk impulse, which is the
+      perceptually worst kind.
+    * ``quintic`` is smootherstep ``6u^5 - 15u^4 + 10u^3``, which is C2: the
+      second derivative vanishes at BOTH ends, so there is no acceleration step
+      and jerk stays bounded (peak ``60|A|/T^3``). Peak acceleration also drops
+      slightly, to ``5.77|A|/T^2``.
+
+    Everything else is identical, so a cubic/quintic pair is a clean A/B on ride
+    quality at matched geometry -- the clearance a candidate achieves barely
+    moves, only how abruptly it gets there.
     """
-    B, W, _ = world_bw5.shape
+    W = world_bw5.shape[1]
+    d = float(amp_m) * lateral_ease(W, ramp_steps, blend)                 # [W]
+    return lateral_offset(world_bw5, d[None, :], dt=dt)
+
+
+def lateral_ease(W: int, ramp_steps: int, blend: str = "cubic"):
+    """``[W]`` easing from 0 at the anchor to 1 at ``ramp_steps``, then held.
+    The unit profile of :func:`lateral_shift` (see there for cubic vs quintic)."""
     u = jnp.clip(jnp.arange(W, dtype=jnp.float32) / max(int(ramp_steps), 1), 0.0, 1.0)
-    d = float(amp_m) * (3.0 * u ** 2 - 2.0 * u ** 3)                      # [W]
+    if blend == "quintic":
+        return u ** 3 * (10.0 - 15.0 * u + 6.0 * u ** 2)
+    if blend == "cubic":
+        return 3.0 * u ** 2 - 2.0 * u ** 3
+    raise ValueError(f"unknown blend {blend!r} (cubic | quintic)")
+
+
+def lateral_offset(world_bw5, d_bw, *, dt: float):
+    """Move each pose ``d_bw[b, i]`` metres along its path's left normal.
+
+    The general form of :func:`lateral_shift`, whose profile is one fixed shape
+    (``amp * ease``); here it is an arbitrary per-step array, ``[B, W]`` or
+    ``[1, W]``, which is what lets :mod:`rl.diffusion_ft.lateral_opt` optimize
+    it. Differentiable in ``d_bw``. ``d_bw[:, 0]`` should be 0 (the anchor is the
+    current state). Heading gains the slope of the offset path, as in
+    :func:`lateral_shift`.
+    """
+    B = world_bw5.shape[0]
     yaw = world_bw5[..., 2]
     n = jnp.stack([-jnp.sin(yaw), jnp.cos(yaw)], axis=-1)                # [B, W, 2]
-    p = world_bw5[..., :2] + d[None, :, None] * n
-    ds = jnp.linalg.norm(jnp.diff(world_bw5[..., :2], axis=1), axis=-1)  # [B, W-1]
-    dd = jnp.diff(d)[None, :]
+    p = world_bw5[..., :2] + d_bw[..., None] * n
+    # |step| with a ZERO gradient at a zero-length step. The plain norm's gradient
+    # there is 0 * inf = NaN even where the step never reaches the loss, and once
+    # `world_bw5` itself depends on the parameters (path_retime under lon) a
+    # stationary plan or a held tail turned the whole row's gradient into NaN --
+    # the lon optimizer never took a step (select run
+    # lateral_opt_lonprev_20260930_143816: loss frozen on 56% of its rows). The
+    # SAME jnp.linalg.norm on the same nonzero steps, so values are bit-identical
+    # (a hand-written sqrt(sum(d**2)) differed by 1 ulp and failed the gate).
+    step = jnp.diff(world_bw5[..., :2], axis=1)                          # [B, W-1, 2]
+    moved = jnp.any(step != 0.0, axis=-1)
+    ds = jnp.where(moved, jnp.linalg.norm(jnp.where(moved[..., None], step, 1.0), axis=-1),
+                   0.0)
+    dd = jnp.diff(d_bw, axis=1)
     slope = jnp.arctan2(dd, jnp.maximum(ds, 0.05))
     dyaw = jnp.concatenate([jnp.zeros((B, 1)), slope], axis=1)
     w = world_bw5.at[..., :2].set(p).at[..., 2].set(_wrap(yaw + dyaw))
+    return fd_velocity(w, dt)
+
+
+def path_retime(world_bw5, s_bw, *, dt: float):
+    """Move each pose ``s_bw[b, i]`` metres ALONG its own path (positive = ahead).
+
+    The longitudinal counterpart of :func:`lateral_offset`: the path is kept and
+    the timing along it changes -- a per-step, optimizable :func:`time_warp`.
+    ``d s / dt`` is the speed change the edit adds. The new arclength ``S_i + s_i``
+    is clamped to the path and made non-decreasing (the car may stop, never
+    reverse), so running past the end holds the last pose, as ``time_warp`` does.
+    Position is interpolated along arclength; heading is the path's own heading
+    there, with its gradient STOPPED: at a near-stationary step the arclength
+    barely moves while the sampled heading still jitters, and d(heading)/ds would
+    explode. ``s_bw[:, 0]`` should be 0 (the anchor is the current state).
+    Differentiable in ``s_bw`` through the positions.
+    """
+    B = world_bw5.shape[0]
+    xy = world_bw5[..., :2]
+    seg = jnp.linalg.norm(jnp.diff(xy, axis=1), axis=-1)                 # [B, W-1]
+    # 1 mm per step keeps the knots strictly increasing through a stop, so the
+    # interpolation never divides by zero; it moves nothing measurable.
+    S = jnp.concatenate([jnp.zeros((B, 1)), jnp.cumsum(seg + 1e-3, axis=1)], axis=1)
+    q = jax.lax.cummax(jnp.clip(S + s_bw, 0.0, S[:, -1:]), axis=1)
+    interp = jax.vmap(jnp.interp)
+    x = interp(q, S, xy[..., 0])
+    y = interp(q, S, xy[..., 1])
+    yaw = jax.lax.stop_gradient(interp(q, S, _unwrap(world_bw5[..., 2])))
+    w = world_bw5.at[..., 0].set(x).at[..., 1].set(y).at[..., 2].set(_wrap(yaw))
     return fd_velocity(w, dt)
 
 

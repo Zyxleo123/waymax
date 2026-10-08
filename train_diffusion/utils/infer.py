@@ -107,6 +107,11 @@ def _build_model_from_metadata(metadata: dict[str, Any], seed: int) -> Diffusion
         predict_horizon=int(metadata["predict_horizon"]),
         predict_type=str(metadata["predict_type"]),
         subgoal_conditioned=bool(metadata.get("subgoal_conditioned", False)),
+        # FlowMol3 self-conditioning changes the parameter tree (the stem's
+        # fan-in doubles), so it MUST come from the checkpoint's own metadata and
+        # not from a caller's default -- otherwise the restore silently shape-
+        # mismatches. `.get` keeps every pre-existing checkpoint loading as before.
+        self_cond=bool(metadata.get("self_cond", False)),
         rngs=nnx.Rngs(int(seed)),
     )
 

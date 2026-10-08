@@ -251,25 +251,32 @@ class DiffusionRLActor:
         sigma_lp = self.sigma_logprob_floor
         tile = self._tile_leading
 
-        def batched_log_probs(params, cond1, cond2, cond2_mask, x_t, x_prev, timestep):
+        # `x_sc` is the self-conditioning input the SAMPLER used at each recorded
+        # transition (trace["x_sc"]). It is `None` -- an empty pytree, so the jitted
+        # signature is unchanged -- for the default architecture. Re-deriving it
+        # here instead of reading the trace would evaluate a different policy than
+        # the one that acted.
+        def batched_log_probs(params, cond1, cond2, cond2_mask, x_t, x_prev, timestep, x_sc=None):
             fn = nnx.merge(tgdef, params, tnonparam)
             k, b = x_t.shape[0], x_t.shape[1]
             xt = x_t.reshape((k * b,) + x_t.shape[2:])
             xp = x_prev.reshape((k * b,) + x_prev.shape[2:])
             tt = timestep.reshape((k * b,))
+            xsc = None if x_sc is None else x_sc.reshape((k * b,) + x_sc.shape[2:])
             c1, c2, cm = tile(cond1, cond2, cond2_mask, k)
             lp = diffusion.transition_log_prob(
                 xt, xp, tt, c1, c2, cm,
-                sigma_floor=sigma_lp, prefix_len=prefix_len, denoise_fn=fn)
+                sigma_floor=sigma_lp, prefix_len=prefix_len, denoise_fn=fn, x_sc=xsc)
             return lp.reshape((k, b))
 
-        def batched_means_std(params, cond1, cond2, cond2_mask, x_t, timestep):
+        def batched_means_std(params, cond1, cond2, cond2_mask, x_t, timestep, x_sc=None):
             fn = nnx.merge(tgdef, params, tnonparam)
             k, b = x_t.shape[0], x_t.shape[1]
             xt = x_t.reshape((k * b,) + x_t.shape[2:])
             tt = timestep.reshape((k * b,))
+            xsc = None if x_sc is None else x_sc.reshape((k * b,) + x_sc.shape[2:])
             c1, c2, cm = tile(cond1, cond2, cond2_mask, k)
-            mean, std, _ = diffusion._posterior_mean_std(xt, tt, c1, c2, cm, denoise_fn=fn)
+            mean, std, _ = diffusion._posterior_mean_std(xt, tt, c1, c2, cm, denoise_fn=fn, x_sc=xsc)
             # `std` is the per-t schedule std -- shape (K*B, 1, 1), broadcast over
             # C and T -- so it reshapes with its own (1, 1) tail, not the mean's.
             return mean.reshape((k, b) + mean.shape[1:]), std.reshape((k, b) + std.shape[1:])
@@ -321,7 +328,7 @@ class DiffusionRLActor:
         self._ensure_jitted()
         return self._jit_log_probs(
             params, cond1, cond2, cond2_mask,
-            trace["x_t"], trace["x_prev"], trace["timestep"],
+            trace["x_t"], trace["x_prev"], trace["timestep"], trace.get("x_sc"),
         )
 
     # ------------------------------------------------------------------ #
@@ -346,7 +353,7 @@ class DiffusionRLActor:
         return jnp.sum(lpe * alive_b) / jnp.maximum(jnp.sum(alive_b), 1.0)
 
     def base_anchor_loss(self, params, target_btd, cond1, cond2, cond2_mask,
-                         alive_b, rng, time_weight=None):
+                         alive_b, rng, time_weight=None, t_max=None):
         """Do-no-harm tether to the FROZEN BASE policy (not the human log).
 
         Gaussian KL under the shared posterior std between the trainable and the
@@ -371,11 +378,17 @@ class DiffusionRLActor:
         the tether can be charged on the executed window only (``train_safety
         --anchor_window``). Both denoiser passes still run the whole horizon; only
         the reduction is windowed.
+
+        ``t_max`` (exclusive) restricts the draw to ``t ~ U[0, t_max)``. ``None``
+        is the whole schedule, as every earlier run. The preference path passes
+        ``k_trainable``: at ``t >= k_trainable`` the deployed sampler runs the
+        frozen base, so a tether charged there protects nothing that is executed.
         """
         x0 = jnp.transpose(target_btd, (0, 2, 1))          # [B,T,D] -> [B,D,T]
         kt, ke = jax.random.split(rng)
         t = jax.random.randint(kt, (x0.shape[0],), 0,
-                               self.diffusion.timesteps, dtype=jnp.int32)
+                               self.diffusion.timesteps if t_max is None else int(t_max),
+                               dtype=jnp.int32)
         x_t = self.diffusion.q_sample(x0, t, jax.random.normal(ke, x0.shape))
         fn = self._trainable_fn(params)
         mean_tr, var, _ = self.diffusion.p_mean_variance(
@@ -425,6 +438,93 @@ class DiffusionRLActor:
                      / (jnp.maximum(jnp.sum(sw, axis=(1, 2)), 1e-6) * sq.shape[1]))
         w = jnp.asarray(w_b, per_b.dtype)
         return jnp.sum(per_b * w) / jnp.maximum(jnp.sum(w), 1.0)
+
+    def _eps_from_pred(self, x_t, t, pred):
+        """The noise a denoiser output implies, for every ``predict_type``.
+
+        The base checkpoint predicts ``v``; ``v = sqrt(ab) eps - sqrt(1-ab) x0``
+        and ``x_t = sqrt(ab) x0 + sqrt(1-ab) eps`` give
+        ``eps = sqrt(ab) v + sqrt(1-ab) x_t``, exactly, with no clip."""
+        d = self.diffusion
+        sqrt_ab = d._extract(d.sqrt_alphas_cumprod.value, t, x_t.shape)
+        sqrt_1mab = d._extract(d.sqrt_one_minus_alphas_cumprod.value, t, x_t.shape)
+        if d.predict_type == "eps":
+            return pred
+        if d.predict_type == "v":
+            return sqrt_ab * pred + sqrt_1mab * x_t
+        if d.predict_type == "mu":
+            return (x_t - sqrt_ab * pred) / sqrt_1mab
+        raise ValueError(f"Unsupported predict_type: {d.predict_type}")
+
+    def pref_denoise_losses(self, params, good_bct, bad_bct, cond1, cond2, cond2_mask,
+                            step_w_bt, rng, *, t_min: int = 0, t_max: int | None = None):
+        """Per-pair eps-prediction MSE of the trainable copy AND the frozen base.
+
+        Diffusion-DPO's four denoising losses for a preference pair
+        ``(good, bad)`` under one condition. Each pair draws ONE ``t ~ U[t_min,
+        t_max)`` and ONE ``eps``, shared by both trajectories and both models, so
+        the comparison is between trajectories and models, not between noise
+        draws. ``t_max=None`` is ``k_trainable``: the steps the trainable copy
+        drives at deploy time (a preference taught at t >= k_trainable is taught
+        to a step the frozen base runs). ``step_w_bt`` weights model steps -- the
+        covered-steps mask, optionally scaled up where the pair differs -- and
+        the reduction is the weighted mean over steps and channels.
+
+        Returns ``(model_good, model_bad, ref_good, ref_bad)``, each ``[B]``. The
+        reference side is stop-gradient'd; it is the frozen base module, whose
+        params are not in ``params`` anyway."""
+        d = self.diffusion
+        if d.self_cond or d.distortion_enabled():
+            raise ValueError("pref_denoise_losses: self-conditioning / distortion "
+                             "checkpoints are not supported (their loss needs key_aug)")
+        B = good_bct.shape[0]
+        kt, ke = jax.random.split(rng)
+        hi = int(self.k_trainable) if t_max is None else int(t_max)
+        t = jax.random.randint(kt, (B,), int(t_min), hi, dtype=jnp.int32)
+        eps = jax.random.normal(ke, good_bct.shape)
+        # Good and bad stacked into one 2B batch: one forward per model.
+        x0 = jnp.concatenate([good_bct, bad_bct], axis=0)
+        t2 = jnp.concatenate([t, t], axis=0)
+        eps2 = jnp.concatenate([eps, eps], axis=0)
+        c1, c2, cm = self._tile_leading(cond1, cond2, cond2_mask, 2)
+        x_t = d.q_sample(x0, t2, eps2)
+        sw = jnp.asarray(step_w_bt, x0.dtype)
+        sw = jnp.concatenate([sw, sw], axis=0)[:, None, :]                # [2B, 1, T]
+        den = jnp.maximum(jnp.sum(sw, axis=(1, 2)), 1e-6) * x0.shape[1]
+
+        def per_b(fn):
+            pred = d._apply_denoiser(fn, x_t, t2, c1, c2, cm, None)
+            eps_hat = self._eps_from_pred(x_t, t2, pred)
+            return jnp.sum((eps_hat - eps2) ** 2 * sw, axis=(1, 2)) / den   # [2B]
+
+        lm = per_b(self._trainable_fn(params))
+        lr = jax.lax.stop_gradient(per_b(self.frozen_denoise))
+        return lm[:B], lm[B:], lr[:B], lr[B:]
+
+    def pref_loss(self, params, good_bct, bad_bct, cond1, cond2, cond2_mask, step_w_bt,
+                  rng, *, beta: float, t_min: int = 0, t_max: int | None = None):
+        """Diffusion-DPO: ``mean softplus(-z)``,
+        ``z = beta * [(l_model_bad - l_ref_bad) - (l_model_good - l_ref_good)]``.
+
+        ``z > 0`` iff, relative to the frozen base, the model got better at
+        denoising the good trajectory than the bad one. At initialization the
+        model IS the base, so ``z = 0`` and the loss is ``log 2``. Returns
+        ``(loss, aux)`` for ``value_and_grad(has_aux=True)``."""
+        mg, mb, rg, rb = self.pref_denoise_losses(
+            params, good_bct, bad_bct, cond1, cond2, cond2_mask, step_w_bt, rng,
+            t_min=t_min, t_max=t_max)
+        z = float(beta) * ((mb - rb) - (mg - rg))
+        loss = jnp.mean(jax.nn.softplus(-z))
+        aux = {"good_model_loss": jnp.mean(mg), "good_ref_loss": jnp.mean(rg),
+               "bad_model_loss": jnp.mean(mb), "bad_ref_loss": jnp.mean(rb),
+               "logit_z": jnp.mean(z), "z_abs": jnp.mean(jnp.abs(z)),
+               "accuracy": jnp.mean((z > 0).astype(jnp.float32)),
+               # The base's own preference before any training: > 0 means the
+               # base already denoises the edit worse than its own draw.
+               "ref_gap": jnp.mean(rg - rb),
+               # Largest model-vs-ref gap on either side: ~float noise at init.
+               "init_gap": jnp.max(jnp.abs(jnp.concatenate([mg - rg, mb - rb])))}
+        return loss, aux
 
     @staticmethod
     def _wmean_kb(x_kb, w_b):
@@ -490,6 +590,7 @@ class DiffusionRLActor:
         self._ensure_jitted()
         return self._jit_means_std(
             params, cond1, cond2, cond2_mask, trace["x_t"], trace["timestep"],
+            trace.get("x_sc"),
         )
 
     def _transition_kl(self, mu_old, mu_new, std, alive_b):

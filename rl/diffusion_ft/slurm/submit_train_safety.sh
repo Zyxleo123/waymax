@@ -26,6 +26,7 @@
 #              (empty DFT_TRAIN_SPLITS = uniform corpus)
 #   probe      DFT_PROBE_PER_SPLIT DFT_PROBE_SPLITS DFT_PROBE_EVERY DFT_PROBE_SEED
 #   schedule   DFT_ITERS DFT_MAX_REPLANS DFT_EVAL_EVERY DFT_SAVE_EVERY
+#   simulator  DFT_SIM_AGENTS (none|idm) DFT_NEIGHBOR_SOURCE (log|sim)
 #   logging    DFT_WANDB (0/1) DFT_WANDB_PROJECT DFT_WANDB_GROUP DFT_WANDB_NAME
 #   placement  DFT_PARTITION DFT_QOS DFT_NODELIST DFT_EXCLUDE
 set -euo pipefail
@@ -75,6 +76,7 @@ OUT_DIR="${DFT_OUT_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/safety_tr
   echo "DFT_AGENT_MARGIN=${DFT_AGENT_MARGIN:-0.75}"
   echo "DFT_AGENT_GEOMETRY=${DFT_AGENT_GEOMETRY:-exact}"
   echo "DFT_N_DISCS=${DFT_N_DISCS:-5}"
+  echo "DFT_BARRIER_SHAPE=${DFT_BARRIER_SHAPE:-softplus}"
   # gradient entry point
   echo "DFT_K_TRAINABLE=${DFT_K_TRAINABLE:-10}"
   echo "DFT_PREFIX_LEN=${DFT_PREFIX_LEN:-5}"
@@ -93,6 +95,12 @@ OUT_DIR="${DFT_OUT_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/safety_tr
   echo "DFT_EPOCHS=${DFT_EPOCHS:-1}"
   echo "DFT_MAX_REPLANS=${DFT_MAX_REPLANS:-8}"
   echo "DFT_REPLAN=${DFT_REPLAN:-10}"
+  # the simulator the curve is measured in, and where the loss reads neighbours
+  echo "DFT_SIM_AGENTS=${DFT_SIM_AGENTS:-none}"
+  echo "DFT_NEIGHBOR_SOURCE=${DFT_NEIGHBOR_SOURCE:-log}"
+  # The clock (2026-09-24): `median` unless told otherwise; the batch script's
+  # own fallback is `first`, so leaving this line out would silently run the bug.
+  echo "DFT_WORLD_DT_METHOD=${DFT_WORLD_DT_METHOD:-median}"
   echo "DFT_LR=${DFT_LR:-1e-5}"
   echo "DFT_EVAL_EVERY=${DFT_EVAL_EVERY:-100}"
   echo "DFT_SAVE_EVERY=${DFT_SAVE_EVERY:-25}"

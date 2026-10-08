@@ -173,6 +173,11 @@ def unrolled_clean_prediction(
     fn_nograd = merge_fn(jax.lax.stop_gradient(params)) if first_grad_step > 0 else fn_grad
 
     x = x_t
+    # Self-conditioning carry. `None` (an empty pytree) off that path, so the
+    # unroll below is unchanged for the default architecture. The unroll ENTERS at
+    # a corrupted expert state with no previous prediction, which is the same
+    # zeros convention the first reverse step uses.
+    sc = jnp.zeros_like(x) if getattr(diffusion, "self_cond", False) else None
     for step in range(k - 1):
         from_t, to_t = t_grid_kb[step], t_grid_kb[step + 1]
         rng, step_key = jax.random.split(rng)
@@ -184,13 +189,15 @@ def unrolled_clean_prediction(
             # special-casing the landing, so the two agree at `t_end=0`.
             noise = jax.random.normal(step_key, x.shape, dtype=x.dtype)
             noise = noise * (to_t != 0).astype(x.dtype)[:, None, None]
-        x = diffusion._ddim_step_strided(
+        x, x0_step = diffusion._ddim_step_strided(
             x, from_t, to_t, cond1, cond2, cond2_mask, noise,
             eta=float(eta), denoise_fn=(fn_grad if step >= first_grad_step else fn_nograd),
+            x_sc=sc,
         )
+        sc = diffusion._next_sc(x0_step)
 
     _, _, x0_pred = diffusion.p_mean_variance(
-        x, t_grid_kb[k - 1], cond1, cond2, cond2_mask, denoise_fn=fn_grad)
+        x, t_grid_kb[k - 1], cond1, cond2, cond2_mask, denoise_fn=fn_grad, x_sc=sc)
     return x0_pred
 
 
