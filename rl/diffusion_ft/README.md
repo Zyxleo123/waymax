@@ -7,6 +7,9 @@ ES + distillation). Deliberately separate from
 instruction/subgoal/FiLM params. The outer action here is *one sampled
 trajectory*.
 
+**Post-hoc trajectory optimization** (training-free repair of a sampled plan,
+and how to add it to an ES planner): see [README_posthoc_opt.md](README_posthoc_opt.md).
+
 ## Phase 1 (this commit): one trustworthy environment
 
 | Module          | What it is |
