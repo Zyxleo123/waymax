@@ -43,15 +43,26 @@ from train_diffusion.utils.utils import (
 )
 
 from model.diffusion.fm_policy import FlowMatchingPolicy
-from train_diffusion.configs.fm_pretrain_config import (
-    FlowMatchingPretrainConfig,
+from train_diffusion.configs.fm_train_config import (
+    FlowMatchingTrainConfig,
     config_to_dict,
     parse_args,
 )
 
 
-def build_training_components(args: FlowMatchingPretrainConfig):
-    preprocess_cfg = args.preprocess_cfg
+def build_training_components(args: FlowMatchingTrainConfig):
+    preprocess_cfg = PreprocessConfig(
+        model_dt=args.model_dt,
+        max_range=args.max_range,
+        ego_range=args.ego_range,
+        max_velocity=args.max_velocity,
+        max_width=args.max_width,
+        max_tl_points=args.max_tl_points,
+        num_map_type_classes=args.num_map_type_classes,
+        predict_horizon=args.predict_horizon,
+        max_segments=args.max_num_segments,
+        max_points_per_segment=args.max_points_per_segment,
+    )
 
     model = FlowMatchingPolicy(
         rngs=nnx.Rngs(args.seed),
@@ -61,10 +72,8 @@ def build_training_components(args: FlowMatchingPretrainConfig):
         other_dim=args.other_dim,
         map_attr_dim=args.map_attr_dim,
         tl_attr_dim=args.tl_attr_dim,
-        inst_attr_dim=args.inst_dim,
         predict_horizon=args.predict_horizon,
         goal_conditioned=args.goal_conditioned,
-        enable_film=bool(args.enable_film),
         num_denoising_steps=args.num_denoising_steps,
     )
 
@@ -86,35 +95,7 @@ def build_training_components(args: FlowMatchingPretrainConfig):
     return preprocess_cfg, model, tx, lr_schedule
 
 
-def _add_dummy_instruction_features(
-    feats: dict[str, jax.Array],
-    args: FlowMatchingPretrainConfig,
-) -> dict[str, jax.Array]:
-    batch_size = feats["ego_state"].shape[0]
-
-    augmented = dict(feats)
-    augmented["inst_features"] = jnp.zeros(
-        (batch_size, args.inst_dim),
-        dtype=jnp.float32,
-    )
-    augmented["inst_valid"] = jnp.zeros(
-        (batch_size,),
-        dtype=jnp.bool_,
-    )
-    augmented["subgoal_xy"] = jnp.zeros(
-        (batch_size, 2),
-        dtype=jnp.float32,
-    )
-    augmented["subgoal_valid"] = jnp.zeros(
-        (batch_size,),
-        dtype=jnp.bool_,
-    )
-
-    return augmented
-
-
 def make_train_step(
-    pretrain_cfg: FlowMatchingPretrainConfig,
     preprocess_cfg: PreprocessConfig,
     grad_clip_norm: float,
     goal_mask_prob: float,
@@ -194,14 +175,9 @@ def make_train_step(
             key_goal_mask,
         )
 
-        feats = _add_dummy_instruction_features(
-            feats,
-            pretrain_cfg,
-        )
-
         features = m._as_features(feats)
 
-        cond, inst_cond, inst_cond_mask = m.compute_condition(
+        cond = m.compute_condition(
             features
         )
 
@@ -214,8 +190,6 @@ def make_train_step(
         loss = m.loss_from_condition(
             target,
             cond,
-            inst_cond,
-            inst_cond_mask,
             rng=key_loss,
         )
 
@@ -247,18 +221,11 @@ def make_train_step(
                 key_goal_mask_local,
             )
 
-            feats_local = _add_dummy_instruction_features(
-                feats_local,
-                pretrain_cfg,
-            )
-
             features_local = m._as_features(
                 feats_local
             )
 
-            cond_local, inst_cond_local, inst_cond_mask_local = (
-                m.compute_condition(features_local)
-            )
+            cond_local = m.compute_condition(features_local)
 
             target_local = (
                 features_local.ego_trajectory[
@@ -271,8 +238,6 @@ def make_train_step(
             loss_local = m.loss_from_condition(
                 target_local,
                 cond_local,
-                inst_cond_local,
-                inst_cond_mask_local,
                 rng=key_loss_local,
             )
 
@@ -677,7 +642,6 @@ def main():
     )
 
     train_step_fn = make_train_step(
-        args,
         preprocess_cfg,
         args.grad_clip_norm,
         args.goal_mask_prob if args.goal_conditioned else 0.0,

@@ -64,7 +64,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--guidance_scale", type=float, default=2.0)
     parser.add_argument("--num_denoising_steps", type=int, default=None)
     parser.add_argument("--goal_conditioned", action=argparse.BooleanOptionalAction, default=None)
-    parser.add_argument("--enable_film", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--cfg_t_start", type=float, default=1.0)
     parser.add_argument("--cfg_correction_mode", type=str, default="resample", choices=["resample", "sample"])
     parser.add_argument("--fd_torch_device", type=str, default=None)
@@ -102,7 +101,6 @@ def _load_fm_model_for_inference(
     seed: int = 0,
     skip_checkpoint_load: bool = False,
     goal_conditioned: bool | None = None,
-    enable_film: bool | None = None,
     num_denoising_steps: int | None = None,
 ):
     from data.types import PreprocessConfig
@@ -145,7 +143,6 @@ def _load_fm_model_for_inference(
         cond_dim=int(metadata.get("cond_dim", 256)),
         map_attr_dim=int(metadata.get("map_attr_dim", 25)),
         tl_attr_dim=int(metadata.get("tl_attr_dim", 11)),
-        inst_attr_dim=int(metadata.get("inst_dim", 768)),
         ego_dim=int(metadata.get("ego_dim", 5)),
         other_dim=int(metadata.get("other_dim", 15)),
         predict_horizon=int(metadata.get("predict_horizon", preprocess_cfg.predict_horizon)),
@@ -153,11 +150,6 @@ def _load_fm_model_for_inference(
             metadata.get("goal_conditioned", True)
             if goal_conditioned is None
             else goal_conditioned
-        ),
-        enable_film=bool(
-            metadata.get("enable_film", True)
-            if enable_film is None
-            else enable_film
         ),
         num_denoising_steps=int(
             num_denoising_steps
@@ -270,7 +262,6 @@ def main(args: argparse.Namespace) -> None:
             seed=args.seed,
             skip_checkpoint_load=False,
             goal_conditioned=args.goal_conditioned,
-            enable_film=args.enable_film,
             num_denoising_steps=args.num_denoising_steps,
         )
 
@@ -298,7 +289,6 @@ def main(args: argparse.Namespace) -> None:
             seed=args.seed,
             skip_checkpoint_load=False,
             goal_conditioned=args.goal_conditioned,
-            enable_film=args.enable_film,
             num_denoising_steps=args.num_denoising_steps,
         )
 

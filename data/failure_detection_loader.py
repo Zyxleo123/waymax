@@ -18,6 +18,10 @@ from data.utils import npz_to_jax, npz_to_torch, resolve_cache_paths
 
 FUTURE_EGO_TRAJECTORY_STEPS = 25
 FUTURE_EGO_TRAJECTORY_STRIDE = 2
+FAILURE_REASON_NONE = 0
+FAILURE_REASON_COLLISION = 1
+FAILURE_REASON_OFFROAD = 2
+FAILURE_REASON_GOAL_NOT_REACHED = 3
 DEFAULT_SUCCESS_ANSWERS = "success"
 DEFAULT_FAILURE_PROMPT = (
 	"Given the driving scenario, classify the rollout outcome. "

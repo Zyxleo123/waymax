@@ -34,10 +34,8 @@ class FMPlanner(AbstractPlanner):
 
 		self._compute_condition_jit = jax.jit(self.policy.compute_condition)
 		self._sample_population_jit = jax.jit(
-			lambda *, cond_bf, inst_cond_bf, inst_cond_mask_bf, rng: self._sample_population(
+			lambda *, cond_bf, rng: self._sample_population(
 				cond_bf=cond_bf,
-				inst_cond_bf=inst_cond_bf,
-				inst_cond_mask_bf=inst_cond_mask_bf,
 				rng=rng,
 			),
 		)
@@ -66,32 +64,16 @@ class FMPlanner(AbstractPlanner):
 			goal_xy_override=goal,
 		)
 
+		del instruction, instruction_mask
 		features = pre_batch.features
-		if instruction is None:
-			instruction = jnp.zeros(
-				(self.num_worlds, self.preprocess_cfg.inst_dim),
-				dtype=jnp.float32,
-			)
-			instruction_mask = jnp.zeros((self.num_worlds,), dtype=jnp.float32)
-		elif instruction_mask is None:
-			instruction_mask = jnp.ones((instruction.shape[0],), dtype=jnp.float32)
-
-		features["inst_features"] = instruction
-		features["inst_valid"] = instruction_mask
-
 		if mask_goal:
 			features["goal_xy"] = jnp.zeros_like(features["goal_xy"])
 			features["remaining_timesteps"] = jnp.zeros_like(features["remaining_timesteps"])
 
-		features["subgoal_xy"] = jnp.zeros((self.num_worlds, 2), dtype=jnp.float32)
-		features["subgoal_valid"] = jnp.zeros((self.num_worlds,), dtype=jnp.float32)
-
-		cond_bf, inst_cond_bf, inst_cond_mask_bf = self._compute_condition_jit(features)
+		cond_bf = self._compute_condition_jit(features)
 
 		current_norm_bktd = self._sample_population_jit(
 			cond_bf=cond_bf,
-			inst_cond_bf=inst_cond_bf,
-			inst_cond_mask_bf=inst_cond_mask_bf,
 			rng=key_sample,
 		)
 		current_world_bkt5, world_t_seconds_bt, world_t_valid_bt = self._postprocess_population(
@@ -116,19 +98,13 @@ class FMPlanner(AbstractPlanner):
 		self,
 		*,
 		cond_bf: jax.Array,
-		inst_cond_bf: jax.Array,
-		inst_cond_mask_bf: jax.Array,
 		rng: jax.Array,
 	) -> jax.Array:
 		batch_size = int(cond_bf.shape[0])
 		cond_bkf = jnp.repeat(cond_bf, repeats=self.population_size, axis=0)
-		inst_cond_bf = jnp.repeat(inst_cond_bf, repeats=self.population_size, axis=0)
-		inst_cond_mask_bf = jnp.repeat(inst_cond_mask_bf, repeats=self.population_size, axis=0)
 
 		samples_btd = self.policy.sample_from_condition(
 			cond_bkf,
-			inst_cond_bf,
-			inst_cond_mask_bf,
 			rng=rng,
 			num_steps=self.num_steps,
 			solver=self.solver,

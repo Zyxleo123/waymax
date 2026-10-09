@@ -83,18 +83,14 @@ class TemporalVLAPlanner(AbstractPlanner):
 
 		self._compute_condition_jit = jax.jit(self.policy.compute_condition)
 		self._sample_population_jit = jax.jit(
-			lambda *, cond_bf, inst_cond_bf, inst_cond_mask_bf, rng: self._sample_population(
+			lambda *, cond_bf, rng: self._sample_population(
 				cond_bf=cond_bf,
-				inst_cond_bf=inst_cond_bf,
-				inst_cond_mask_bf=inst_cond_mask_bf,
 				rng=rng,
 			),
 		)
 		self._resample_population_jit = jax.jit(
-			lambda *, cond_bf, inst_cond_bf, inst_cond_mask_bf, proposals_bktd, rng: self._resample_population(
+			lambda *, cond_bf, proposals_bktd, rng: self._resample_population(
 				cond_bf=cond_bf,
-				inst_cond_bf=inst_cond_bf,
-				inst_cond_mask_bf=inst_cond_mask_bf,
 				proposals_bktd=proposals_bktd,
 				rng=rng,
 			),
@@ -168,11 +164,9 @@ class TemporalVLAPlanner(AbstractPlanner):
 				)
 
 		with jax.default_device(self.jax_device):
-			cond_bf, inst_cond_bf = self._compute_condition_jit(current_features)
+			cond_bf = self._compute_condition_jit(current_features)
 			current_norm_bktd = self._sample_population_jit(
 				cond_bf=cond_bf,
-				inst_cond_bf=inst_cond_bf,
-				inst_cond_mask_bf=current_features["inst_valid"],
 				rng=key_sample,
 			)
 
@@ -194,8 +188,6 @@ class TemporalVLAPlanner(AbstractPlanner):
 			rng, key_resample = jax.random.split(rng)
 			current_norm_bktd = self._resample_population_jit(
 				cond_bf=cond_bf,
-				inst_cond_bf=inst_cond_bf,
-				inst_cond_mask_bf=current_features["inst_valid"],
 				proposals_bktd=replicated_norm_bktd,
 				rng=key_resample,
 			)
@@ -260,11 +252,6 @@ class TemporalVLAPlanner(AbstractPlanner):
 
 	def _prepare_current_features(self, features: Mapping[str, Any], *, mask_goal: bool = False) -> dict[str, jax.Array]:
 		current_features = {key: jnp.asarray(value) for key, value in features.items()}
-		batch_size = int(current_features["ego_state"].shape[0])
-		current_features["inst_features"] = jnp.zeros((batch_size, self.preprocess_cfg.inst_dim), dtype=jnp.float32)
-		current_features["inst_valid"] = jnp.zeros((batch_size,), dtype=jnp.bool_)
-		current_features["subgoal_xy"] = jnp.zeros((batch_size, 2), dtype=jnp.float32)
-		current_features["subgoal_valid"] = jnp.zeros((batch_size,), dtype=jnp.bool_)
 		if mask_goal:
 			current_features["goal_xy"] = jnp.zeros_like(current_features["goal_xy"])
 			current_features["remaining_timesteps"] = jnp.zeros_like(current_features["remaining_timesteps"])
@@ -415,20 +402,14 @@ class TemporalVLAPlanner(AbstractPlanner):
 		self,
 		*,
 		cond_bf: jax.Array,
-		inst_cond_bf: jax.Array,
-		inst_cond_mask_bf: jax.Array,
 		proposals_bktd: jax.Array,
 		rng: jax.Array,
 	) -> jax.Array:
 		batch_size, population_size, horizon, target_dim = proposals_bktd.shape
 		cond_bkf = jnp.repeat(cond_bf, repeats=population_size, axis=0)
-		inst_cond_bkf = jnp.repeat(inst_cond_bf, repeats=population_size, axis=0)
-		inst_cond_mask_bkf = jnp.repeat(inst_cond_mask_bf, repeats=population_size, axis=0)
 		flat_proposals = proposals_bktd.reshape(batch_size * population_size, horizon, target_dim)
 		samples_btd = self.policy.resample_from_condition(
 			cond_bkf,
-			inst_cond_bkf,
-			inst_cond_mask_bkf,
 			flat_proposals,
 			self.resample_timesteps,
 			rng=rng,
@@ -439,18 +420,12 @@ class TemporalVLAPlanner(AbstractPlanner):
 		self,
 		*,
 		cond_bf: jax.Array,
-		inst_cond_bf: jax.Array,
-		inst_cond_mask_bf: jax.Array,
 		rng: jax.Array,
 	) -> jax.Array:
 		batch_size = int(cond_bf.shape[0])
 		cond_bkf = jnp.repeat(cond_bf, repeats=self.population_size, axis=0)
-		inst_cond_bkf = jnp.repeat(inst_cond_bf, repeats=self.population_size, axis=0)
-		inst_cond_mask_bkf = jnp.repeat(inst_cond_mask_bf, repeats=self.population_size, axis=0)
 		samples_btd = self.policy.sample_from_condition(
 			cond_bkf,
-			inst_cond_bkf,
-			inst_cond_mask_bkf,
 			rng=rng,
 		)
 		horizon = int(samples_btd.shape[1])

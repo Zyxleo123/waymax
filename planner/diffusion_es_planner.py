@@ -42,10 +42,8 @@ class DiffusionESPlanner(DiffusionPlanner):
         self.scorers = [Scorer(metrics=metrics, weights=weights) for _ in range(num_worlds)]
 
         self._resample_population_jit = jax.jit(
-            lambda *, cond_bf, inst_cond_bf, inst_cond_mask_bf, proposals_bktd, rng: self._resample_population(
+            lambda *, cond_bf, proposals_bktd, rng: self._resample_population(
                 cond_bf=cond_bf,
-                inst_cond_bf=inst_cond_bf,
-                inst_cond_mask_bf=inst_cond_mask_bf,
                 proposals_bktd=proposals_bktd,
                 rng=rng,
             ),
@@ -75,25 +73,15 @@ class DiffusionESPlanner(DiffusionPlanner):
             goal_step_override=90,
             goal_xy_override=goal,
         )
+        del instruction, instruction_mask
         features = pre_batch.features
-        if instruction is None:
-            instruction = jnp.zeros((self.num_worlds, self.preprocess_cfg.inst_dim), dtype=jnp.float32)
-            instruction_mask = jnp.zeros((self.num_worlds,), dtype=jnp.float32)
-        else:
-            raise NotImplementedError("Conditioning on instruction is not yet implemented.")
-        features["inst_features"] = instruction
-        features["inst_valid"] = instruction_mask
         if mask_goal:
             features["goal_xy"] = jnp.zeros_like(features["goal_xy"])
             features["remaining_timesteps"] = jnp.zeros_like(features["remaining_timesteps"])
-        features["subgoal_xy"] = jnp.zeros((self.num_worlds, 2), dtype=jnp.float32)
-        features["subgoal_valid"] = jnp.zeros((self.num_worlds,), dtype=jnp.float32)
-        cond_bf, inst_cond_bf = self._compute_condition_jit(pre_batch.features)
+        cond_bf = self._compute_condition_jit(features)
 
         current_norm_bktd = self._sample_population_jit(
             cond_bf=cond_bf,
-            inst_cond_bf=inst_cond_bf,
-            inst_cond_mask_bf=instruction_mask,
             rng=key_sample,
         )
         current_world_bkt5, world_t_seconds_bt, world_t_valid_bt = self._postprocess_population(
@@ -134,8 +122,6 @@ class DiffusionESPlanner(DiffusionPlanner):
             rng, key_resample = jax.random.split(rng)
             current_norm_bktd = self._resample_population_jit(
                 cond_bf=cond_bf,
-                inst_cond_bf=inst_cond_bf,
-                inst_cond_mask_bf=instruction_mask,
                 proposals_bktd=replicated_norm_bktd,
                 rng=key_resample,
             )
@@ -178,20 +164,14 @@ class DiffusionESPlanner(DiffusionPlanner):
         self,
         *,
         cond_bf: jax.Array,
-        inst_cond_bf: jax.Array,
-        inst_cond_mask_bf: jax.Array,
         proposals_bktd: jax.Array,
         rng: jax.Array,
     ) -> jax.Array:
         batch_size, population_size, horizon, target_dim = proposals_bktd.shape
         cond_bkf = jnp.repeat(cond_bf, repeats=population_size, axis=0)
-        inst_cond_bkf = jnp.repeat(inst_cond_bf, repeats=population_size, axis=0)
-        inst_cond_mask_bkf = jnp.repeat(inst_cond_mask_bf, repeats=population_size, axis=0)
         flat_proposals = proposals_bktd.reshape(batch_size * population_size, horizon, target_dim)
         samples_btd = self.policy.resample_from_condition(
             cond_bkf,
-            inst_cond_bkf,
-            inst_cond_mask_bkf,
             flat_proposals,
             self.resample_timesteps,
             rng=rng,

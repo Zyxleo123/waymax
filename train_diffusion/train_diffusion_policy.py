@@ -1,365 +1,433 @@
 from __future__ import annotations
-from collections.abc import Mapping
-import json
+
+import itertools
 import os
-from typing import Any
+import gc
+
+# Reduce TensorFlow/XLA startup noise and keep TF from competing for GPU memory.
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+os.environ.setdefault("AUTOGRAPH_VERBOSITY", "0")
+os.environ.setdefault("GLOG_minloglevel", "2")
+os.environ.setdefault("ABSL_MIN_LOG_LEVEL", "2")
+os.environ.setdefault("JAX_LOGGING_LEVEL", "ERROR")
+# Keep this for Waymax compatibility on hosts where TF can still see GPUs.
+os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 
 import jax
 import jax.numpy as jnp
 import optax
 from flax import nnx
+from jax.sharding import Mesh, PartitionSpec as P
 from tqdm import tqdm
 
-from data.cache_loader import build_dataloader
-from model.diffusion.diffusion_policy import DiffusionPolicy
-try:
-	from .configs.diffusion_train_config import DiffusionTrainConfig, config_to_dict, parse_args
-except ImportError:
-	from train_diffusion.configs.diffusion_train_config import DiffusionTrainConfig, config_to_dict, parse_args
+# Keep JAX/XLA logging to errors unless explicitly overridden by the caller.
+jax.config.update("jax_logging_level", "ERROR")
+
 from train_diffusion.utils.checkpoints import restore_checkpoint, save_checkpoint
-from train_diffusion.utils.infer import _build_model_from_metadata, _load_checkpoint_metadata
+from data.preprocess import preprocess_simulator_state
+from data.types import PreprocessConfig
 from train_diffusion.utils.utils import (
-	clip_grads,
-	coerce_tree_like,
-	configure_jax_compilation_cache,
-	ema_update,
-	iter_with_prefetch,
-	init_wandb_run,
-	wandb_log_train_step,
-	log_jsonl,
-	update_tqdm,
+    assert_matching_sim_state_signature,
+    build_data_parallel_mesh_if_needed,
+    canonicalize_state_for_mesh,
+    clip_grads,
+    coerce_tree_like,
+    configure_jax_compilation_cache,
+    ema_update,
+    init_wandb_run,
+    iter_with_prefetch,
+    log_jsonl,
+    make_dataset_config,
+    replicate_to_mesh,
+    sim_state_signature,
+    state_in_axes_from_template,
+    update_tqdm,
+    wandb_log_train_step,
 )
 
-
-def _jsonable(value: Any) -> Any:
-	if isinstance(value, (str, int, float, bool)) or value is None:
-		return value
-	if isinstance(value, dict):
-		return {k: _jsonable(v) for k, v in value.items()}
-	if isinstance(value, (list, tuple)):
-		return [_jsonable(v) for v in value]
-	return str(value)
+from model.diffusion.diffusion_policy import DiffusionPolicy
+from train_diffusion.configs.diffusion_train_config import DiffusionTrainConfig, config_to_dict, parse_args
 
 
-def _scalarize_for_logging(metrics: dict[str, Any]) -> dict[str, float]:
-	logged: dict[str, float] = {}
-	for key, value in metrics.items():
-		arr = jnp.asarray(jax.device_get(value))
-		logged[key] = float(arr.mean()) if arr.ndim > 0 else float(arr)
-	return logged
-
-def _state_to_pure_dict(state):
-    """Convert flax.nnx.State to a pure dict. Leave dicts unchanged."""
-    if isinstance(state, dict):
-        return state
-
-    if hasattr(state, "to_pure_dict"):
-        return state.to_pure_dict()
-
-    # flax.nnx.State
-    return nnx.to_pure_dict(state)
-
-
-def _pure_dict_to_state(tree):
-    """Convert pure dict to flax.nnx.State. Leave State unchanged."""
-    if isinstance(tree, nnx.State):
-        return tree
-
-    if hasattr(nnx.State, "from_pure_dict"):
-        return nnx.State.from_pure_dict(tree)
-
-    return nnx.State(tree)
-
-
-def _path_to_string(path) -> str:
-	parts: list[str] = []
-	for item in path:
-		if hasattr(item, "key"):
-			parts.append(str(item.key))
-		elif hasattr(item, "name"):
-			parts.append(str(item.name))
-		elif hasattr(item, "idx"):
-			parts.append(str(item.idx))
-		else:
-			parts.append(str(item))
-	return "/".join(parts)
+def build_training_components(args: DiffusionTrainConfig):
+    preprocess_cfg = PreprocessConfig(
+        model_dt=args.model_dt,
+        max_range=args.max_range,
+        ego_range=args.ego_range,
+        max_velocity=args.max_velocity,
+        max_width=args.max_width,
+        max_tl_points=args.max_tl_points,
+        num_map_type_classes=args.num_map_type_classes,
+        predict_horizon=args.predict_horizon,
+        max_segments=args.max_num_segments,
+        max_points_per_segment=args.max_points_per_segment,
+    )
+    model = DiffusionPolicy(
+        rngs=nnx.Rngs(args.seed),
+        target_dim=args.target_dim,
+        hidden_dim=args.hidden_dim,
+        cond_dim=args.cond_dim,
+        other_dim=args.other_dim,
+        map_attr_dim=args.map_attr_dim,
+        tl_attr_dim=args.tl_attr_dim,
+        predict_horizon=args.predict_horizon,
+        predict_type=args.predict_type,
+        goal_conditioned=args.goal_conditioned,
+        num_denoising_steps=args.num_denoising_steps,
+    )
+    total_steps = max(1, args.epochs * args.steps_per_epoch)
+    lr_schedule = optax.warmup_cosine_decay_schedule(
+        init_value=0.0,
+        peak_value=args.lr,
+        warmup_steps=max(1, args.warmup_steps),
+        decay_steps=max(args.warmup_steps + 1, total_steps),
+        end_value=args.lr * 0.1,
+    )
+    tx = optax.adamw(learning_rate=lr_schedule, weight_decay=args.weight_decay)
+    return preprocess_cfg, model, tx, lr_schedule
 
 
-def _is_trainable_path(path) -> bool:
-	path_str = _path_to_string(path)
-	return ("instruction_encoder" in path_str) or ("film_blocks" in path_str) or ("subgoal_encoder" in path_str)
-
-
-def _zero_film_block_params(params_tree):
-    def _maybe_zero(path, leaf):
-        return jnp.zeros_like(leaf) if "film_blocks" in _path_to_string(path) else leaf
-
-    return jax.tree_util.tree_map_with_path(_maybe_zero, params_tree)
-
-
-def _load_pretrained_state(
-	checkpoint_path: str,
-	model: DiffusionPolicy,
-	*,
-	use_ema: bool,
-) -> tuple[Any, Any]:
-	metadata = _load_checkpoint_metadata(checkpoint_path, None)
-	graphdef, template_params_state, template_nonparam_state = nnx.split(model, nnx.Param, ...)
-	restored = restore_checkpoint(checkpoint_path)
-
-	if "params_state" not in restored:
-		raise KeyError("Checkpoint is missing 'params_state'.")
-	if use_ema and "ema_params" in restored:
-		raw_params_state = restored["ema_params"]
-	else:
-		raw_params_state = restored["params_state"]
-
-	params_state = coerce_tree_like(template_params_state, raw_params_state)
-	nonparam_state = coerce_tree_like(template_nonparam_state, restored.get("nonparam_state", template_nonparam_state))
-	return graphdef, params_state, nonparam_state
-
-
-def _build_model_from_checkpoint(checkpoint_path: str, seed: int) -> DiffusionPolicy:
-	metadata = _load_checkpoint_metadata(checkpoint_path, None)
-	return _build_model_from_metadata(metadata, seed)
-
-
-def _make_optimizer(args: DiffusionTrainConfig, params_tree) -> tuple[optax.GradientTransformation, Any, Any]:
-	# params_tree should be a pure dict pytree, not flax.nnx.State.
-	trainable_mask = jax.tree_util.tree_map_with_path(
-		lambda path, leaf: _is_trainable_path(path),
-		params_tree,
-	)
-	param_labels = jax.tree_util.tree_map(
-		lambda is_trainable: "train" if is_trainable else "freeze",
-		trainable_mask,
-	)
-
-	total_steps = max(1, int(args.epochs) * int(args.steps_per_epoch))
-	lr_schedule = optax.warmup_cosine_decay_schedule(
-		init_value=0.0,
-		peak_value=float(args.lr),
-		warmup_steps=max(1, int(args.warmup_steps)),
-		decay_steps=max(int(args.warmup_steps) + 1, total_steps),
-		end_value=float(args.lr) * 0.1,
-	)
-
-	train_tx = optax.adamw(
-		learning_rate=lr_schedule,
-		weight_decay=float(args.weight_decay),
-	)
-	tx = optax.multi_transform(
-		{
-			"train": train_tx,
-			"freeze": optax.set_to_zero(),
-		},
-		param_labels,
-	)
-	return tx, lr_schedule, trainable_mask
-
-
-def _make_train_step(
-	graphdef,
-	nonparam_state,
-	tx,
-	trainable_mask,
-	grad_clip_norm: float,
-	ema_decay: float,
-	goal_mask_prob: float,
+def make_train_step(
+    preprocess_cfg: PreprocessConfig,
+    grad_clip_norm: float,
+    goal_mask_prob: float,
+    data_parallel: bool,
+    mesh: Mesh | None,
+    ema_update_every: int,
+    graphdef,
+    nonparam_state,
+    tx,
+    state_in_axes=None,
 ):
-	goal_mask_prob = jnp.asarray(jnp.clip(goal_mask_prob, 0.0, 1.0), dtype=jnp.float32)
+    use_data_parallel = bool(data_parallel and mesh is not None)
+    ego_range = jnp.asarray(preprocess_cfg.ego_range, dtype=jnp.float32)
+    max_velocity = jnp.asarray(preprocess_cfg.max_velocity, dtype=jnp.float32)
+    goal_mask_prob = jnp.asarray(jnp.clip(goal_mask_prob, 0.0, 1.0), dtype=jnp.float32)
 
-	def _mask_goal_features(feats: dict[str, jax.Array], rng: jax.Array) -> dict[str, jax.Array]:
-		if "goal_xy" not in feats and "subgoal_valid" not in feats:
-			return feats
-
-		rng_goal, rng_subgoal = jax.random.split(rng)
-		keep_goal = None
-		keep_subgoal = None
-		if "goal_xy" in feats:
-			keep_goal = jax.random.bernoulli(
-				rng_goal,
-				p=jnp.asarray(1.0, dtype=jnp.float32) - goal_mask_prob,
-				shape=(feats["goal_xy"].shape[0], 1),
-			)
-		if "subgoal_valid" in feats:
-			keep_subgoal = jax.random.bernoulli(
-				rng_subgoal,
-				p=jnp.asarray(1.0, dtype=jnp.float32) - goal_mask_prob,
-				shape=feats["subgoal_valid"].shape,
-			)
-
-		masked = dict(feats)
-		if keep_goal is not None:
-			masked["goal_xy"] = jnp.where(keep_goal, feats["goal_xy"], jnp.zeros_like(feats["goal_xy"]))
-			masked["remaining_timesteps"] = jnp.where(
-				keep_goal,
-				feats["remaining_timesteps"],
-				jnp.zeros_like(feats["remaining_timesteps"]),
-			)
-		if keep_subgoal is not None:
-			masked["subgoal_valid"] = jnp.where(
-				keep_subgoal,
-				feats["subgoal_valid"],
-				jnp.zeros_like(feats["subgoal_valid"]),
-			)
-			masked["subgoal_xy"] = jnp.where(
-				keep_subgoal[..., None],
-				feats["subgoal_xy"],
-				jnp.zeros_like(feats["subgoal_xy"]),
-			)
-		return masked
-
-	def merge_model(params_tree):
-		return nnx.merge(
-			graphdef,
-			_pure_dict_to_state(params_tree),
-			_pure_dict_to_state(nonparam_state),
-		)
-
-	def train_step(params_state, opt_state, ema_params, rng_key, batch_features):
-		rng_key, loss_key, mask_key = jax.random.split(rng_key, 3)
-		batch_features = _mask_goal_features(batch_features, mask_key)
-
-		def loss_fn(p):
-			model = merge_model(p)
-			loss = model.loss(batch_features, rng=loss_key)
-			inst_valid = jnp.asarray(batch_features["inst_valid"], dtype=jnp.float32)
-			metrics = {
-				"loss": loss,
-				"inst_valid_rate": jnp.mean(inst_valid),
-			}
-			return loss, metrics
-
-		(loss, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(params_state)
-		clipped_grads, grad_norm = clip_grads(grads, grad_clip_norm)
-		updates, opt_state = tx.update(clipped_grads, opt_state, params_state)
-		params_state = optax.apply_updates(params_state, updates)
-		ema_params = ema_update(ema_params, params_state, ema_decay)
-		metrics = {**metrics, "grad_norm": grad_norm}
-		return params_state, opt_state, ema_params, rng_key, metrics
-
-	return jax.jit(train_step)
-
-def main() -> None:
-	args = parse_args()
-	if args.resume_path is None and args.pretrained_ckpt is None:
-		raise ValueError("Provide either --resume_path or --pretrained_ckpt.")
-
-	configure_jax_compilation_cache(args.jax_compilation_cache_dir)
-
-	checkpoint_path = args.resume_path or args.pretrained_ckpt
-	assert checkpoint_path is not None
-	model = _build_model_from_checkpoint(checkpoint_path, args.seed)
-	graphdef, params_state, nonparam_state = nnx.split(model, nnx.Param, ...)
-	params_state = _state_to_pure_dict(params_state)
-	nonparam_state = _state_to_pure_dict(nonparam_state)
-
-	if args.resume_path:
-		tx, lr_schedule, trainable_mask = _make_optimizer(args, params_state)
-		params_state, nonparam_state, opt_state, ema_params, rng_key, start_epoch, global_step, global_step_host = restore_checkpoint(
-			args.resume_path,
-			params_state=params_state,
-			nonparam_state=nonparam_state,
-			tx=tx,
-			coerce_tree_like_fn=coerce_tree_like,
-		)
-	else:
-		restored_graphdef, params_state, nonparam_state = _load_pretrained_state(
-            args.pretrained_ckpt,
-            model,
-            use_ema=bool(args.use_ema),
+    def _maybe_mask_goal_xy(feats: dict[str, jax.Array], rng: jax.Array) -> dict[str, jax.Array]:
+        if "goal_xy" not in feats:
+            return feats
+        keep_goal = jax.random.bernoulli(
+            rng,
+            p=jnp.asarray(1.0, dtype=jnp.float32) - goal_mask_prob,
+            shape=(feats["goal_xy"].shape[0], 1),
         )
-		params_state = _state_to_pure_dict(params_state)
-		nonparam_state = _state_to_pure_dict(nonparam_state)
-		# params_state = _zero_film_block_params(params_state)
-		graphdef = restored_graphdef
-		tx, lr_schedule, trainable_mask = _make_optimizer(args, params_state)
-		opt_state = tx.init(params_state)
-		ema_params = jax.tree_util.tree_map(
-            lambda x: x.copy() if hasattr(x, "copy") else x,
+        masked = dict(feats)
+        masked["goal_xy"] = jnp.where(keep_goal, feats["goal_xy"], jnp.zeros_like(feats["goal_xy"]))
+        masked["remaining_timesteps"] = jnp.where(keep_goal, feats["remaining_timesteps"], jnp.zeros_like(feats["remaining_timesteps"]))
+        return masked
+
+    def _wrap_to_pi(angle):
+        return (angle + jnp.pi) % (2.0 * jnp.pi) - jnp.pi
+
+    def _trajectory_metrics(pred_btd, target_btd):
+        pred_xy = pred_btd[..., :2]
+        target_xy = target_btd[..., :2]
+        xy_err_m = jnp.linalg.norm(pred_xy - target_xy, axis=-1) * ego_range
+
+        metrics = {
+            "traj_ade_m": jnp.mean(xy_err_m),
+            "traj_fde_m": jnp.mean(xy_err_m[:, -1]),
+            "traj_final_longitudinal_err_m": jnp.mean(jnp.abs(pred_btd[:, -1, 0] - target_btd[:, -1, 0]) * ego_range),
+            "traj_final_lateral_err_m": jnp.mean(jnp.abs(pred_btd[:, -1, 1] - target_btd[:, -1, 1]) * ego_range),
+        }
+
+        if target_btd.shape[-1] >= 4:
+            pred_speed = jnp.linalg.norm(pred_btd[..., 2:4], axis=-1) * max_velocity
+            target_speed = jnp.linalg.norm(target_btd[..., 2:4], axis=-1) * max_velocity
+            metrics["speed_mae_mps"] = jnp.mean(jnp.abs(pred_speed - target_speed))
+        else:
+            metrics["speed_mae_mps"] = jnp.asarray(0.0, dtype=jnp.float32)
+
+        if target_btd.shape[-1] >= 5:
+            yaw_err = _wrap_to_pi((pred_btd[..., 4] - target_btd[..., 4]) * jnp.pi)
+            metrics["yaw_mae_deg"] = jnp.mean(jnp.abs(yaw_err)) * (180.0 / jnp.pi)
+        else:
+            metrics["yaw_mae_deg"] = jnp.asarray(0.0, dtype=jnp.float32)
+
+        return metrics
+
+    def merge_model(p):
+        return nnx.merge(graphdef, p, nonparam_state)
+
+    def single_device_loss_and_metrics(p, sim_state, key_pre, key_loss, key_sample):
+        m = merge_model(p)
+        key_pre, key_goal_mask = jax.random.split(key_pre)
+        pre_batch, _ = preprocess_simulator_state(sim_state, key_pre, preprocess_cfg)
+        feats = _maybe_mask_goal_xy(pre_batch.features, key_goal_mask)
+        features = m._as_features(feats)
+        cond = m.compute_condition(features)
+        target = features.ego_trajectory[:, : m.predict_horizon, :]
+        loss = m.loss_from_condition(target, cond, rng=key_loss)
+        # pred = m._sample_from_condition_impl(cond, key_sample)
+        # return loss, _trajectory_metrics(pred, target)
+        return loss, {}
+
+    if use_data_parallel:
+        num_devices = mesh.devices.size
+
+        def local_loss_with_params(p, state_local, key_pre_local, key_loss_local, key_sample_local):
+            m = merge_model(p)
+            key_pre_local, key_goal_mask_local = jax.random.split(key_pre_local)
+            pre_local, _ = preprocess_simulator_state(state_local, key_pre_local, preprocess_cfg)
+            feats_local = _maybe_mask_goal_xy(pre_local.features, key_goal_mask_local)
+            features_local = m._as_features(feats_local)
+            cond_local = m.compute_condition(features_local)
+            target_local = features_local.ego_trajectory[:, : m.predict_horizon, :]
+            loss_local = m.loss_from_condition(target_local, cond_local, rng=key_loss_local)
+            # pred_local = m._sample_from_condition_impl(cond_local, key_sample_local)
+            # return loss_local, _trajectory_metrics(pred_local, target_local)
+            return loss_local, {}
+        
+        pmapped_local_loss = jax.pmap(
+            local_loss_with_params,
+            axis_name="data",
+            in_axes=(None, state_in_axes, 0, 0, 0),
+            out_axes=(0, 0),
+        )
+
+        def compute_loss_and_metrics(p, sim_state, key_pre, key_loss, key_sample):
+            key_pre_devices = jax.random.split(key_pre, num_devices)
+            key_loss_devices = jax.random.split(key_loss, num_devices)
+            key_sample_devices = jax.random.split(key_sample, num_devices)
+            key_pre_devices = jax.lax.with_sharding_constraint(key_pre_devices, P("data", None))
+            key_loss_devices = jax.lax.with_sharding_constraint(key_loss_devices, P("data", None))
+            key_sample_devices = jax.lax.with_sharding_constraint(key_sample_devices, P("data", None))
+            losses, metric_tree = pmapped_local_loss(p, sim_state, key_pre_devices, key_loss_devices, key_sample_devices)
+            return jnp.mean(losses), jax.tree_util.tree_map(jnp.mean, metric_tree)
+
+    else:
+
+        def compute_loss_and_metrics(p, sim_state, key_pre, key_loss, key_sample):
+            return single_device_loss_and_metrics(p, sim_state, key_pre, key_loss, key_sample)
+
+    def train_step_impl(params_state, opt_state, ema_params, rng_key, global_step, sim_state):
+        rng_key, key_pre, key_loss, key_sample = jax.random.split(rng_key, 4)
+
+        def loss_fn(p):
+            return compute_loss_and_metrics(p, sim_state, key_pre, key_loss, key_sample)
+
+        (loss, train_metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(params_state)
+        clipped_grads, grad_norm = clip_grads(grads, grad_clip_norm)
+        updates, opt_state_next = tx.update(clipped_grads, opt_state, params_state)
+        params_next = optax.apply_updates(params_state, updates)
+
+        ema_params_candidate = ema_update(ema_params, params_next, preprocess_cfg.ema_decay)
+        if ema_update_every <= 1:
+            ema_params_next = ema_params_candidate
+        else:
+            step_next = global_step + jnp.int32(1)
+            do_ema = (step_next % jnp.int32(ema_update_every)) == 0
+            ema_params_next = jax.tree_util.tree_map(
+                lambda old, new: jnp.where(do_ema, new, old),
+                ema_params,
+                ema_params_candidate,
+            )
+
+        metrics = {
+            "loss": loss,
+            "grad_norm": grad_norm,
+            **train_metrics,
+        }
+        return params_next, opt_state_next, ema_params_next, rng_key, global_step + jnp.int32(1), metrics
+
+    if use_data_parallel:
+        return train_step_impl
+    return jax.jit(train_step_impl)
+
+
+def run_train_step(
+    train_step_fn,
+    params_state,
+    opt_state,
+    ema_params,
+    rng_key,
+    global_step,
+    sim_state,
+    *,
+    data_parallel: bool,
+    data_mesh: Mesh | None,
+    sim_state_treedef=None,
+    sim_state_sig=None,
+    where: str | None = None,
+):
+    sim_state = canonicalize_state_for_mesh(sim_state, data_mesh if data_parallel else None)
+    if sim_state_treedef is not None and sim_state_sig is not None:
+        assert_matching_sim_state_signature(sim_state, sim_state_treedef, sim_state_sig, where=where or "train_step")
+
+    if data_parallel and data_mesh is not None:
+        with data_mesh:
+            return train_step_fn(params_state, opt_state, ema_params, rng_key, global_step, sim_state)
+    return train_step_fn(params_state, opt_state, ema_params, rng_key, global_step, sim_state)
+
+
+def main():
+    args = parse_args()
+    configure_jax_compilation_cache(args.jax_compilation_cache_dir)
+    preprocess_cfg, model, tx, lr_schedule = build_training_components(args)
+
+    run, run_dir = init_wandb_run(args, config_to_dict(args))
+    global_batch_size = int(args.batch_size)
+
+    # Waymax uses TensorFlow input pipelines; keep TF on CPU and quiet non-actionable logs.
+    import tensorflow as tf
+
+    tf.get_logger().setLevel("ERROR")
+    try:
+        tf.autograph.set_verbosity(0)
+    except Exception:
+        pass
+    try:
+        tf.config.set_visible_devices([], "GPU")
+    except Exception:
+        pass
+
+    # Import Waymax dataloader lazily after data-parallel collectives are initialized.
+    from waymax import config as waymax_config
+    from waymax import dataloader
+
+    # Split model into trainable params and static/non-param state for pure jitted train step.
+    graphdef, params_state, nonparam_state = nnx.split(model, nnx.Param, ...)
+    opt_state = tx.init(params_state)
+    ema_params = jax.tree_util.tree_map(lambda x: x.copy(), params_state)
+    rng_key = jax.random.PRNGKey(args.seed)
+
+    start_epoch = 1
+    global_step = jnp.array(0, dtype=jnp.int32)
+    global_step_host: int = 0
+
+    if args.resume_path:
+        (
             params_state,
+            nonparam_state,
+            opt_state,
+            ema_params,
+            rng_key,
+            start_epoch,
+            global_step,
+            global_step_host,
+        ) = restore_checkpoint(
+            args.resume_path,
+            params_state=params_state,
+            nonparam_state=nonparam_state,
+            tx=tx,
+            coerce_tree_like_fn=coerce_tree_like,
         )
-		rng_key = jax.random.PRNGKey(int(args.seed))
-		start_epoch = 1
-		global_step = jnp.array(0, dtype=jnp.int32)
-		global_step_host = 0
 
-	loader = build_dataloader(
-		args.cache_dir,
-		preprocess_cfg=args.preprocess_cfg,
-		anchor_steps=(0, 10, 20, 30, 40),
-		backend='jax',
-		include_inst_features=True,
-		batch_size=int(args.cache_batch_size),
-		shuffle_seed=int(args.shuffle_seed),
-		num_workers=int(args.num_workers),
-		pin_memory=bool(args.pin_memory),
-		drop_last=True
-	)
-	train_step = _make_train_step(
-		graphdef,
-		nonparam_state,
-		tx,
-		trainable_mask,
-		float(args.grad_clip_norm),
-		float(args.ema_decay),
-		float(args.goal_mask_prob),
-	)
+    data_parallel_enabled = bool(args.data_parallel)
+    if data_parallel_enabled and not model.supports_data_parallel():
+        raise ValueError("Model does not support data_parallel on this host/device configuration.")
+    data_mesh = build_data_parallel_mesh_if_needed(args) if data_parallel_enabled else None
 
-	config_dict = config_to_dict(args)
-	run, run_dir = init_wandb_run(args, config_dict)
-	iterator = iter_with_prefetch(iter(loader), 0)
-	ema_loss = None
+    if data_parallel_enabled and data_mesh is not None:
+        with data_mesh:
+            params_state = replicate_to_mesh(params_state, data_mesh)
+            nonparam_state = replicate_to_mesh(nonparam_state, data_mesh)
+            opt_state = replicate_to_mesh(opt_state, data_mesh)
+            ema_params = replicate_to_mesh(ema_params, data_mesh)
+            rng_key = replicate_to_mesh(rng_key, data_mesh)
+            global_step = replicate_to_mesh(global_step, data_mesh)
 
-	for epoch in range(int(start_epoch), int(args.epochs) + 1):
-		pbar = tqdm(total=int(args.steps_per_epoch), desc=f"Epoch {epoch:04d}")
-		for step_in_epoch in range(int(args.steps_per_epoch)):
-			try:
-				batch = next(iterator)
-			except StopIteration:
-				iterator = iter_with_prefetch(iter(loader), 0)
-				batch = next(iterator)
+    ds_cfg = make_dataset_config(args, waymax_config, global_batch_size)
 
+    def make_scenarios_iter():
+        return iter_with_prefetch(dataloader.simulator_state_generator(ds_cfg), args.prefetch_size)
 
-			params_state, opt_state, ema_params, rng_key, metrics = train_step(
-				params_state,
-				opt_state,
-				ema_params,
-				rng_key,
-				batch.features,
-			)
-			# print(f"Step {global_step_host}: loss={metrics['loss']:.6g}, inst_valid_rate={metrics['inst_valid_rate']:.6g}, grad_norm={metrics['grad_norm']:.6g}")
-			global_step = global_step + jnp.int32(1)
-			global_step_host += 1
-			pbar.update(1)
-			ema_loss = update_tqdm(pbar, global_step_host, args.pbar_every, metrics, ema_loss)
+    scenarios = make_scenarios_iter()
 
-			if global_step_host % int(args.log_every) == 0:
-				metric_values = _scalarize_for_logging(metrics)
-				metric_values["epoch"] = int(epoch)
-				metric_values["step"] = int(global_step_host)
-				metric_values["lr"] = float(lr_schedule(max(global_step_host - 1, 0)))
-				# print(json.dumps(metric_values, sort_keys=True))
-				ema_loss, payload = wandb_log_train_step(global_step_host, int(epoch), metric_values, ema_loss, float(lr_schedule(max(global_step_host - 1, 0))))
-				log_jsonl(os.path.join(run_dir, "train_logs.jsonl"), payload)
+    # Data/mesh setup from a single canonical batch.
+    first_sim_state = next(scenarios)
+    first_sim_state = canonicalize_state_for_mesh(first_sim_state, data_mesh if data_parallel_enabled else None)
+    state_in_axes = state_in_axes_from_template(first_sim_state) if data_parallel_enabled else None
+    sim_state_treedef, sim_state_sig = sim_state_signature(first_sim_state)
+    scenarios = itertools.chain([first_sim_state], scenarios)
 
-		pbar.close()
+    train_step_fn = make_train_step(
+        preprocess_cfg,
+        args.grad_clip_norm,
+        args.goal_mask_prob if args.goal_conditioned else 0.0,
+        data_parallel_enabled,
+        data_mesh,
+        args.ema_update_every,
+        graphdef,
+        nonparam_state,
+        tx,
+        state_in_axes,
+    )
 
-		if epoch % int(args.save_every) == 0 or epoch == int(args.epochs):
-			save_checkpoint(
-				run_dir,
-				config_dict,
-				epoch=epoch,
-				global_step=global_step,
-				params_state=params_state,
-				nonparam_state=nonparam_state,
-				opt_state=opt_state,
-				ema_params=ema_params,
-				rng_key=rng_key,
-				save_every=args.save_every,
-			)
+    # Compile and autotune kernels once before entering the timed training loop.
+    # We intentionally discard outputs to keep optimizer/model state unchanged.
+    _, _, _, _, _, warmup_metrics = run_train_step(
+        train_step_fn,
+        params_state,
+        opt_state,
+        ema_params,
+        rng_key,
+        global_step,
+        first_sim_state,
+        data_parallel=data_parallel_enabled,
+        data_mesh=data_mesh,
+        sim_state_treedef=sim_state_treedef,
+        sim_state_sig=sim_state_sig,
+        where="warmup",
+    )
+    _ = jax.block_until_ready(warmup_metrics["loss"])
+
+    for epoch in range(start_epoch, args.epochs + 1):
+        if epoch > start_epoch and args.recreate_dataloader_each_epoch:
+            # Recreate the TF/Waymax iterator periodically to avoid long-run host-memory growth.
+            scenarios = make_scenarios_iter()
+
+        ema_loss = None
+        pbar = tqdm(total=args.steps_per_epoch, desc=f"Epoch {epoch:04d}")
+
+        for _ in range(args.steps_per_epoch):
+            sim_state = next(scenarios)
+            params_state, opt_state, ema_params, rng_key, global_step, metrics = run_train_step(
+                train_step_fn,
+                params_state,
+                opt_state,
+                ema_params,
+                rng_key,
+                global_step,
+                sim_state,
+                data_parallel=data_parallel_enabled,
+                data_mesh=data_mesh,
+                sim_state_treedef=sim_state_treedef,
+                sim_state_sig=sim_state_sig,
+                where=f"epoch={epoch} step={global_step_host + 1}",
+            )
+
+            global_step_host += 1
+            pbar.update(1)
+            ema_loss = update_tqdm(pbar, global_step_host, args.pbar_every, metrics, ema_loss)
+
+            if global_step_host % args.log_every == 0:
+                lr = float(lr_schedule(global_step_host - 1))
+                ema_loss, payload = wandb_log_train_step(global_step_host, epoch, metrics, ema_loss, lr)
+                log_jsonl(args.log_jsonl_path, payload)
+
+        pbar.close()
+
+        save_checkpoint(
+            run_dir,
+            config_to_dict(args),
+            epoch=epoch,
+            global_step=global_step,
+            params_state=params_state,
+            nonparam_state=nonparam_state,
+            opt_state=opt_state,
+            ema_params=ema_params,
+            rng_key=rng_key,
+            save_every=args.save_every,
+        )
+
+        if args.epoch_gc_every > 0 and (epoch % args.epoch_gc_every == 0):
+            # Periodic host GC helps return Python-held objects between long epochs.
+            gc.collect()
+
+    run.finish()
 
 
 if __name__ == "__main__":
-	main()
+    main()

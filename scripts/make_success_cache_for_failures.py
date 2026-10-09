@@ -29,14 +29,14 @@ REPO_ROOT = _find_repo_root(Path(__file__).resolve())
 if str(REPO_ROOT) not in sys.path:
 	sys.path.insert(0, str(REPO_ROOT))
 
-from data.failure_detection_loader import _pick_failure_reason
-from data.preprocess_cached import _CACHE_FIELD_NAMES
-from model.diffusion.fm_policy import (
+from data.failure_detection_loader import (
 	FAILURE_REASON_COLLISION,
 	FAILURE_REASON_GOAL_NOT_REACHED,
 	FAILURE_REASON_NONE,
 	FAILURE_REASON_OFFROAD,
+	_pick_failure_reason,
 )
+from data.preprocess_cached import _CACHE_FIELD_NAMES
 
 
 _SOURCE_CACHE_RE = re.compile(r"training_tfexample\.tfrecord-(\d+)-of-01000\.sim_state_cache\.npz$")

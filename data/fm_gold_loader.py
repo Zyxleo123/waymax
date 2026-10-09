@@ -9,16 +9,16 @@ from typing import Any, Iterator, Sequence
 import numpy as np
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
-from data.failure_detection_loader import _cache_scenario_count
-from data.preprocess_cached import preprocess_cached_npz
-from data.types import CacheBatch, PreprocessConfig
-from data.utils import npz_to_jax, npz_to_torch
-from model.diffusion.fm_policy import (
+from data.failure_detection_loader import (
 	FAILURE_REASON_COLLISION,
 	FAILURE_REASON_GOAL_NOT_REACHED,
 	FAILURE_REASON_NONE,
 	FAILURE_REASON_OFFROAD,
+	_cache_scenario_count,
 )
+from data.preprocess_cached import preprocess_cached_npz
+from data.types import CacheBatch, PreprocessConfig
+from data.utils import npz_to_jax, npz_to_torch
 
 
 DEFAULT_ANCHOR_STEPS = (0, 10, 20, 30, 40)

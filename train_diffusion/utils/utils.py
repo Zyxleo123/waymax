@@ -40,8 +40,8 @@ def build_training_components(args):
         predict_horizon=args.predict_horizon,
         max_segments=args.max_num_segments,
         max_points_per_segment=args.max_points_per_segment,
-        num_object_types=args.num_object_types,
-        inst_dim=args.inst_dim,
+        num_object_types=getattr(args, "num_object_types", 8),
+        inst_dim=getattr(args, "inst_dim", 768),
     )
     model = DiffusionPolicy(
         target_dim=args.target_dim,
@@ -51,6 +51,8 @@ def build_training_components(args):
         tl_attr_dim=args.tl_attr_dim,
         predict_horizon=args.predict_horizon,
         predict_type=args.predict_type,
+        goal_conditioned=bool(getattr(args, "goal_conditioned", True)),
+        num_denoising_steps=int(getattr(args, "num_denoising_steps", 100)),
         rngs=nnx.Rngs(args.seed),
     )
     total_steps = max(1, args.epochs * args.steps_per_epoch)
@@ -469,13 +471,11 @@ def run_data_parallel_warmup_if_needed(model: DiffusionPolicy, args) -> None:
             "traffic_light_valid": jax.lax.with_sharding_constraint(features["traffic_light_valid"], spec_bt),
         }
         sharded = jax.tree_util.tree_map(lambda x: jnp.reshape(x, (x.shape[0] * x.shape[1],) + x.shape[2:]), sharded)
-        cond, inst_cond, inst_cond_mask = model.compute_condition(sharded)
+        cond = model.compute_condition(sharded)
         target = sharded["ego_trajectory"][:, : model.predict_horizon, :]
         _ = model.loss_from_condition(
             target,
             cond,
-            inst_cond,
-            inst_cond_mask,
             rng=jax.random.PRNGKey(args.seed),
             data_parallel=False,
         )

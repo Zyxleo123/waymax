@@ -111,28 +111,22 @@ class FMFDPlanner(AbstractPlanner):
 
 		self._compute_condition_jit = jax.jit(self.policy.compute_condition)
 		self._sample_uncond_jit = jax.jit(
-			lambda *, cond_bf, inst_cond_bf, inst_cond_mask_bf, rng: self._sample_population(
+			lambda *, cond_bf, rng: self._sample_population(
 				cond_bf=cond_bf,
-				inst_cond_bf=inst_cond_bf,
-				inst_cond_mask_bf=inst_cond_mask_bf,
 				rng=rng,
 				guidance_scale=1.0,
 			),
 		)
 		self._sample_guided_jit = jax.jit(
-			lambda *, cond_bf, inst_cond_bf, inst_cond_mask_bf, rng, guidance_scale: self._sample_population(
+			lambda *, cond_bf, rng, guidance_scale: self._sample_population(
 				cond_bf=cond_bf,
-				inst_cond_bf=inst_cond_bf,
-				inst_cond_mask_bf=inst_cond_mask_bf,
 				rng=rng,
 				guidance_scale=guidance_scale,
 			),
 		)
 		self._resample_guided_jit = jax.jit(
-			lambda *, cond_bf, inst_cond_bf, inst_cond_mask_bf, proposals_btd, rng, guidance_scale: self._resample_population(
+			lambda *, cond_bf, proposals_btd, rng, guidance_scale: self._resample_population(
 				cond_bf=cond_bf,
-				inst_cond_bf=inst_cond_bf,
-				inst_cond_mask_bf=inst_cond_mask_bf,
 				proposals_btd=proposals_btd,
 				rng=rng,
 				guidance_scale=guidance_scale,
@@ -183,11 +177,9 @@ class FMFDPlanner(AbstractPlanner):
 			features["remaining_timesteps"] = jnp.zeros_like(features["remaining_timesteps"])
 
 		with jax.default_device(self.jax_device):
-			cond_bf, failure_cond_bf, failure_mask_bf = self._compute_condition_jit(features)
+			cond_bf = self._compute_condition_jit(features)
 			current_norm_bktd = self._sample_uncond_jit(
 				cond_bf=cond_bf,
-				inst_cond_bf=failure_cond_bf,
-				inst_cond_mask_bf=failure_mask_bf,
 				rng=key_uncond,
 			)
 
@@ -214,14 +206,12 @@ class FMFDPlanner(AbstractPlanner):
 				guidance_scale=self.guidance_scale,
 			)
 			with jax.default_device(self.jax_device):
-				guided_cond, guided_failure_cond, guided_failure_mask = self._compute_condition_jit(
+				guided_cond = self._compute_condition_jit(
 					guided_features
 				)
 				if self.correction_mode == "resample":
 					corrected_norm_btd = self._resample_guided_jit(
 						cond_bf=guided_cond,
-						inst_cond_bf=guided_failure_cond,
-						inst_cond_mask_bf=guided_failure_mask,
 						proposals_btd=best_norm_btd,
 						rng=key_cfg,
 						guidance_scale=guidance,
@@ -229,8 +219,6 @@ class FMFDPlanner(AbstractPlanner):
 				else:
 					corrected_norm_bktd = self._sample_guided_jit(
 						cond_bf=guided_cond,
-						inst_cond_bf=guided_failure_cond,
-						inst_cond_mask_bf=guided_failure_mask,
 						rng=key_cfg,
 						guidance_scale=guidance,
 					)
@@ -376,25 +364,17 @@ class FMFDPlanner(AbstractPlanner):
 		self,
 		*,
 		cond_bf: jax.Array,
-		inst_cond_bf: jax.Array,
-		inst_cond_mask_bf: jax.Array,
 		rng: jax.Array,
 		guidance_scale: float | jax.Array,
 	) -> jax.Array:
 		batch_size = int(cond_bf.shape[0])
 		cond_bkf = jnp.repeat(cond_bf, repeats=self.population_size, axis=0)
-		inst_cond_bf = jnp.repeat(inst_cond_bf, repeats=self.population_size, axis=0)
-		inst_cond_mask_bf = jnp.repeat(inst_cond_mask_bf, repeats=self.population_size, axis=0)
-		guidance_scale = self._repeat_guidance(guidance_scale, batch_size)
-
+		del guidance_scale
 		samples_btd = self.policy.sample_from_condition(
 			cond_bkf,
-			inst_cond_bf,
-			inst_cond_mask_bf,
 			rng=rng,
 			num_steps=self.num_steps,
 			solver=self.solver,
-			guidance_scale=guidance_scale,
 		)
 		horizon = int(samples_btd.shape[1])
 		target_dim = int(samples_btd.shape[2])
@@ -404,41 +384,20 @@ class FMFDPlanner(AbstractPlanner):
 		self,
 		*,
 		cond_bf: jax.Array,
-		inst_cond_bf: jax.Array,
-		inst_cond_mask_bf: jax.Array,
 		proposals_btd: jax.Array,
 		rng: jax.Array,
 		guidance_scale: float | jax.Array,
 	) -> jax.Array:
 		batch_size = int(cond_bf.shape[0])
-		guidance_scale = self._repeat_guidance(guidance_scale, batch_size)
+		del guidance_scale
 		return self.policy.resample_from_condition(
 			cond_bf,
-			inst_cond_bf,
-			inst_cond_mask_bf,
 			proposals_btd,
 			rng=rng,
 			t_start=self.cfg_t_start,
 			num_steps=self.num_steps,
 			solver=self.solver,
-			guidance_scale=guidance_scale,
 		)
-
-	def _repeat_guidance(
-		self,
-		guidance_scale: float | jax.Array,
-		batch_size: int,
-	) -> jax.Array:
-		scale = jnp.asarray(guidance_scale, dtype=jnp.float32)
-		if scale.ndim == 0:
-			scale = jnp.full((batch_size,), scale)
-		if int(scale.shape[0]) != batch_size:
-			raise ValueError(
-				f"guidance_scale batch {scale.shape[0]} != feature batch {batch_size}"
-			)
-		if self.population_size == 1:
-			return scale
-		return jnp.repeat(scale, repeats=self.population_size, axis=0)
 
 	def _postprocess_single(
 		self,

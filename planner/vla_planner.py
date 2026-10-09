@@ -52,7 +52,7 @@ class VLAPlanner(AbstractPlanner):
         self.population_size = int(population_size)
         self.prompt_text = prompt_text
         self.max_new_tokens = int(max_new_tokens)
-        self.inst_feature_dim = int(self.policy.instruction_encoder.input_dim)
+        self.inst_feature_dim = int(self.preprocess_cfg.inst_dim)
         self.dummy_instruction = dummy_instruction
 
         if torch_device is None:
@@ -71,10 +71,8 @@ class VLAPlanner(AbstractPlanner):
 
         self._compute_condition_jit = jax.jit(self.policy.compute_condition)
         self._sample_population_jit = jax.jit(
-            lambda *, cond_bf, inst_cond_bf, inst_cond_mask_bf, rng: self._sample_population(
+            lambda *, cond_bf, rng: self._sample_population(
                 cond_bf=cond_bf,
-                inst_cond_bf=inst_cond_bf,
-                inst_cond_mask_bf=inst_cond_mask_bf,
                 rng=rng,
             ),
         )
@@ -120,29 +118,17 @@ class VLAPlanner(AbstractPlanner):
                     )
         instruction_texts = predictions["answer"]
         subgoal_preds = predictions.get("subgoal_pred", None)
-        instruction_features, instruction_mask = self.encode_instructions(
-            instruction_texts=instruction_texts
-        )
+        del use_subgoal
 
         features = dict(pre_batch.features)
-        features["inst_features"] = instruction_features
-        features["inst_valid"] = instruction_mask
         if mask_goal:
             features["goal_xy"] = jnp.zeros_like(features["goal_xy"])
             features["remaining_timesteps"] = jnp.zeros_like(features["remaining_timesteps"])
-        if use_subgoal and subgoal_preds is not None:
-            features["subgoal_xy"] = jnp.asarray(subgoal_preds, dtype=jnp.float32) / 100.0
-            features["subgoal_valid"] = jnp.ones((self.num_worlds,), dtype=jnp.float32)
-        else:
-            features["subgoal_xy"] = jnp.zeros((self.num_worlds, 2), dtype=jnp.float32)
-            features["subgoal_valid"] = jnp.zeros((self.num_worlds,), dtype=jnp.float32)
 
         with jax.default_device(self.jax_device):
-            cond_bf, inst_cond_bf = self._compute_condition_jit(features)
+            cond_bf = self._compute_condition_jit(features)
             current_norm_bktd = self._sample_population_jit(
                 cond_bf=cond_bf,
-                inst_cond_bf=inst_cond_bf,
-                inst_cond_mask_bf=instruction_mask,
                 rng=key_sample,
             )
 
@@ -212,15 +198,11 @@ class VLAPlanner(AbstractPlanner):
         self,
         *,
         cond_bf: jax.Array,
-        inst_cond_bf: jax.Array,
-        inst_cond_mask_bf: jax.Array,
         rng: jax.Array,
     ) -> jax.Array:
         batch_size = int(cond_bf.shape[0])
         cond_bkf = jnp.repeat(cond_bf, repeats=self.population_size, axis=0)
-        inst_cond_bf = jnp.repeat(inst_cond_bf, repeats=self.population_size, axis=0)
-        inst_cond_mask_bf = jnp.repeat(inst_cond_mask_bf, repeats=self.population_size, axis=0)
-        samples_btd = self.policy.sample_from_condition(cond_bkf, inst_cond_bf, inst_cond_mask_bf, rng=rng)
+        samples_btd = self.policy.sample_from_condition(cond_bkf, rng=rng)
         horizon = int(samples_btd.shape[1])
         target_dim = int(samples_btd.shape[2])
         return samples_btd.reshape(batch_size, self.population_size, horizon, target_dim)

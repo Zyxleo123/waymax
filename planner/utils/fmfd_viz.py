@@ -8,7 +8,7 @@ from typing import Any
 import matplotlib.pyplot as plt
 import numpy as np
 
-from model.diffusion.fm_policy import (
+from data.failure_detection_loader import (
 	FAILURE_REASON_COLLISION,
 	FAILURE_REASON_GOAL_NOT_REACHED,
 	FAILURE_REASON_OFFROAD,
