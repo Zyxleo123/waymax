@@ -43,7 +43,7 @@ SUBSET_DIR="/zfsauton/scratch/sbellad/Diffusion_ES_sim/es_failure_subset_n1500_s
 TARGET_JSON="${SUBSET_DIR}/target_scenarios.json"
 TFRECORD_DIR="${SUBSET_DIR}/tfrecords"
 LANE_GRAPH_DIR="/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
-DIFFUSION_CKPT="/zfsauton/scratch/sbellad/diffusion/diffusion_baseline_baseline_20260810_144559/epoch_0500"
+DIFFUSION_CKPT="/zfsauton/scratch/sbellad/train_diffusion/diffusion_baseline_baseline_20260810_144559/epoch_0500"
 FM_CKPT="/zfsauton/scratch/mineuih/waymax_rs/checkpoints/pretrain_flow_matching/pretrain_fm_policy_20260828_011255/epoch_0500"
 
 # Teammate's env (yours has a jaxlib / jax_cuda12_plugin version mismatch).
