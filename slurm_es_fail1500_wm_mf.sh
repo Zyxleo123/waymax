@@ -39,7 +39,7 @@ esac
 ROOT="/zfsauton/scratch/ishanj/waymax_rs"
 EXP_ROOT="/zfsauton/scratch/ishanj/world_model_sim"
 
-SUBSET_DIR="/zfsauton/scratch/sbellad/immediate_exp/es_failure_subset_n1500_seed0"
+SUBSET_DIR="/zfsauton/scratch/sbellad/Diffusion_ES_sim/es_failure_subset_n1500_seed0"
 TARGET_JSON="${SUBSET_DIR}/target_scenarios.json"
 TFRECORD_DIR="${SUBSET_DIR}/tfrecords"
 LANE_GRAPH_DIR="/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
