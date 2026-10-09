@@ -38,9 +38,23 @@ class FailureDetectionLoaderConfig:
 	drop_last: bool = False
 	success_anchor_steps: tuple[int, ...] = (0, 10, 20, 30, 40)
 	failure_max_anchor_offset: int = 50
+	failure_ratio: float = 0.5
 	goal_step_override: int | None = None
 	prompt: str = DEFAULT_FAILURE_PROMPT
 	answer_success: str = DEFAULT_SUCCESS_ANSWERS
+
+
+def _split_batch_counts(batch_size: int, failure_ratio: float) -> tuple[int, int]:
+	"""Round the failure fraction to an integer count that fits in the batch."""
+	if not 0.0 <= float(failure_ratio) <= 1.0:
+		raise ValueError(f"failure_ratio must be in [0, 1], got {failure_ratio}")
+	batch_size = int(batch_size)
+	if batch_size <= 0:
+		raise ValueError(f"batch_size must be positive, got {batch_size}")
+	failure_count = int(round(batch_size * float(failure_ratio)))
+	failure_count = min(max(failure_count, 0), batch_size)
+	success_count = batch_size - failure_count
+	return success_count, failure_count
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -206,6 +220,15 @@ class FailureDetectionCacheDataset(IterableDataset[CacheBatch]):
 		else:
 			raise ValueError(f"Unsupported backend: {self.cfg.backend}")
 		self._failure_result_index = self._build_failure_result_index(Path(self.cfg.failure_result_root))
+		self._success_count, self._failure_count = _split_batch_counts(
+			self.cfg.batch_size,
+			self.cfg.failure_ratio,
+		)
+		print(
+			f"[failure_detection_loader] batch_size={self.cfg.batch_size}, "
+			f"failure_ratio={self.cfg.failure_ratio:.3f} -> "
+			f"success={self._success_count}, failure={self._failure_count}"
+		)
 
 	@staticmethod
 	def _build_failure_result_index(result_root: Path) -> dict[str, Path]:
@@ -251,6 +274,8 @@ class FailureDetectionCacheDataset(IterableDataset[CacheBatch]):
 		key: str,
 		critical_object_id: int = -1,
 		critical_road_segment_id: int = -1,
+		cache_path: str | Path | None = None,
+		failure_step: int = -1,
 	) -> dict[str, Any]:
 		features = {name: self._select_row(value, row_idx) for name, value in preprocessed["features"].items()}
 		aux = {name: self._select_row(value, row_idx) for name, value in preprocessed["aux"].items()}
@@ -275,6 +300,8 @@ class FailureDetectionCacheDataset(IterableDataset[CacheBatch]):
 		features["anchor_step"] = np.asarray([[int(anchor_step)]], dtype=np.int32)
 		aux["critical_object_ids"] = np.asarray([int(critical_object_id)], dtype=np.int32)
 		aux["critical_road_segment_ids"] = np.asarray([int(critical_road_segment_id)], dtype=np.int32)
+		aux["scenario_idx"] = np.asarray([int(scenario_idx)], dtype=np.int32)
+		aux["failure_step"] = np.asarray([int(failure_step)], dtype=np.int32)
 
 		return {
 			"features": features,
@@ -282,6 +309,7 @@ class FailureDetectionCacheDataset(IterableDataset[CacheBatch]):
 			"prompt": self.cfg.prompt,
 			"answer": answer,
 			"key": key,
+			"cache_path": str(cache_path) if cache_path is not None else "",
 		}
 
 	def _iter_success_examples(self, cache_paths: list[str], rng: random.Random) -> Iterator[dict[str, Any]]:
@@ -320,6 +348,7 @@ class FailureDetectionCacheDataset(IterableDataset[CacheBatch]):
 							"success",
 							-1,
 							-1,
+							cache_path=cache_file,
 						)
 
 	def _iter_failure_examples(self, cache_paths: list[str], rng: random.Random) -> Iterator[dict[str, Any]]:
@@ -349,7 +378,9 @@ class FailureDetectionCacheDataset(IterableDataset[CacheBatch]):
 						rng,
 						self.cfg.failure_max_anchor_offset,
 					)
-					anchor_groups[anchor_step].append((int(scenario_idx), reason, critical_object_id, critical_road_segment_id))
+					anchor_groups[anchor_step].append(
+						(int(scenario_idx), reason, critical_object_id, critical_road_segment_id, int(failure_step))
+					)
 
 				for anchor_step, scenario_items in anchor_groups.items():
 					scenario_indices = [item[0] for item in scenario_items]
@@ -361,7 +392,7 @@ class FailureDetectionCacheDataset(IterableDataset[CacheBatch]):
 						goal_step_override=goal_step_override,
 						include_inst_features=self.cfg.include_inst_features,
 					)
-					for row_idx, (scenario_idx, reason, critical_object_id, critical_road_segment_id) in enumerate(scenario_items):
+					for row_idx, (scenario_idx, reason, critical_object_id, critical_road_segment_id, failure_step) in enumerate(scenario_items):
 						yield self._build_example(
 							preprocessed,
 							cache_npz,
@@ -372,6 +403,8 @@ class FailureDetectionCacheDataset(IterableDataset[CacheBatch]):
 							reason.replace(" ", "_"),
 							critical_object_id,
 							critical_road_segment_id,
+							cache_path=cache_file,
+							failure_step=int(failure_step),
 						)
 
 	def __iter__(self) -> Iterator[CacheBatch]:
@@ -386,18 +419,10 @@ class FailureDetectionCacheDataset(IterableDataset[CacheBatch]):
 
 		success_iter = iter(self._iter_success_examples(success_paths, rng))
 		failure_iter = iter(self._iter_failure_examples(failure_paths, rng))
-		extra_success = True
-		has_odd_batch = bool(self.cfg.batch_size % 2)
 
 		while True:
-			success_count = self.cfg.batch_size // 2
-			failure_count = self.cfg.batch_size - success_count
-			if has_odd_batch:
-				if extra_success:
-					success_count += 1
-				else:
-					failure_count += 1
-				extra_success = not extra_success
+			success_count = self._success_count
+			failure_count = self._failure_count
 
 			batch_examples: list[dict[str, Any]] = []
 			for _ in range(success_count):
@@ -425,6 +450,7 @@ class FailureDetectionCacheDataset(IterableDataset[CacheBatch]):
 			prompts = [str(example["prompt"]) for example in batch_examples]
 			answers = [str(example["answer"]) for example in batch_examples]
 			keys = [str(example["key"]) for example in batch_examples]
+			cache_paths = [str(example.get("cache_path", "")) for example in batch_examples]
 
 			yield CacheBatch(
 				features=batch_features,
@@ -432,6 +458,7 @@ class FailureDetectionCacheDataset(IterableDataset[CacheBatch]):
 				prompts=prompts,
 				answers=answers,
 				keys=keys,
+				cache_paths=cache_paths,
 			)
 
 
@@ -454,6 +481,7 @@ def build_dataloader(
 	drop_last: bool = False,
 	success_anchor_steps: tuple[int, ...] = (0, 10, 20, 30, 40, 50, 60, 70, 80),
 	failure_max_anchor_offset: int = 50,
+	failure_ratio: float = 0.5,
 	goal_step_override: int | None = None,
 	prompt: str = DEFAULT_FAILURE_PROMPT,
 	answer_success: str = DEFAULT_SUCCESS_ANSWERS,
@@ -480,6 +508,7 @@ def build_dataloader(
 		drop_last=drop_last,
 		success_anchor_steps=success_anchor_steps,
 		failure_max_anchor_offset=failure_max_anchor_offset,
+		failure_ratio=failure_ratio,
 		goal_step_override=goal_step_override,
 		prompt=prompt,
 		answer_success=answer_success,

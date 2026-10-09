@@ -8,7 +8,7 @@ import numpy as np
 from flax import nnx, struct
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
-from model.diffusion.flow_matching import UNet1DConditioned
+from model.diffusion.flow_matching import FLOW_TIME_EMBEDDING_SCALE, UNet1DConditioned
 from model.diffusion.modules.scene_tokenizer import SceneTokenizer
 from model.diffusion.modules.mlp import MLP
 from model.diffusion.modules.point_net import PointNet
@@ -57,12 +57,14 @@ class FlowMatching(nnx.Module):
     def __init__(
         self,
         velocity_fn: nnx.Module,
-        default_num_steps: int = 100,
+        num_denoising_steps: int = 50,
         clip_output: bool = False,
+        enable_film: bool = False,
     ):
         self.velocity_fn = velocity_fn
-        self.default_num_steps = int(default_num_steps)
+        self.num_denoising_steps = int(num_denoising_steps)
         self.clip_output = bool(clip_output)
+        self.enable_film = bool(enable_film)
 
     # ------------------------------------------------------------------
     # Time utilities
@@ -80,16 +82,12 @@ class FlowMatching(nnx.Module):
         self,
         t: jnp.ndarray,
     ) -> jnp.ndarray:
-        """Map normalized FM time [0, 1] to timestep-embedding scale.
+        """Map normalized FM time t in [0, 1] to the sinusoidal embedding input.
 
-        The existing UNet was originally built for diffusion timesteps around
-        [0, 100). Feeding raw [0, 1] values would make sinusoidal timestep
-        embeddings vary relatively little.
-
-        We therefore preserve the old embedding scale without changing the
-        actual Flow Matching definition.
+        Training and sampling both use t * FLOW_TIME_EMBEDDING_SCALE. The
+        number of ODE steps never changes this scale.
         """
-        return t * float(self.default_num_steps - 1)
+        return t * FLOW_TIME_EMBEDDING_SCALE
 
     # ------------------------------------------------------------------
     # Probability path
@@ -178,6 +176,8 @@ class FlowMatching(nnx.Module):
             cond2=cond2,
             cond2_mask=cond2_mask,
         )
+        if not self.enable_film:
+            return v_cond
         if isinstance(guidance_scale, (int, float, np.integer, np.floating)) and float(guidance_scale) == 1.0:
             return v_cond
 
@@ -464,7 +464,7 @@ class FlowMatching(nnx.Module):
         """
 
         if num_steps is None:
-            num_steps = self.default_num_steps
+            num_steps = self.num_denoising_steps
 
         x_init = jax.random.normal(
             rng,
@@ -531,7 +531,7 @@ class FlowMatching(nnx.Module):
             num_steps = max(
                 1,
                 int(round(
-                    self.default_num_steps * t_start
+                    self.num_denoising_steps * t_start
                 )),
             )
 
@@ -714,15 +714,23 @@ class FlowMatchingPolicy(nnx.Module):
         ego_dim: int = 5,
         other_dim: int = 15,
         predict_horizon: int = 25,
-        subgoal_conditioned: bool = False,
-        default_num_steps: int = 100,
+        goal_conditioned: bool = True,
+        enable_film: bool = False,
+        num_denoising_steps: int = 50,
         **kwargs: Any,
     ) -> None:
-        del inst_attr_dim, subgoal_conditioned, kwargs
+        if "default_num_steps" in kwargs:
+            num_denoising_steps = int(kwargs.pop("default_num_steps"))
+        kwargs.pop("flow_num_steps", None)
+        kwargs.pop("flow_time_embedding_scale", None)
+        kwargs.pop("subgoal_conditioned", None)
+        del inst_attr_dim, kwargs
 
         self.target_dim = target_dim
         self.predict_horizon = predict_horizon
         self.cond_dim = cond_dim
+        self.goal_conditioned = bool(goal_conditioned)
+        self.enable_film = bool(enable_film)
 
         # --------------------------------------------------------------
         # Scene conditioning
@@ -736,26 +744,28 @@ class FlowMatchingPolicy(nnx.Module):
             hidden_dim=hidden_dim,
             cond_dim=cond_dim,
             token_num=32,
+            include_goal=self.goal_conditioned,
             rngs=rngs,
         )
 
         # --------------------------------------------------------------
-        # Failure-reason / gold-id conditioning
+        # Failure-reason / gold-id conditioning (finetune / FiLM only)
         # --------------------------------------------------------------
 
-        self.collision_object_encoder = MLP(
-            [other_dim, hidden_dim, hidden_dim, cond_dim],
-            rngs=rngs,
-        )
-        self.offroad_segment_encoder = PointNet(
-            map_attr_dim,
-            cond_dim,
-            rngs=rngs,
-        )
-        self.goal_encoder = MLP(
-            [3, hidden_dim, hidden_dim, cond_dim],
-            rngs=rngs,
-        )
+        if self.enable_film:
+            self.collision_object_encoder = MLP(
+                [other_dim, hidden_dim, hidden_dim, cond_dim],
+                rngs=rngs,
+            )
+            self.offroad_segment_encoder = PointNet(
+                map_attr_dim,
+                cond_dim,
+                rngs=rngs,
+            )
+            self.goal_encoder = MLP(
+                [3, hidden_dim, hidden_dim, cond_dim],
+                rngs=rngs,
+            )
 
         # --------------------------------------------------------------
         # Velocity field
@@ -768,12 +778,14 @@ class FlowMatchingPolicy(nnx.Module):
             time_emb_dim=cond_dim,
             horizon=predict_horizon,
             hidden_dim=hidden_dim,
+            enable_film=self.enable_film,
             rngs=rngs,
         )
 
         self.flow = FlowMatching(
             velocity_fn=velocity_fn,
-            default_num_steps=default_num_steps,
+            num_denoising_steps=num_denoising_steps,
+            enable_film=self.enable_film,
         )
 
         # --------------------------------------------------------------
@@ -1023,13 +1035,18 @@ class FlowMatchingPolicy(nnx.Module):
         features = self._as_features(
             input_features
         )
-        failure_cond, failure_mask = self._failure_condition_impl(features)
+        scene_cond = self._condition_impl(features)
+        if not self.enable_film:
+            batch_size = scene_cond.shape[0]
+            failure_cond = jnp.zeros(
+                (batch_size, self.cond_dim),
+                dtype=scene_cond.dtype,
+            )
+            failure_mask = jnp.zeros((batch_size,), dtype=bool)
+            return scene_cond, failure_cond, failure_mask
 
-        return (
-            self._condition_impl(features),
-            failure_cond,
-            failure_mask,
-        )
+        failure_cond, failure_mask = self._failure_condition_impl(features)
+        return scene_cond, failure_cond, failure_mask
 
     def input_features_projection(
         self,

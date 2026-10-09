@@ -63,9 +63,9 @@ def build_training_components(args: FlowMatchingPretrainConfig):
         tl_attr_dim=args.tl_attr_dim,
         inst_attr_dim=args.inst_dim,
         predict_horizon=args.predict_horizon,
-        flow_time_embedding_scale=args.flow_time_embedding_scale,
-        flow_num_steps=args.flow_num_steps,
-        subgoal_conditioned=args.subgoal_conditioned,
+        goal_conditioned=args.goal_conditioned,
+        enable_film=bool(args.enable_film),
+        num_denoising_steps=args.num_denoising_steps,
     )
 
     total_steps = max(1, args.epochs * args.steps_per_epoch)
@@ -680,7 +680,7 @@ def main():
         args,
         preprocess_cfg,
         args.grad_clip_norm,
-        args.goal_mask_prob,
+        args.goal_mask_prob if args.goal_conditioned else 0.0,
         data_parallel_enabled,
         data_mesh,
         args.ema_update_every,

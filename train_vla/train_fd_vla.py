@@ -83,6 +83,7 @@ class FDTrainingConfig:
 	scene_hidden_dim: int = 512
 	success_anchor_steps: tuple[int, ...] = DEFAULT_SUCCESS_ANCHOR_STEPS
 	failure_max_anchor_offset: int = 50
+	failure_ratio: float = 0.5
 	num_success_val_files: int = 1
 	num_failure_val_files: int = 1
 	tag: str | None = None
@@ -352,6 +353,7 @@ def run_training(cfg: FDTrainingConfig) -> None:
 		drop_last=False,
 		success_anchor_steps=cfg.success_anchor_steps,
 		failure_max_anchor_offset=cfg.failure_max_anchor_offset,
+		failure_ratio=cfg.failure_ratio,
 	)
 	val_loader = None
 	if success_val_paths or failure_val_paths:
@@ -369,6 +371,7 @@ def run_training(cfg: FDTrainingConfig) -> None:
 			drop_last=False,
 			success_anchor_steps=cfg.success_anchor_steps,
 			failure_max_anchor_offset=cfg.failure_max_anchor_offset,
+			failure_ratio=cfg.failure_ratio,
 		)
 
 	model = build_vla_model(cfg)
@@ -590,9 +593,18 @@ def parse_args() -> FDTrainingConfig:
 	parser.add_argument("--scene_hidden_dim", type=int, default=512)
 	parser.add_argument("--success_anchor_steps", type=str, default=None)
 	parser.add_argument("--failure_max_anchor_offset", type=int, default=50)
+	parser.add_argument(
+		"--failure_ratio",
+		type=float,
+		default=0.5,
+		help="Target fraction of each batch that comes from failure examples. "
+		"Rounded to an integer count that fits in --batch_size.",
+	)
 	parser.add_argument("--tag", type=str, default=None)
 
 	args = parser.parse_args()
+	if not 0.0 <= args.failure_ratio <= 1.0:
+		parser.error("--failure_ratio must be in [0, 1]")
 	return FDTrainingConfig(
 		success_cache_dir=args.success_cache_dir,
 		failure_cache_dir=args.failure_cache_dir,
@@ -644,6 +656,7 @@ def parse_args() -> FDTrainingConfig:
 		scene_hidden_dim=args.scene_hidden_dim,
 		success_anchor_steps=_parse_int_tuple(args.success_anchor_steps, DEFAULT_SUCCESS_ANCHOR_STEPS),
 		failure_max_anchor_offset=args.failure_max_anchor_offset,
+		failure_ratio=args.failure_ratio,
 		tag=args.tag,
 	)
 

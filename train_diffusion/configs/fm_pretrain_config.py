@@ -42,9 +42,8 @@ class FlowMatchingPretrainConfig:
     inst_dim: int = 768
     model_dt: float = 0.2
 
-    flow_num_steps: int = 50
+    num_denoising_steps: int = 50
     flow_solver: str = "euler"
-    flow_time_embedding_scale: int = 1000
 
     resample_t_start: float = 0.2
     resample_num_steps: int = 20
@@ -72,7 +71,8 @@ class FlowMatchingPretrainConfig:
     jax_compilation_cache_dir: str = "/zfsauton/scratch/mineuih/waymax_rs/.jax_compilation_cache"
 
     preprocess_cfg: PreprocessConfig = PreprocessConfig()
-    subgoal_conditioned: bool = False
+    goal_conditioned: bool = True
+    enable_film: bool = False
     tag: str | None = None
 
 
@@ -80,7 +80,7 @@ def parse_args() -> FlowMatchingPretrainConfig:
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--tfrecord_path", type=str, default="/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord@1000")
+    parser.add_argument("--tfrecord_path", type=str, default="/zfsauton/scratch/mineuih/womd/tf_example/training/training_tfexample.tfrecord@1000")
     parser.add_argument("--max_num_objects", type=int, default=128)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--shuffle_seed", type=int, default=0)
@@ -113,9 +113,8 @@ def parse_args() -> FlowMatchingPretrainConfig:
     parser.add_argument("--inst_dim", type=int, default=768)
     parser.add_argument("--model_dt", type=float, default=0.2)
 
-    parser.add_argument("--flow_num_steps", type=int, default=50)
+    parser.add_argument("--num_denoising_steps", type=int, default=50)
     parser.add_argument("--flow_solver", type=str, default="euler", choices=["euler", "heun"])
-    parser.add_argument("--flow_time_embedding_scale", type=int, default=1000)
 
     parser.add_argument("--resample_t_start", type=float, default=0.2)
     parser.add_argument("--resample_num_steps", type=int, default=20)
@@ -143,15 +142,13 @@ def parse_args() -> FlowMatchingPretrainConfig:
     parser.add_argument("--wandb_mode", type=str, default="online", choices=["online", "offline", "disabled"])
     parser.add_argument("--tag", type=str, default=None)
     parser.add_argument("--data_parallel", action="store_true")
-    parser.add_argument("--subgoal_conditioned", action="store_true", default=False)
+    parser.add_argument("--goal_conditioned", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--jax_compilation_cache_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/.jax_compilation_cache")
 
     args = parser.parse_args()
 
-    if args.flow_num_steps <= 0:
-        parser.error("--flow_num_steps must be > 0")
-    if args.flow_time_embedding_scale <= 1:
-        parser.error("--flow_time_embedding_scale must be > 1")
+    if args.num_denoising_steps <= 0:
+        parser.error("--num_denoising_steps must be > 0")
     if not 0.0 < args.resample_t_start <= 1.0:
         parser.error("--resample_t_start must be in (0, 1]")
     if args.resample_num_steps <= 0:

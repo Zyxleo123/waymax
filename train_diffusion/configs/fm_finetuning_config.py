@@ -50,8 +50,9 @@ class FlowMatchingFinetuningConfig:
 	tl_attr_dim: int = 11
 	other_dim: int = 15
 	inst_dim: int = 768
-	subgoal_conditioned: bool = False
-	default_num_steps: int = 100
+	goal_conditioned: bool = True
+	enable_film: bool = False
+	num_denoising_steps: int = 50
 
 	max_range: float = 30.0
 	ego_range: float = 100.0
@@ -119,8 +120,8 @@ def parse_args() -> FlowMatchingFinetuningConfig:
 	parser.add_argument("--tl_attr_dim", type=int, default=11)
 	parser.add_argument("--other_dim", type=int, default=15)
 	parser.add_argument("--inst_dim", type=int, default=768)
-	parser.add_argument("--subgoal_conditioned", action="store_true", default=False)
-	parser.add_argument("--default_num_steps", type=int, default=100)
+	parser.add_argument("--goal_conditioned", action=argparse.BooleanOptionalAction, default=True)
+	parser.add_argument("--num_denoising_steps", type=int, default=50)
 
 	parser.add_argument("--max_range", type=float, default=30.0)
 	parser.add_argument("--ego_range", type=float, default=100.0)

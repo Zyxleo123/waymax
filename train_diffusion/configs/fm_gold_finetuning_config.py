@@ -69,7 +69,9 @@ class FlowMatchingGoldFinetuningConfig:
 	tl_attr_dim: int = 11
 	other_dim: int = 15
 	inst_dim: int = 768
-	default_num_steps: int = 100
+	goal_conditioned: bool = True
+	enable_film: bool = True
+	num_denoising_steps: int = 50
 
 	max_range: float = 30.0
 	ego_range: float = 100.0
@@ -138,7 +140,7 @@ def parse_args() -> FlowMatchingGoldFinetuningConfig:
 	parser.add_argument("--tag", type=str, default=None)
 	parser.add_argument("--data_parallel", action="store_true")
 
-	parser.add_argument("--lr", type=float, default=2e-6)
+	parser.add_argument("--lr", type=float, default=5e-5)
 	parser.add_argument("--weight_decay", type=float, default=1e-4)
 	parser.add_argument("--warmup_steps", type=int, default=500)
 	parser.add_argument("--grad_clip_norm", type=float, default=1.0)
@@ -152,7 +154,8 @@ def parse_args() -> FlowMatchingGoldFinetuningConfig:
 	parser.add_argument("--tl_attr_dim", type=int, default=11)
 	parser.add_argument("--other_dim", type=int, default=15)
 	parser.add_argument("--inst_dim", type=int, default=768)
-	parser.add_argument("--default_num_steps", type=int, default=100)
+	parser.add_argument("--goal_conditioned", action=argparse.BooleanOptionalAction, default=True)
+	parser.add_argument("--num_denoising_steps", type=int, default=50)
 
 	parser.add_argument("--max_range", type=float, default=30.0)
 	parser.add_argument("--ego_range", type=float, default=100.0)

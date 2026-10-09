@@ -43,7 +43,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tfrecord_dir",
         type=str,
-        default="/zfsauton/scratch/eshau/womd/tf_example/",
+        default="/zfsauton/scratch/mineuih/womd/tf_example/",
     )
     parser.add_argument(
         "--split", type=str, default="training", choices=["training", "validation"]
@@ -62,7 +62,10 @@ def _parse_args() -> argparse.Namespace:
                          choices=["diffusion", "es", "vla", "log-replay", "temporal-vla", "fm", "fm-fd"])
     parser.add_argument("--fd_vla_ckpt_path", type=str, default=None)
     parser.add_argument("--guidance_scale", type=float, default=2.0)
-    parser.add_argument("--cfg_t_start", type=float, default=0.2)
+    parser.add_argument("--num_denoising_steps", type=int, default=None)
+    parser.add_argument("--goal_conditioned", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--enable_film", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--cfg_t_start", type=float, default=1.0)
     parser.add_argument("--cfg_correction_mode", type=str, default="resample", choices=["resample", "sample"])
     parser.add_argument("--fd_torch_device", type=str, default=None)
     parser.add_argument("--start_timestep", type=int, default=10)
@@ -71,7 +74,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max_num_objects", type=int, default=128)
     parser.add_argument("--num_worlds", type=int, default=5)
-    parser.add_argument("--num_scenarios", type=int, default=10000000)
+    parser.add_argument("--num_scenarios", type=int, default=1000)
     parser.add_argument("--replan_interval_steps", type=int, default=10)
     parser.add_argument("--instruction_interval_steps", type=int, default=10)
     parser.add_argument("--visualize_mode", type=str, default="none", choices=["all", "success", "failure", "none"])
@@ -98,6 +101,9 @@ def _load_fm_model_for_inference(
     metadata_path: str | None = None,
     seed: int = 0,
     skip_checkpoint_load: bool = False,
+    goal_conditioned: bool | None = None,
+    enable_film: bool | None = None,
+    num_denoising_steps: int | None = None,
 ):
     from data.types import PreprocessConfig
     from model.diffusion.fm_policy import FlowMatchingPolicy
@@ -143,8 +149,24 @@ def _load_fm_model_for_inference(
         ego_dim=int(metadata.get("ego_dim", 5)),
         other_dim=int(metadata.get("other_dim", 15)),
         predict_horizon=int(metadata.get("predict_horizon", preprocess_cfg.predict_horizon)),
-        subgoal_conditioned=bool(metadata.get("subgoal_conditioned", False)),
-        default_num_steps=int(metadata.get("flow_num_steps", 100)),
+        goal_conditioned=bool(
+            metadata.get("goal_conditioned", True)
+            if goal_conditioned is None
+            else goal_conditioned
+        ),
+        enable_film=bool(
+            metadata.get("enable_film", True)
+            if enable_film is None
+            else enable_film
+        ),
+        num_denoising_steps=int(
+            num_denoising_steps
+            if num_denoising_steps is not None
+            else metadata.get(
+                "num_denoising_steps",
+                metadata.get("flow_num_steps", metadata.get("default_num_steps", 50)),
+            )
+        ),
         rngs=nnx.Rngs(int(seed)),
     )
 
@@ -247,6 +269,9 @@ def main(args: argparse.Namespace) -> None:
             metadata_path=None,
             seed=args.seed,
             skip_checkpoint_load=False,
+            goal_conditioned=args.goal_conditioned,
+            enable_film=args.enable_film,
+            num_denoising_steps=args.num_denoising_steps,
         )
 
         from planner.fm_planner import FMPlanner
@@ -256,7 +281,7 @@ def main(args: argparse.Namespace) -> None:
             preprocess_cfg=preprocess_cfg,
             population_size=args.population_size,
             num_worlds=args.num_worlds,
-            num_steps=None,
+            num_steps=args.num_denoising_steps,
             solver="euler",
         )
     elif args.planner == "fm-fd":
@@ -272,6 +297,9 @@ def main(args: argparse.Namespace) -> None:
             metadata_path=None,
             seed=args.seed,
             skip_checkpoint_load=False,
+            goal_conditioned=args.goal_conditioned,
+            enable_film=args.enable_film,
+            num_denoising_steps=args.num_denoising_steps,
         )
 
         from planner.fm_fd_planner import FMFDPlanner
@@ -282,7 +310,7 @@ def main(args: argparse.Namespace) -> None:
             preprocess_cfg=preprocess_cfg,
             population_size=1,
             num_worlds=args.num_worlds,
-            num_steps=None,
+            num_steps=args.num_denoising_steps,
             solver="euler",
             guidance_scale=args.guidance_scale,
             cfg_t_start=args.cfg_t_start,

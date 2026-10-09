@@ -189,7 +189,9 @@ def _build_model(cfg: FlowMatchingGoldFinetuningConfig) -> FlowMatchingPolicy:
 		tl_attr_dim=cfg.tl_attr_dim,
 		inst_attr_dim=cfg.inst_dim,
 		predict_horizon=cfg.predict_horizon,
-		default_num_steps=cfg.default_num_steps,
+		goal_conditioned=cfg.goal_conditioned,
+		enable_film=bool(cfg.enable_film),
+		num_denoising_steps=cfg.num_denoising_steps,
 	)
 
 
@@ -224,6 +226,9 @@ def _load_pretrained_overlapping(checkpoint_path: str, template_params, template
 		"collision_object_encoder",
 		"offroad_segment_encoder",
 		"goal_encoder",
+		"down_film_blocks",
+		"mid_film_blocks",
+		"up_film_blocks",
 	)
 	unexpected_missing = [
 		path

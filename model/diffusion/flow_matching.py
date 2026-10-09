@@ -8,6 +8,10 @@ import jax.numpy as jnp
 from flax import nnx
 from model.diffusion.modules.attention_2 import CrossAttention, SelfAttention, AttentionBlock
 
+# Normalized FM time t in [0, 1] is scaled into this range before the
+# sinusoidal timestep embedding. Sampling step count does not change this.
+FLOW_TIME_EMBEDDING_SCALE = 1000.0
+
 
 def sinusoidal_timestep_embedding(t: jnp.ndarray, dim: int, max_period: int = 10_000) -> jnp.ndarray:
     t = jnp.asarray(t)
@@ -144,12 +148,14 @@ class UNet1DConditioned(nnx.Module):
         hidden_dim: int = 512,
         groups: int = 8,
         horizon: int = 25,
+        enable_film: bool = False,
     ):
         self.in_ch = in_ch
         self.time_emb_dim = time_emb_dim
         self.num_res_blocks = num_res_blocks
         self.n_down = len(ch_mult)
         self.horizon = horizon
+        self.enable_film = bool(enable_film)
 
         # Condition projection: project tokens to base_ch dimension for cross-attention
         self.cond_proj = nnx.Linear(cond_dim, base_ch, rngs=rngs)
@@ -168,18 +174,20 @@ class UNet1DConditioned(nnx.Module):
             for _ in range(num_res_blocks):
                 down_blocks.append(ResBlock1d(ch, out_ch, base_ch, base_ch, hidden_dim=hidden_dim, rngs=rngs, groups=groups))
                 down_attn_blocks.append(AttentionBlock(out_ch, context_dim=base_ch, attn_hidden_dim=hidden_dim, ffn_hidden_dim=hidden_dim, n_layers=2, rngs=rngs))
-                down_film_blocks.append(FiLMBlock(out_ch, cond2_dim, hidden_dim=hidden_dim, rngs=rngs))
+                if self.enable_film:
+                    down_film_blocks.append(FiLMBlock(out_ch, cond2_dim, hidden_dim=hidden_dim, rngs=rngs))
                 ch = out_ch
             skip_channels.append(ch)
-            downsamples.append(Downsample1d(ch, rngs=rngs) if i != len(ch_mult) - 1 else Identity1d())\
+            downsamples.append(Downsample1d(ch, rngs=rngs) if i != len(ch_mult) - 1 else Identity1d())
             
         mid_film_blocks = []
         self.mid_block1 = ResBlock1d(ch, ch, base_ch, base_ch, hidden_dim=hidden_dim, rngs=rngs, groups=groups)
         self.mid_attn_block1 = AttentionBlock(ch, context_dim=base_ch, attn_hidden_dim=hidden_dim, ffn_hidden_dim=hidden_dim, n_layers=2, rngs=rngs)
-        mid_film_blocks.append(FiLMBlock(ch, cond2_dim, hidden_dim=hidden_dim, rngs=rngs))
         self.mid_block2 = ResBlock1d(ch, ch, base_ch, base_ch, hidden_dim=hidden_dim, rngs=rngs, groups=groups)
         self.mid_attn_block2 = AttentionBlock(ch, context_dim=base_ch, attn_hidden_dim=hidden_dim, ffn_hidden_dim=hidden_dim, n_layers=2, rngs=rngs)
-        mid_film_blocks.append(FiLMBlock(ch, cond2_dim, hidden_dim=hidden_dim, rngs=rngs))
+        if self.enable_film:
+            mid_film_blocks.append(FiLMBlock(ch, cond2_dim, hidden_dim=hidden_dim, rngs=rngs))
+            mid_film_blocks.append(FiLMBlock(ch, cond2_dim, hidden_dim=hidden_dim, rngs=rngs))
 
         up_blocks = []
         upsamples = []
@@ -190,7 +198,8 @@ class UNet1DConditioned(nnx.Module):
             for _ in range(num_res_blocks):
                 up_blocks.append(ResBlock1d(ch + skip_channels[i], out_ch, base_ch, base_ch, hidden_dim=hidden_dim, rngs=rngs, groups=groups))
                 up_attn_blocks.append(AttentionBlock(out_ch, context_dim=base_ch, attn_hidden_dim=hidden_dim, ffn_hidden_dim=hidden_dim, n_layers=2, rngs=rngs))
-                up_film_blocks.append(FiLMBlock(out_ch, cond2_dim, hidden_dim=hidden_dim, rngs=rngs))
+                if self.enable_film:
+                    up_film_blocks.append(FiLMBlock(out_ch, cond2_dim, hidden_dim=hidden_dim, rngs=rngs))
                 ch = out_ch
             upsamples.append(Upsample1d(ch, rngs=rngs) if i != 0 else Identity1d())
 
@@ -202,9 +211,10 @@ class UNet1DConditioned(nnx.Module):
         self.up_blocks = nnx.List(up_blocks)
         self.up_attn_blocks = nnx.List(up_attn_blocks)
         self.upsamples = nnx.List(upsamples)
-        self.down_film_blocks = nnx.List(down_film_blocks)
-        self.mid_film_blocks = nnx.List(mid_film_blocks)
-        self.up_film_blocks = nnx.List(up_film_blocks)
+        if self.enable_film:
+            self.down_film_blocks = nnx.List(down_film_blocks)
+            self.mid_film_blocks = nnx.List(mid_film_blocks)
+            self.up_film_blocks = nnx.List(up_film_blocks)
         self.out_norm = nnx.GroupNorm(num_features=ch, num_groups=min(groups, ch), epsilon=1e-5, rngs=rngs)
         self.out_conv = nnx.Conv(in_features=ch, out_features=in_ch, kernel_size=(3,), padding="SAME", rngs=rngs)
 
@@ -212,14 +222,14 @@ class UNet1DConditioned(nnx.Module):
         """Forward pass with cross-attention conditioning.
         
         Args:
-            x: [B, T, 5] input trajectory
-            t: [B] timestep indices
+            x: [B, C, T] input trajectory
+            t: [B] scaled timestep values (typically t_norm * 1000)
             c1: [B, n_cond_tokens, cond_dim] condition tokens for cross-attention
-            c2: [B, cond_dim] second condition tokens
-            c2_mask: [B] mask for second condition tokens
+            c2: [B, cond_dim] FiLM condition vector (ignored if enable_film=False)
+            c2_mask: [B] mask for FiLM condition (ignored if enable_film=False)
 
         Returns:
-            [B, T, 5] denoised trajectory
+            [B, C, T] predicted velocity
         """
         divisor = 2 ** (self.n_down - 1)
         if self.horizon % divisor != 0:
@@ -239,17 +249,20 @@ class UNet1DConditioned(nnx.Module):
             for _ in range(self.num_res_blocks):
                 h = self.down_blocks[rb](h, time_feat)
                 h = self.down_attn_blocks[rb](h, c1)
-                h = self.down_film_blocks[rb](h, c2, c2_mask)
+                if self.enable_film:
+                    h = self.down_film_blocks[rb](h, c2, c2_mask)
                 rb += 1
             skips.append(h)
             h = self.downsamples[i](h)
 
         h = self.mid_block1(h, time_feat)
         h = self.mid_attn_block1(h, c1)
-        h = self.mid_film_blocks[0](h, c2, c2_mask)
+        if self.enable_film:
+            h = self.mid_film_blocks[0](h, c2, c2_mask)
         h = self.mid_block2(h, time_feat)
         h = self.mid_attn_block2(h, c1)
-        h = self.mid_film_blocks[1](h, c2, c2_mask)
+        if self.enable_film:
+            h = self.mid_film_blocks[1](h, c2, c2_mask)
         
         rb_up = 0
         for i in range(self.n_down):
@@ -263,7 +276,8 @@ class UNet1DConditioned(nnx.Module):
                 h = jnp.concatenate([h, skip], axis=-1)
                 h = self.up_blocks[rb_up](h, time_feat)
                 h = self.up_attn_blocks[rb_up](h, c1)
-                h = self.up_film_blocks[rb_up](h, c2, c2_mask)
+                if self.enable_film:
+                    h = self.up_film_blocks[rb_up](h, c2, c2_mask)
                 rb_up += 1
 
             h = self.upsamples[i](h)
@@ -306,13 +320,11 @@ class FlowMatching(nnx.Module):
     def __init__(
         self,
         denoise_fn: nnx.Module,
-        flow_time_embedding_scale: int = 1000,
-        flow_num_steps: int = 50,
+        num_denoising_steps: int = 50,
         clip_denoised: bool = False,
     ):
         self.denoise_fn = denoise_fn
-        self.flow_time_embedding_scale = int(flow_time_embedding_scale)
-        self.flow_num_steps = int(flow_num_steps)
+        self.num_denoising_steps = int(num_denoising_steps)
         self.clip_denoised = clip_denoised
 
     # ------------------------------------------------------------------
@@ -331,16 +343,12 @@ class FlowMatching(nnx.Module):
         self,
         t: jnp.ndarray,
     ) -> jnp.ndarray:
-        """Convert normalized FM time [0, 1] to the range previously used
-        by the diffusion timestep embedding.
+        """Map normalized FM time t in [0, 1] to the sinusoidal embedding input.
 
-        Your UNet currently feeds t directly into sinusoidal_timestep_embedding.
-        Using [0, 1] directly makes the time embeddings vary only weakly.
-
-        Scaling it back to approximately [0, timesteps-1] lets you keep the
-        existing UNet implementation unchanged.
+        Sampling step count is independent of this scale; both training and
+        inference always use t * FLOW_TIME_EMBEDDING_SCALE.
         """
-        return t * float(self.flow_time_embedding_scale - 1)
+        return t * FLOW_TIME_EMBEDDING_SCALE
 
     # ------------------------------------------------------------------
     # Forward flow
@@ -535,7 +543,7 @@ class FlowMatching(nnx.Module):
             * sampling_temp
         )
 
-        num_steps = self.flow_num_steps
+        num_steps = self.num_denoising_steps
         dt = 1.0 / num_steps
 
         def body(
@@ -615,7 +623,7 @@ class FlowMatching(nnx.Module):
         # Amount of corruption
         t_start = (
             float(n_timesteps)
-            / float(self.flow_num_steps)
+            / float(self.num_denoising_steps)
         )
 
         noise = (
@@ -645,7 +653,7 @@ class FlowMatching(nnx.Module):
         #   t_start = n_timesteps / total_timesteps
         #
         # this gives exactly the same dt used during full sampling.
-        dt = 1.0 / self.flow_num_steps
+        dt = 1.0 / self.num_denoising_steps
 
         def body(
             i: int,
@@ -655,7 +663,7 @@ class FlowMatching(nnx.Module):
             t_scalar = (
                 float(n_timesteps)
                 - i.astype(jnp.float32)
-            ) / float(self.flow_num_steps)
+            ) / float(self.num_denoising_steps)
 
             t = jnp.full(
                 (batch_size,),
@@ -744,11 +752,11 @@ class FlowMatching(nnx.Module):
 
         if (
             n_timesteps <= 0
-            or n_timesteps > self.flow_num_steps
+            or n_timesteps > self.num_denoising_steps
         ):
             raise ValueError(
                 f"n_timesteps must be in "
-                f"[1, {self.flow_num_steps}], "
+                f"[1, {self.num_denoising_steps}], "
                 f"got {n_timesteps}"
             )
 

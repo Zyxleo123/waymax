@@ -182,8 +182,9 @@ def _build_model_from_config(
         tl_attr_dim=cfg.tl_attr_dim,
         inst_attr_dim=cfg.inst_dim,
         predict_horizon=cfg.predict_horizon,
-        subgoal_conditioned=cfg.subgoal_conditioned,
-        default_num_steps=cfg.default_num_steps,
+        goal_conditioned=cfg.goal_conditioned,
+        enable_film=bool(cfg.enable_film),
+        num_denoising_steps=cfg.num_denoising_steps,
     )
 
 
@@ -270,7 +271,7 @@ def _maybe_mask_goal_xy(
     rng: jax.Array,
     cfg: FlowMatchingFinetuningConfig,
 ) -> dict[str, jax.Array]:
-    if "goal_xy" not in features:
+    if not cfg.goal_conditioned or "goal_xy" not in features:
         return features
 
     goal_mask_prob = jnp.asarray(
