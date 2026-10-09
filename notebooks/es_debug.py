@@ -121,6 +121,8 @@ def load_scenario(
 ) -> Scenario:
     from waymax import config as waymax_config
 
+    if not Path(tfrecord_path).is_file():
+        raise FileNotFoundError(f"tfrecord not found (expected a file): {tfrecord_path}")
     ds_cfg = dataclasses.replace(
         waymax_config.WOD_1_3_1_TRAINING,
         path=str(tfrecord_path),
