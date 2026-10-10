@@ -12,8 +12,10 @@ world step. A plan already clear of every safety margin has `L = 0` at
 unchanged, so this step needs no trigger and no acceptance test.
 
 This file covers only what you need to bolt the repair onto another planner,
-such as the Diffusion-ES in `es_baseline/`. The design history is in the module
-docstrings, mainly [lateral_opt.py](lateral_opt.py).
+such as the Diffusion-ES in `es_baseline/`. It describes one configuration, the
+no-rule arm `o_am`. [lateral_opt.py](lateral_opt.py) and
+[proposal_select.py](proposal_select.py) also hold earlier rule-based arms;
+you need only the functions named below.
 
 ## What it buys
 
@@ -32,16 +34,8 @@ splits, 1450 scenes × 4 seeds, constant-velocity neighbours, no oracle.
 * About 44 of the 173 "failure" scenes were a clock bug, not a policy failure (see
   [Pitfall 2](#2-the-es-preprocess-still-has-the-first-pair-world-dt-bug)).
 
-**Already tried: putting it *inside* an ES population.** It is a small gain on
-the hard splits and a wash on the corpus:
-
-* Failure split: +0.025 vs. running it once on the base plan.
-* Corpus: m2 +0.0106 vs +0.0104.
-* The ride is rougher.
-* It costs 15–25× more per triggered replan.
-
-So the recommended integration is **recipe A** below: run the repair once on
-whatever plan your planner picks.
+The integration is to run the repair once on whatever plan your planner
+picks (see [the recipe](#recipe--repair-the-plan-your-es-picks)).
 
 ## How it works (the essentials)
 
@@ -117,17 +111,14 @@ All of them are pure JAX/numpy plus `waymax`. Nothing here touches the denoiser.
 | file | what you use |
 |---|---|
 | [lateral_opt.py](lateral_opt.py) | `LateralOptConfig`, `make_lateral_optimizer`, `edit_world`, `project_onto_path` |
-| [branching.py](branching.py) | `lateral_offset`, `path_retime`, `fd_velocity` (called by `edit_world`). `world_to_norm` only if you need the edit back in the denoiser's normalized space (recipe B) |
+| [branching.py](branching.py) | `lateral_offset`, `path_retime`, `fd_velocity` (called by `edit_world`) |
 | [safety_objective.py](safety_objective.py) | `SafetyObjectiveConfig`, `candidate_safety`, `predicted_neighbor_window` (cv neighbours) |
 | [safety_loss.py](safety_loss.py) | `SafetyLossConfig`, `safety_terms` (the clearances and barrier) |
 | `data/preprocess.py` (repo root) | `compute_world_dt_seconds(state, 0.1, "median")`, called only when `neighbor_pred != "log"`. See [Pitfall 3](#3-module-name-collision-with-es_baselinedata) |
 
-These are optional but useful:
-
-* [proposal_select.py](proposal_select.py) `make_scorer`: the exact hard-clearance
-  scorer `(clear, edge, agent, prog)`, which you need for the projection gate in recipe B.
-* [es_population.py](es_population.py) `PopulationES._project_opt`: the tested
-  reference for recipe B.
+The tested reference for how `o_am` calls these is
+`ProposalSelectEval._argmin` in [proposal_select.py](proposal_select.py) (around
+line 858).
 
 ## The API
 
@@ -162,7 +153,7 @@ Everything else stays at its default:
 
 The other arguments are `n=20`, `neighbor_pred="cv"`, and the starts `init0` plus `initprev`.
 
-## Recipe A — repair the plan your ES picks (recommended)
+## Recipe — repair the plan your ES picks
 
 This adds one line after ES selection: the ES chooses *which* manoeuvre, and the
 optimizer makes it clear the margins. It is `o_am` applied to the ES winner
@@ -221,44 +212,12 @@ executed plan on the planner object to feed `world_prev`.
 This sketch is `ProposalSelectEval._argmin` ([proposal_select.py](proposal_select.py))
 with the evaluation bookkeeping removed. That function is the tested version.
 
-## Recipe B — project every population member inside the ES loop
-
-Use this only if you specifically want the population to see repaired members.
-It was measured to buy little; see above.
-
-1. **Order matters: mutate, then project.** Never re-noise/denoise a projected
-   member. This diffusion's lowest noise level is already 2.5 m per waypoint, and
-   a 0.1–1.6 m repair does not survive even one deterministic denoising step: it
-   kept 12–30% of the edit, and feasibility fell from 67% to ~0%. So the
-   projection must be the **last** operator before scoring (`order:sp` in
-   [es_population.py](es_population.py)).
-2. **Project only violating members.** Score each member with
-   `proposal_select.make_scorer(objcfg, "cv", "median")`, then:
-   * Run the optimizer with `active_b = (clear < 0)`. Loop over members, each a `[B, W, 5]` batch.
-   * A member takes its edit if the edit is clean (`clear >= 0`) and keeps progress
-     within 1 m of its own. Otherwise it takes the edit only when the edit is
-     clearer than the member was.
-3. **Rank feasible members first.** Fitness should put every feasible member
-   (`clear >= 0` and progress within tolerance) above every infeasible one, and
-   rank infeasible members by their total shortfall. The stock ES score
-   `collision * offroad` is binary and goal-agnostic, so it cannot rank infeasible
-   members toward feasibility.
-4. **Carry the edit into the normalized space** if the member can become an elite
-   that gets mutated again. Use `branching.world_to_norm(world, aux, preprocess_cfg)`,
-   and mask the model steps past the scenario end with `branching.model_step_valid`
-   (they cannot be inverted).
-
-`PopulationES._project_opt` and `PopulationES.__call__` implement exactly this.
-It was gated by `tests/test_es_population.py`, and the identity check showed
-`pop:1,iters:0` equals `o_0` on 5800/5800 episodes.
-
 ## Pitfalls
 
 ### 1. `neighbor_pred="log"` is an oracle
 Under log replay, the recorded future is exactly where every other car will be:
 2 s of privileged information that no deployed planner has. Quote only `"cv"`
-numbers as deployable. On the earlier bank repair, cv kept about 90% of the
-oracle's gain (m2 +0.0091 vs +0.0102).
+numbers as deployable. The `o_am` results above are all `"cv"`.
 
 ### 2. The ES preprocess still has the first-pair world-dt bug
 `es_baseline/data/preprocess.py::compute_world_dt_seconds` takes the dt of the
@@ -309,8 +268,8 @@ compiles once.
 
 ### 7. Cost
 Each call is one jitted program (32 iterations of a safety-loss gradient). In
-the evaluation, the optimizer took 0.13–0.5 s per triggered replan on an
-a5000/a6000. `o_am` runs 2 starts on every alive row.
+the evaluation, the optimizer took 0.13–0.5 s per call on an a5000/a6000.
+`o_am` has no trigger: it runs 2 starts on every alive row at every replan.
 
 The waymax_rs env only fits on a6000/a5000 nodes. A v100 dies at cuDNN
 autotune, and a 2080 Ti runs out of memory.
@@ -334,8 +293,7 @@ above its starting value.
 | what | entry point |
 |---|---|
 | Real-scene gate (expert windows distorted into violation, then repaired) | [tests/gate_lateral_opt.py](tests/gate_lateral_opt.py), [slurm/gate_lateral_opt.sbatch](slurm/gate_lateral_opt.sbatch) |
-| Full `o_am` A/B (base, `o_lpA3`, `o_am`, `o_amc`) | `bash rl/diffusion_ft/slurm/submit_lateral_opt_argmin.sh` (smoke: `DFT_LOPT_SMOKE=1`) |
-| ES with lateral_opt projection | `bash rl/diffusion_ft/slurm/submit_es_opt.sh`; tests in [tests/test_es_population.py](tests/test_es_population.py) |
+| Full `o_am` evaluation vs base | `bash rl/diffusion_ft/slurm/submit_lateral_opt_argmin.sh` (smoke: `DFT_LOPT_SMOKE=1`). It also runs older rule-based comparison arms (`o_lpA3`, `o_amc`); only `o_am` is described here |
 | Before/after figures | [tools/plot_fix_pairs.py](tools/plot_fix_pairs.py) via `slurm/submit_plot_fix_pairs.sh` |
 
 In `proposal_select`, the evaluated arms are configured as:
