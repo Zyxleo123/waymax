@@ -138,6 +138,14 @@ def _parse_args() -> argparse.Namespace:
         "(aliases: expected, worst_case). Default: checkpoint config.",
     )
     parser.add_argument(
+        "--offroad_mode",
+        type=str,
+        default="binary",
+        choices=["binary", "margin_tiebreak"],
+        help="ES offroad objective. binary = 0/1 road-edge gate; margin_tiebreak = gate x "
+        "edge-clearance margin + small graded tiebreak for offroad plans.",
+    )
+    parser.add_argument(
         "--wm_refresh_steps",
         type=int,
         default=10,
@@ -482,6 +490,7 @@ def main(args: argparse.Namespace) -> None:
             metrics=["collision", "offroad"],
             other_agent_forecast=args.other_agent_forecast,
             world_model_forecaster=_load_world_model_forecaster(args),
+            offroad_mode=args.offroad_mode,
         )
     elif args.planner == "fm":
         fm_ckpt_path = args.fm_ckpt_path or args.diffusion_ckpt_path
@@ -537,6 +546,7 @@ def main(args: argparse.Namespace) -> None:
             solver=args.fm_solver,
             other_agent_forecast=args.other_agent_forecast,
             world_model_forecaster=_load_world_model_forecaster(args),
+            offroad_mode=args.offroad_mode,
         )
     elif args.planner == "vla":
         inference = load_model_for_inference(

@@ -20,6 +20,10 @@
 #   CKPT=/zfsauton/scratch/ishanj/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20261005_092950/latest.pt
 #   sbatch --job-name=es_fm_wm_mf_log slurm_es_fail1500_wm_mf.sh es_fm log "${CKPT}"
 #   sbatch --job-name=es_diff_wm_mf_idm slurm_es_fail1500_wm_mf.sh es idm "${CKPT}"
+#   # Override ES iterations / replan interval (defaults 4 / 10); non-default values add _it{N}_rp{M} to the run name:
+#   sbatch --export=ALL,NUM_ES_ITERATIONS=6,REPLAN_INTERVAL_STEPS=40 slurm_es_fail1500_wm_mf.sh es_fm log "${CKPT}"
+#   # ES offroad objective (default binary); margin_tiebreak adds _offmargin_tiebreak to the run name:
+#   sbatch --export=ALL,OFFROAD_MODE=margin_tiebreak slurm_es_fail1500_wm_mf.sh es_fm log "${CKPT}"
 set -euo pipefail
 
 USAGE="Usage: sbatch slurm_es_fail1500_wm_mf.sh {es|es_fm} {log|idm} <world_model_ckpt.pt>"
@@ -34,6 +38,18 @@ esac
 case "${SIM_AGENTS}" in
   log|idm) ;;
   *) echo "ERROR: sim_agents must be log or idm, got '${SIM_AGENTS}'"; exit 1 ;;
+esac
+NUM_ES_ITERATIONS="${NUM_ES_ITERATIONS:-4}"
+REPLAN_INTERVAL_STEPS="${REPLAN_INTERVAL_STEPS:-10}"
+ES_TAG=""
+if [[ "${NUM_ES_ITERATIONS}" != "4" || "${REPLAN_INTERVAL_STEPS}" != "10" ]]; then
+  ES_TAG="_it${NUM_ES_ITERATIONS}_rp${REPLAN_INTERVAL_STEPS}"
+fi
+OFFROAD_MODE="${OFFROAD_MODE:-binary}"
+case "${OFFROAD_MODE}" in
+  binary) OFF_TAG="" ;;
+  margin_tiebreak) OFF_TAG="_off${OFFROAD_MODE}" ;;
+  *) echo "ERROR: OFFROAD_MODE must be binary or margin_tiebreak, got '${OFFROAD_MODE}'"; exit 1 ;;
 esac
 
 ROOT="/zfsauton/scratch/ishanj/waymax_rs"
@@ -56,7 +72,7 @@ export PYTHONPATH="${ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 # Tag runs with the checkpoint folder + file, e.g. 20261005_092950_latest.
 WM_RUN="$(basename "$(dirname "${WORLD_MODEL_CKPT}")")"
 WM_TAG="${WM_RUN#multiFuture_GaussianWorldModel_}_$(basename "${WORLD_MODEL_CKPT}" .pt)"
-RUN_NAME="${PLANNER_TAG}_wm_mf_${WM_TAG}_expected_independent_${SIM_AGENTS}_fail1500"
+RUN_NAME="${PLANNER_TAG}_wm_mf_${WM_TAG}_expected_independent_${SIM_AGENTS}${ES_TAG}${OFF_TAG}_fail1500"
 EXP_DIR="${EXP_ROOT}/${RUN_NAME}"
 LOG_FILE="${EXP_ROOT}/logs/${RUN_NAME}_$(date +%Y%m%d_%H%M%S).log"
 mkdir -p "${EXP_DIR}" "${EXP_ROOT}/logs"
@@ -68,7 +84,7 @@ for p in "${TARGET_JSON}" "${TFRECORD_DIR}/training" "${LANE_GRAPH_DIR}" "${WORL
   fi
 done
 
-echo "RUN_NAME=${RUN_NAME}  planner=${PLANNER}  sim_agents=${SIM_AGENTS}  ckpt=${WORLD_MODEL_CKPT}" | tee -a "${LOG_FILE}"
+echo "RUN_NAME=${RUN_NAME}  planner=${PLANNER}  sim_agents=${SIM_AGENTS}  es_iterations=${NUM_ES_ITERATIONS}  replan_interval=${REPLAN_INTERVAL_STEPS}  offroad_mode=${OFFROAD_MODE}  ckpt=${WORLD_MODEL_CKPT}" | tee -a "${LOG_FILE}"
 
 CMD=(
   python "${ROOT}/simulation/run_simulation.py"
@@ -81,8 +97,8 @@ CMD=(
   --num_scenarios 100000
   --population_size 64
   --elite_size 8
-  --num_es_iterations 4
-  --replan_interval_steps 10
+  --num_es_iterations "${NUM_ES_ITERATIONS}"
+  --replan_interval_steps "${REPLAN_INTERVAL_STEPS}"
   --other_agent_forecast wm
   --target_scenario_path "${TARGET_JSON}"
   --visualize_mode none
@@ -96,6 +112,7 @@ CMD=(
   --collision_reduce any
   --collision_sample_seed 0
   --wm_planning_mode expected_independent
+  --offroad_mode "${OFFROAD_MODE}"
 )
 
 if [[ "${PLANNER}" == "es" ]]; then

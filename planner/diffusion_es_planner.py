@@ -30,6 +30,7 @@ class DiffusionESPlanner(DiffusionPlanner):
         num_iterations: int = 3,
         other_agent_forecast: str = "cv",
         world_model_forecaster: Any = None,
+        offroad_mode: str = "binary",
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -49,6 +50,7 @@ class DiffusionESPlanner(DiffusionPlanner):
                 weights=weights,
                 other_agent_forecast=self.other_agent_forecast,
                 world_model_forecaster=self.world_model_forecaster,
+                offroad_mode=offroad_mode,
             )
             for _ in range(num_worlds)
         ]
