@@ -161,6 +161,8 @@ def parse_es_specs(spec: str) -> dict[str, ESConfig]:
             raise SystemExit(f"--select_es {name}: need pop >= 1, iters >= 0, 1 <= elite <= pop")
         if c.t < 0 or c.scale < 0:
             raise SystemExit(f"--select_es {name}: need t >= 0 and scale >= 0")
+        # wm_* is not offered: the population scores inside jax.lax.map, where the
+        # eager torch world model cannot run (rl/diffusion_ft/world_model_forecast.py).
         if c.nb not in ("log", "cv", "none"):
             raise SystemExit(f"--select_es {name}: nb '{c.nb}' not in log|cv|none")
         if c.rank not in ("dev", "prog"):

@@ -854,8 +854,14 @@ def safety_terms(
     other_box_btn5: jax.Array,
     other_valid_btn: jax.Array,
     step_valid_bt: jax.Array | None = None,
+    other_weight_btn: jax.Array | None = None,
 ) -> dict[str, jax.Array]:
     """Both barriers plus the diagnostics needed to validate them.
+
+    ``other_weight_btn`` ``[B, T, N]`` scales each agent's barrier (None = 1). A
+    multi-future forecast passes each mode as its own agent weighted by its
+    probability, so the agent term is the expected barrier over modes; ``c_agent``
+    stays the hard minimum over every valid agent, i.e. the worst mode.
 
     ``step_valid_bt`` masks steps that were never executed (a world that
     terminated early keeps being carried by the batched env, and its post-mortem
@@ -903,6 +909,8 @@ def safety_terms(
             f"agent_geometry must be 'exact' or 'disc', got {cfg.agent_geometry!r}")
     pair_barrier = barrier(gaps, cfg.agent_margin_m, cfg.agent_tau_m,
                            cfg.barrier_shape)
+    if other_weight_btn is not None:
+        pair_barrier = pair_barrier * jnp.asarray(other_weight_btn, jnp.float32)[..., None, None]
     agent_bt = cfg.agent_weight * jnp.sum(
         jnp.where(pair_valid, pair_barrier, 0.0), axis=(-3, -2, -1)
     )

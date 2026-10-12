@@ -459,7 +459,8 @@ def make_banks(default_spec: str, named_spec: str = "",
     return banks
 
 
-def make_scorer(objcfg, neighbor_pred: str = "log", world_dt_method: str = "median"):
+def make_scorer(objcfg, neighbor_pred: str = "log", world_dt_method: str = "median",
+                forecaster=None):
     """Jitted ``score(world, state, t0, goal_xy, n) -> (clear, edge, agent, prog)``, [B] each.
 
     ``clear`` = min over the next ``n`` world steps of min(road-edge clearance,
@@ -483,19 +484,22 @@ def make_scorer(objcfg, neighbor_pred: str = "log", world_dt_method: str = "medi
     ORACLE of where every car will be, which no deployed planner has. ``"cv"``
     predicts them by constant velocity from their state at ``t0`` and ``"none"``
     ignores them (road edges only); neither reads past ``t0``. See
-    ``safety_objective.predicted_neighbor_window``."""
+    ``safety_objective.predicted_neighbor_window``. ``"wm_det"`` / ``"wm_mf"`` /
+    ``"wm_mf_top1"`` are learned world models (``world_model_forecast``), run once
+    per replan outside the jit; under ``wm_mf`` ``agent`` is the WORST mode's gap."""
     import jax
     import jax.numpy as jnp
 
-    from rl.diffusion_ft.safety_objective import candidate_safety
+    from rl.diffusion_ft.safety_objective import WM_PREDICTIONS, candidate_safety
 
     from data.preprocess import compute_world_dt_seconds
 
-    def score(world, state, t0, goal_xy, n):
-        dt_b = (None if neighbor_pred == "log"
-                else compute_world_dt_seconds(state, 0.1, world_dt_method))
+    def score(world, state, t0, goal_xy, n, nb_boxes=None):
+        dt_b = (compute_world_dt_seconds(state, 0.1, world_dt_method)
+                if neighbor_pred in ("cv", "none") else None)
         terms = candidate_safety(objcfg, world, state=state, t0=t0, n_steps=n,
-                                 neighbor_pred=neighbor_pred, neighbor_dt_b=dt_b)
+                                 neighbor_pred=neighbor_pred, neighbor_dt_b=dt_b,
+                                 neighbor_boxes=nb_boxes)
         edge = jnp.min(terms["c_edge"], axis=1)
         agent = jnp.minimum(jnp.min(terms["c_agent"], axis=1), NO_AGENT_M)
         p0, pn = world[:, 0, :2], world[:, n, :2]
@@ -503,7 +507,17 @@ def make_scorer(objcfg, neighbor_pred: str = "log", world_dt_method: str = "medi
                 - jnp.linalg.norm(pn - goal_xy, axis=-1))
         return jnp.minimum(edge, agent), edge, agent, prog
 
-    return jax.jit(score, static_argnums=(4,))
+    jscore = jax.jit(score, static_argnums=(4,))
+    if neighbor_pred not in WM_PREDICTIONS:
+        return jscore
+    from rl.diffusion_ft.world_model_forecast import get_forecaster
+    fc = forecaster or get_forecaster(neighbor_pred)
+
+    def wm_score(world, state, t0, goal_xy, n):
+        dt_b = compute_world_dt_seconds(state, 0.1, world_dt_method)
+        return jscore(world, state, t0, goal_xy, n, fc(state, t0, n, dt_b))
+
+    return wm_score
 
 
 # --------------------------------------------------------------------------- #
@@ -734,6 +748,13 @@ class ProposalSelectEval:
             self, es_spec, arms, bank_spec=bank_spec, banks_spec=banks_spec,
             ramp_steps=ramp_steps, bank_ramps=bank_ramps, bank_blends=bank_blends,
             bank_neighbors=self.bank_neighbors)
+
+    @staticmethod
+    def _wm_describe():
+        # Only when a wm_* source was used: importing the module is cheap, but a
+        # run without one should not claim world-model provenance.
+        mod = sys.modules.get("rl.diffusion_ft.world_model_forecast")
+        return mod.describe() if mod is not None and mod._INSTANCES else None
 
     def _prev_tail(self, prev_exec, W):
         """The plan executed at the previous replan from the current state on,
@@ -1357,7 +1378,8 @@ class ProposalSelectEval:
                 # Both change what an episode MEANS, so an analysis pairing runs
                 # across jobs must be able to read them rather than assume them.
                 "sim_agents": t.env.sim_agents, "ego_vel_source": t.env.ego_vel_source,
-                "world_dt_method": t.env.world_dt_method}
+                "world_dt_method": t.env.world_dt_method,
+                "world_model": self._wm_describe()}
         if self._es_cfgs:
             from rl.diffusion_ft.es_population import ES_DIAG
             meta["es"] = {k: dict(c.__dict__) for k, c in self._es_cfgs.items()}
@@ -1521,9 +1543,17 @@ def main():
                         "'name=adapter:<gate>[:strength]' arms")
     p.add_argument("--select_bank_neighbors", default="",
                    help="per-bank source of the OTHER cars' next steps when scoring, "
-                        "'name=log|cv|none'. log (default) = the recorded future, an "
-                        "oracle under log replay; cv = constant-velocity prediction "
-                        "from their current state; none = road edges only")
+                        "'name=log|cv|none|wm_det|wm_mf|wm_mf_top1'. log (default) = the "
+                        "recorded future, an oracle under log replay; cv = constant-velocity "
+                        "prediction from their current state; none = road edges only; wm_* = "
+                        "the es_WM learned world models (rl/diffusion_ft/world_model_forecast.py): "
+                        "deterministic, multi-future expected over modes, or its top mode")
+    p.add_argument("--wm_det_ckpt", default="",
+                   help="checkpoint for wm_det (default: world_model_forecast.DEFAULT_CKPTS)")
+    p.add_argument("--wm_mf_ckpt", default="",
+                   help="checkpoint for wm_mf / wm_mf_top1 (default: DEFAULT_CKPTS)")
+    p.add_argument("--wm_device", default="",
+                   help="torch device for the world models (default auto: cuda if visible)")
     p.add_argument("--select_bank_blends", default="",
                    help="per-bank easing, 'name=cubic|quintic'. cubic (default) is C1: "
                         "acceleration STEPS at the join. quintic is C2, but only helps "
@@ -1561,6 +1591,9 @@ def main():
     p.add_argument("--selection_seeds", default="777",
                    help="seeds that SELECTED the splits; scoring on them is biased")
     args = p.parse_args()
+    if args.wm_det_ckpt or args.wm_mf_ckpt or args.wm_device:
+        from rl.diffusion_ft.world_model_forecast import configure
+        configure(det_ckpt=args.wm_det_ckpt, mf_ckpt=args.wm_mf_ckpt, device=args.wm_device)
     if not args.splits_json or not args.shard_glob:
         raise SystemExit("--splits_json and --shard_glob are required")
     banned = {int(s) for s in args.selection_seeds.split(",") if s.strip()} | {int(args.eval_seed)}

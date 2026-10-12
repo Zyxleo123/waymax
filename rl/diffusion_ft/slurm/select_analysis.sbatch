@@ -39,8 +39,11 @@ done
 "$PY" -m rl.diffusion_ft.tools.select_analysis --splits_json "$SPLITS_JSON" \
   --rows "$SEL_DIR/tasks/*/rows.jsonl" --repeats "$REPEATS" \
   --out "$SEL_DIR/select_summary.json"
+# A splits file without an intermittent stratum (e.g. an unlabelled shard slice,
+# build_shard_splits.py) has no marginal3; plot the one it has.
+MK="$("$PY" -c 'import json,sys; print("marginal3" if json.load(open(sys.argv[1])).get("weights3") else "marginal2")' "$SEL_DIR/select_summary.json")"
 "$PY" -m rl.diffusion_ft.tools.plot_select --in_json "$SEL_DIR/select_summary.json" \
-  --out_png "$SEL_DIR/select_summary.png"
+  --out_png "$SEL_DIR/select_summary.png" --marginal "$MK"
 # Rows from runners that record the termination-aware flags get a second summary
 # scored on them (tools/select_analysis.py --term); older rows are left alone.
 first_rows=("$SEL_DIR"/tasks/*/rows.jsonl)

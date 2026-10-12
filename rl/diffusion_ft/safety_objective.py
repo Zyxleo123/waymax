@@ -171,8 +171,10 @@ def neighbor_window(state, t0, n_steps: int, *, neighbor_state=None):
 
 
 # Where the other agents' FUTURE boxes come from when scoring a candidate. See
-# `predicted_neighbor_window`.
-NEIGHBOR_PREDICTIONS = ("log", "cv", "none")
+# `predicted_neighbor_window`; the wm_* sources are learned world models whose
+# boxes are computed outside the jit (rl.diffusion_ft.world_model_forecast).
+WM_PREDICTIONS = ("wm_det", "wm_mf", "wm_mf_top1")
+NEIGHBOR_PREDICTIONS = ("log", "cv", "none") + WM_PREDICTIONS
 
 
 def predicted_neighbor_window(state, t0, n_steps: int, *, mode: str, dt_b=None):
@@ -244,6 +246,7 @@ def candidate_safety(
     neighbor_state=None,
     neighbor_pred: str = "log",
     neighbor_dt_b: jax.Array | None = None,
+    neighbor_boxes=None,
 ) -> dict[str, jax.Array]:
     """Safety loss of a proposed trajectory, differentiable in ``world_traj_bw5``.
 
@@ -268,6 +271,9 @@ def candidate_safety(
       neighbor_pred: ``"log"`` (default: the recorded future, i.e. an oracle under
         log replay), or ``"cv"`` / ``"none"``, which never read past ``t0`` -- see
         :func:`predicted_neighbor_window`. ``neighbor_dt_b`` is its per-scene dt.
+        A ``wm_*`` source takes its forecast from ``neighbor_boxes`` =
+        ``(box [B, n, M, 5], valid [B, n, M], weight [B, n, M])``, already decoded
+        on the scene's clock (``world_model_forecast.WMNeighborForecaster``).
 
     Returns the ``safety_terms`` dict plus ``total`` (the scalar to differentiate)
     and ``n_neighbors`` (mean valid ego-neighbour pairs per scored step). Read
@@ -288,11 +294,17 @@ def candidate_safety(
 
     window = world_traj_bw5[:, 1 : 1 + n_steps, :]
     ego_box = ego_window_boxes(window, length_b, width_b)
+    other_weight = None
+    if (neighbor_boxes is not None) != (neighbor_pred in WM_PREDICTIONS):
+        raise ValueError(f"neighbor_boxes is required by, and only by, the wm_* sources "
+                         f"(neighbor_pred={neighbor_pred!r})")
     if neighbor_pred == "log":
         other_box, other_valid = neighbor_window(
             state, t0, n_steps, neighbor_state=neighbor_state)
     elif neighbor_state is not None:
         raise ValueError("neighbor_state applies to neighbor_pred='log' only")
+    elif neighbor_boxes is not None:
+        other_box, other_valid, other_weight = neighbor_boxes
     else:
         other_box, other_valid = predicted_neighbor_window(
             state, t0, n_steps, mode=neighbor_pred, dt_b=neighbor_dt_b)
@@ -311,6 +323,7 @@ def candidate_safety(
         other_box_btn5=other_box,
         other_valid_btn=other_valid,
         step_valid_bt=step_valid,
+        other_weight_btn=other_weight,
     )
     # Mean over scored steps, not sum: the window length varies at the end of a
     # scenario, and a scalar whose scale depends on how many steps were left would
@@ -320,6 +333,9 @@ def candidate_safety(
     # How many neighbours the term was actually charged against. Zero here means
     # the agent barrier contributed nothing -- which happens both on an empty
     # road and on a misaddressed neighbour window, and those must not look alike.
-    terms["n_neighbors"] = jnp.mean(
-        jnp.sum(jnp.asarray(other_valid, jnp.float32), axis=-1))
+    # Weighted, so a K-mode forecast counts each agent once (its modes sum to 1).
+    nb_valid = jnp.asarray(other_valid, jnp.float32)
+    if other_weight is not None:
+        nb_valid = nb_valid * jnp.asarray(other_weight, jnp.float32)
+    terms["n_neighbors"] = jnp.mean(jnp.sum(nb_valid, axis=-1))
     return terms

@@ -64,6 +64,29 @@ class DiffusionPretrainConfig:
     data_parallel: bool = False
     jax_compilation_cache_dir: str = "./.jax_compilation_cache"
 
+    # ---- FlowMol3 inference-OOD options (arXiv 2508.12629) -----------------
+    # All default OFF, so an unflagged run is the pre-existing pretrain.
+    #
+    # `init_from` is the FINE-TUNE entry point and is NOT `resume_path`: it loads
+    # parameters only (fresh optimizer, fresh epoch/step counters, fresh lr
+    # schedule), and with `--self_cond` it zero-expands the stem so the expanded
+    # model starts out computing exactly the base's function. `resume_path`
+    # continues a run and requires the shapes to already match.
+    init_from: str | None = None
+    self_cond: bool = False
+    sc_train_prob: float = 0.5
+    distort_p: float = 0.0
+    # In `relative` mode this is a multiple of the forward noise sqrt(1-abar_t)
+    # already present at the distorted timestep; in `absolute` mode it is in
+    # normalized trajectory units (1.0 == ego_range == 100 m).
+    distort_sigma: float = 0.0
+    distort_mode: str = "relative"
+    # FlowMol3's t_distort=0.5 is in flow time (0 = noise, 1 = data), i.e. the
+    # LOW-noise half. -1 resolves to timesteps//2 - 1 on this DDPM index.
+    distort_t_max: int = -1
+    distort_t_min: int = 0
+    distort_channels: int = 2
+
     preprocess_cfg: PreprocessConfig = PreprocessConfig()
 
 
@@ -86,6 +109,26 @@ def parse_args() -> DiffusionPretrainConfig:
     parser.add_argument("--save_every", type=int, default=50)
     parser.add_argument("--save_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion")
     parser.add_argument("--resume_path", type=str, default=None)
+    parser.add_argument("--init_from", type=str, default=None,
+                        help="Load PARAMETERS ONLY from this checkpoint dir (fresh optimizer/"
+                             "schedule/counters). With --self_cond the stem is zero-expanded.")
+
+    # ---- FlowMol3 inference-OOD options -------------------------------------
+    parser.add_argument("--self_cond", action="store_true",
+                        help="Feed the denoiser its own previous clean prediction.")
+    parser.add_argument("--sc_train_prob", type=float, default=0.5,
+                        help="Per-example probability of the self-conditioned training branch.")
+    parser.add_argument("--distort_p", type=float, default=0.0,
+                        help="Bernoulli rate of distorted WAYPOINTS (FlowMol3 p_distort=0.2).")
+    parser.add_argument("--distort_sigma", type=float, default=0.0,
+                        help="Distortion scale; see --distort_mode. 0 disables distortion.")
+    parser.add_argument("--distort_mode", type=str, default="relative", choices=["relative", "absolute"],
+                        help="relative: sigma x sqrt(1-abar_t). absolute: normalized units (1.0 = 100 m).")
+    parser.add_argument("--distort_t_max", type=int, default=-1,
+                        help="Distort only t <= this (-1 = timesteps//2-1, FlowMol3's late half).")
+    parser.add_argument("--distort_t_min", type=int, default=0)
+    parser.add_argument("--distort_channels", type=int, default=2,
+                        help="Leading channels kicked; 2 = positions only, as in FlowMol3.")
 
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-4)

@@ -401,7 +401,8 @@ def expand_offset(x_bn, W: int):
 
 # --------------------------------------------------------------------------- #
 def make_lateral_optimizer(objcfg, cfg: LateralOptConfig, *, dt: float,
-                           neighbor_pred: str = "log", world_dt_method: str = "median"):
+                           neighbor_pred: str = "log", world_dt_method: str = "median",
+                           forecaster=None):
     """Jitted ``opt(world_p, x0, state, t0, active_b, n) -> (x, loss_best, loss_init)``.
 
     ``world_p`` ``[B, W, 5]`` is the base proposal; ``x0`` ``[B, n]`` the init
@@ -411,7 +412,9 @@ def make_lateral_optimizer(objcfg, cfg: LateralOptConfig, *, dt: float,
     ``n`` (static) is the selector's window. ``dt`` is the world step the bank's
     edits already assume (``preprocess_cfg.world_dt_fallback``). The neighbour
     source is the arm's own, so an honest arm's loss never reads the future
-    either.
+    either. A ``wm_*`` source runs its world model once per replan, eagerly,
+    and hands the boxes to the jitted program (``forecaster`` defaults to the
+    process-wide one, :func:`world_model_forecast.get_forecaster`).
     """
     import jax
     import jax.numpy as jnp
@@ -431,19 +434,21 @@ def make_lateral_optimizer(objcfg, cfg: LateralOptConfig, *, dt: float,
             return x
         return x.at[:, n:].set(jnp.maximum(x[:, n:], -cfg.lon_back_m))
 
-    def opt(world_p, x0, state, t0, active_b, n):
+    from rl.diffusion_ft.safety_objective import WM_PREDICTIONS
+
+    def opt(world_p, x0, state, t0, active_b, n, nb_boxes=None):
         B, W, _ = world_p.shape
         H = edit_hessian(n, dt, cfg)
         Hj = jnp.asarray(H, jnp.float32)
         Hinv = jnp.asarray(np.linalg.inv(H), jnp.float32)
-        dt_b = (None if neighbor_pred == "log"
-                else compute_world_dt_seconds(state, 0.1, world_dt_method))
+        dt_b = (compute_world_dt_seconds(state, 0.1, world_dt_method)
+                if neighbor_pred in ("cv", "none") else None)
 
         def loss(x):
             w = edit_world(world_p, x, n=n, dt=dt, lon=cfg.lon)
             terms = candidate_safety(loss_cfg, w, state=state, t0=t0, n_steps=n,
                                      alive_b=active_b, neighbor_pred=neighbor_pred,
-                                     neighbor_dt_b=dt_b)
+                                     neighbor_dt_b=dt_b, neighbor_boxes=nb_boxes)
             per_b = terms["loss_b"] / n + 0.5 * jnp.einsum("bi,ij,bj->b", x, Hj, x)
             return jnp.sum(per_b), per_b
 
@@ -468,4 +473,14 @@ def make_lateral_optimizer(objcfg, cfg: LateralOptConfig, *, dt: float,
         better = l_last < best_l
         return (jnp.where(better[:, None], x, best_x), jnp.where(better, l_last, best_l), l0)
 
-    return jax.jit(opt, static_argnums=(5,))
+    jopt = jax.jit(opt, static_argnums=(5,))
+    if neighbor_pred not in WM_PREDICTIONS:
+        return jopt
+    from rl.diffusion_ft.world_model_forecast import get_forecaster
+    fc = forecaster or get_forecaster(neighbor_pred)
+
+    def wm_opt(world_p, x0, state, t0, active_b, n):
+        dt_b = compute_world_dt_seconds(state, 0.1, world_dt_method)
+        return jopt(world_p, x0, state, t0, active_b, n, fc(state, t0, n, dt_b))
+
+    return wm_opt
