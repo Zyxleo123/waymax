@@ -384,8 +384,15 @@ class Scorer:
         roadgraph_dir_xyz = roadgraph_dir_xyz[road_edge_mask]
         roadgraph_ids = roadgraph_ids[road_edge_mask]
 
+        # Waymax is_offroad uses the agent's own elevation for the box corners; the
+        # nearest-edge lookup stretches z by 2x, so z=0 picks wrong edge points in
+        # scenes far from z=0 (e.g. z≈-72 m) and flags valid plans as offroad.
+        ego_idx = scorer_helpers.get_ego_idx(sim_state, world_idx)
+        log_z = jnp.asarray(sim_state.log_trajectory.z[world_idx], dtype=jnp.float32)
+        ego_z = log_z[ego_idx, int(np.clip(int(timestep), 0, int(log_z.shape[1]) - 1))]
+
         bbox_corners_xy = polygon_corners(ego_trajectories)
-        z = jnp.zeros_like(bbox_corners_xy[..., :1])
+        z = jnp.full_like(bbox_corners_xy[..., :1], ego_z)
         bbox_corners = jnp.concatenate([bbox_corners_xy, z], axis=-1)
         shape_prefix = bbox_corners.shape[:-3]
         num_agents, num_points, dim = bbox_corners.shape[-3:]
