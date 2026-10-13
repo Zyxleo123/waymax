@@ -27,8 +27,9 @@ from scores.scorer_lane_graph import LaneGraphShardStore
 from simulation.evaluation_utils import (
     rollout_predicted_trajectories_with_metrics,
     infer_goals_from_sim_state, 
-    check_goal_reaching, 
-    check_traffic_light_violation
+    check_goal_reaching,
+    check_traffic_light_violation,
+    episode_failure_flags,
 )
 from simulation.planning_utils import (
     predict_planner_trajectories_with_periodic_replan,
@@ -263,17 +264,18 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
         goal_reached = np.asarray(goal_eval["reached"])
         goal_reached_step = np.asarray(goal_eval["reached_step"])
 
-        overlap_timeseries = np.asarray(rollout["metric_timeseries"]["overlap"][int(args.start_timestep):])
-        offroad_timeseries = np.asarray(rollout["metric_timeseries"]["offroad"][int(args.start_timestep):])
-
-        overlap = np.zeros((len(scenario_indices),), dtype=bool)
-        offroad = np.zeros((len(scenario_indices),), dtype=bool)
-        for world_idx in range(len(scenario_indices)):
-            episode_length = goal_reached_step[world_idx] + 1 if goal_reached[world_idx] else overlap_timeseries.shape[0]
-            if "overlap" in rollout["metric_timeseries"]:
-                overlap[world_idx] = overlap_timeseries[:episode_length, world_idx].sum() > 0
-            if "offroad" in rollout["metric_timeseries"]:
-                offroad[world_idx] = offroad_timeseries[:episode_length, world_idx].sum() > 0
+        # Count failures only in [start_timestep, goal step], indexed by absolute rollout timestep.
+        overlap, offroad = (
+            episode_failure_flags(
+                rollout["metric_timeseries"][name],
+                rollout["timestep"],
+                start_timestep=int(args.start_timestep),
+                goal_reached_b=goal_reached,
+                goal_reached_step_b=goal_reached_step,
+                num_log_steps=rollout["num_log_steps"],
+            )
+            for name in ("overlap", "offroad")
+        )
         # tl_violation = tl_violation & (tl_violation_step < goal_reached_step)
 
         success = goal_reached & (~overlap) & (~offroad)

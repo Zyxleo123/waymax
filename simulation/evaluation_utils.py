@@ -91,11 +91,40 @@ def rollout_predicted_trajectories_with_metrics(
         metric_timeseries[metric_name] = value_bt
         metric_valid[metric_name] = valid_bt
 
+    # Rollout starts after env.reset (init_steps - 1 = 10), so metric row i is
+    # absolute timestep rollout_timestep[i], not i.
+    rollout_t = np.asarray(rollout_out.state.timestep)
+    rollout_timestep = rollout_t.reshape(rollout_t.shape[0], -1)[:, 0]
+
     return {
         "metric_timeseries": metric_timeseries,
         "metric_valid": metric_valid,
         "metric_names": metric_names,
+        "timestep": rollout_timestep,
+        "num_log_steps": length,
     }
+
+
+def episode_failure_flags(
+    metric_tb,
+    rollout_timestep,
+    *,
+    start_timestep: int,
+    goal_reached_b,
+    goal_reached_step_b,
+    num_log_steps: int,
+) -> np.ndarray:
+    """Per world: did the metric fire in [start_timestep, goal_reached_step] (or until the log ends)?
+
+    ``metric_tb``: [T_rollout, B] metric values; ``rollout_timestep``: [T_rollout] absolute timestep of
+    each row. ``goal_reached_step_b`` is absolute (as returned by ``check_goal_reaching``).
+    """
+    metric_tb = np.asarray(metric_tb)
+    t = np.asarray(rollout_timestep)[: metric_tb.shape[0]]
+    reached = np.asarray(goal_reached_b).astype(bool)
+    end_b = np.where(reached, np.asarray(goal_reached_step_b), int(num_log_steps) - 1)
+    window_tb = (t[:, None] >= int(start_timestep)) & (t[:, None] <= end_b[None, :])
+    return ((metric_tb > 0) & window_tb).any(axis=0)
 
 
 def infer_goals_from_sim_state(sim_state) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:

@@ -41,6 +41,7 @@ from simulation.evaluation_utils import (  # noqa: E402
     _build_rollout_env_and_actor,
     _run_batched_rollout,
     check_goal_reaching,
+    episode_failure_flags,
     infer_goals_from_sim_state,
 )
 from simulation.planning_utils import apply_ego_replacements_to_expanded_state  # noqa: E402
@@ -855,12 +856,17 @@ def run_closed_loop(
     goal_eval = check_goal_reaching(state, goal_xy_b2, start_timestep=start_timestep)
     reached = bool(goal_eval["reached"][0])
     reached_step = int(goal_eval["reached_step"][0])
-    overlap_ts = overlap_full[start_timestep:]
-    offroad_ts = offroad_full[start_timestep:]
-    # Same episode-length rule as runner.run.
-    episode_length = reached_step + 1 if reached else overlap_ts.shape[0]
-    overlap = bool(overlap_ts[:episode_length].sum() > 0)
-    offroad_flag = bool(offroad_ts[:episode_length].sum() > 0)
+    # Same episode rule as runner.run: failures in [start_timestep, goal step] by absolute timestep.
+    overlap, offroad_flag = (
+        bool(
+            episode_failure_flags(
+                flags[:, None], rollout_t,
+                start_timestep=start_timestep, goal_reached_b=[reached], goal_reached_step_b=[reached_step],
+                num_log_steps=num_steps,
+            )[0]
+        )
+        for flags in (overlap_al, offroad_al)
+    )
 
     # Per absolute sim timestep, for plotting (rollout index may be offset by env init steps).
     overlap_t = np.zeros((num_steps,), dtype=bool)
