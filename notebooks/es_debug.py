@@ -507,6 +507,68 @@ def goal_mix(frac_unconditioned: float = 0.25) -> InitialPool:
     return pool
 
 
+def _rotate_scale_norm(norm_ktd: jax.Array, delta_rad: jax.Array, scale: jax.Array) -> jax.Array:
+    """Rotate ego-normalized [x, y, vx, vy, yaw/pi] plans about the ego (origin) by ``delta_rad``
+    and scale distance/speed by ``scale`` (per plan, shape [K])."""
+    c, s = jnp.cos(delta_rad)[:, None], jnp.sin(delta_rad)[:, None]
+    x, y, vx, vy, yaw = (norm_ktd[..., i] for i in range(5))
+    k = scale[:, None]
+    out = jnp.stack(
+        [
+            k * (c * x - s * y),
+            k * (s * x + c * y),
+            k * (c * vx - s * vy),
+            k * (s * vx + c * vy),
+            yaw + delta_rad[:, None] / jnp.pi,
+        ],
+        axis=-1,
+    )
+    return jnp.concatenate([out, norm_ktd[..., 5:]], axis=-1)
+
+
+def heading_fan(
+    max_deg: float = 30.0,
+    num_headings: int = 12,
+    keep_frac: float = 0.25,
+    speed_scales: tuple[float, ...] = (1.0,),
+    denoise: bool = True,
+) -> InitialPool:
+    """Fan the diffusion samples out in heading, then re-denoise them (SDEdit).
+
+    ``keep_frac`` of the pool stays as plain samples; each remaining sample is rotated about
+    the ego by one of ``num_headings`` angles in [-max_deg, max_deg] (and optionally scaled
+    by one of ``speed_scales``, < 1 = slower), then partially noised and denoised with the
+    planner's ``resample_timesteps`` so the result is back on the model's manifold.
+    ``denoise=False`` keeps the raw rotated plans (useful to see what the fan looks like).
+    """
+
+    def pool(planner, *, cond_bf, inst_cond_bf, inst_cond_mask_bf, features, pre_batch, rng):
+        del features, pre_batch
+        k_sample, k_denoise = jax.random.split(rng)
+        base = planner._sample_population_jit(
+            cond_bf=cond_bf, inst_cond_bf=inst_cond_bf, inst_cond_mask_bf=inst_cond_mask_bf, rng=k_sample
+        )  # [1, P, T, D]
+        n_keep = int(round(keep_frac * planner.population_size))
+        combos = [(d, k) for k in speed_scales for d in np.deg2rad(np.linspace(-max_deg, max_deg, num_headings))]
+        n_fan = planner.population_size - n_keep
+        delta = jnp.asarray([combos[i % len(combos)][0] for i in range(n_fan)], dtype=jnp.float32)
+        scale = jnp.asarray([combos[i % len(combos)][1] for i in range(n_fan)], dtype=jnp.float32)
+        fan = _rotate_scale_norm(base[0, n_keep:], delta, scale)[None]  # [1, n_fan, T, D]
+        if denoise:
+            fan = planner._resample_population_jit(
+                cond_bf=cond_bf,
+                inst_cond_bf=inst_cond_bf,
+                inst_cond_mask_bf=inst_cond_mask_bf,
+                proposals_bktd=fan,
+                rng=k_denoise,
+            )
+        return jnp.concatenate([base[:, :n_keep], fan], axis=1)
+
+    speeds = "" if tuple(speed_scales) == (1.0,) else f",v{'/'.join(f'{k:g}' for k in speed_scales)}"
+    pool.__name__ = f"heading_fan[±{max_deg:g}°x{num_headings}{speeds}{'' if denoise else ',raw'}]"
+    return pool
+
+
 def topk(scores, trajectories, n_elite, rng) -> np.ndarray:
     """Production behaviour (``jax.lax.top_k``)."""
     del trajectories, rng
