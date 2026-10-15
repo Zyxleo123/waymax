@@ -507,6 +507,36 @@ def goal_mix(frac_unconditioned: float = 0.25) -> InitialPool:
     return pool
 
 
+def denoise_proposals(
+    planner, *, cond_bf, inst_cond_bf, inst_cond_mask_bf, proposals_bktd, rng, steps: int, noise_scale: float
+) -> jax.Array:
+    """SDEdit: re-noise ``proposals_bktd`` to diffusion step ``steps`` and denoise back.
+
+    ``noise_scale`` multiplies the forward noise; the policy default (what production ES
+    uses) is 2.0, i.e. twice the noise the schedule expects at that step, which few
+    denoising steps cannot fully remove. 1.0 matches the schedule.
+    """
+    cache = planner.__dict__.setdefault("_denoise_jit_cache", {})
+    key = (int(steps), float(noise_scale))
+    if key not in cache:
+
+        def f(cond_bf, inst_cond_bf, inst_cond_mask_bf, proposals_bktd, rng):
+            b, k, t, d = proposals_bktd.shape
+            out = planner.policy.resample_from_condition(
+                jnp.repeat(cond_bf, k, axis=0),
+                jnp.repeat(inst_cond_bf, k, axis=0),
+                jnp.repeat(inst_cond_mask_bf, k, axis=0),
+                proposals_bktd.reshape(b * k, t, d),
+                key[0],
+                rng=rng,
+                noise_scale=key[1],
+            )
+            return out.reshape(b, k, t, d)
+
+        cache[key] = jax.jit(f)
+    return cache[key](cond_bf, inst_cond_bf, inst_cond_mask_bf, proposals_bktd, rng)
+
+
 def _rotate_scale_norm(norm_ktd: jax.Array, delta_rad: jax.Array, scale: jax.Array) -> jax.Array:
     """Rotate ego-normalized [x, y, vx, vy, yaw/pi] plans about the ego (origin) by ``delta_rad``
     and scale distance/speed by ``scale`` (per plan, shape [K])."""
@@ -589,13 +619,13 @@ def _heading_profile(name: str, amp_rad: float, duration_frac: float, horizon: i
     return (amp_rad * SHAPE_PROFILES[name](v)).astype(np.float32)
 
 
-def _reshape_heading(norm_ktd: jax.Array, dpsi_kt: jax.Array, scale_k: jax.Array) -> jax.Array:
+def _reshape_heading(norm_ktd: jax.Array, dpsi_kt: jax.Array, speed_kt: jax.Array) -> jax.Array:
     """Re-integrate ego-normalized [x, y, vx, vy, yaw/pi] plans with each step's displacement
-    rotated by ``dpsi_kt`` and scaled by ``scale_k`` (0 = stop). Keeps the sample's own speed
-    profile; changes its curvature."""
-    k = scale_k[:, None]
-    pos = norm_ktd[..., :2] * k[..., None]
-    step = jnp.diff(jnp.concatenate([jnp.zeros_like(pos[:, :1]), pos], axis=1), axis=1)
+    rotated by ``dpsi_kt`` and multiplied by ``speed_kt`` (1 = the sample's own speed,
+    ramping to 0 = braking to a stop). Changes curvature / speed, keeps smoothness."""
+    k = speed_kt
+    pos = norm_ktd[..., :2]
+    step = jnp.diff(jnp.concatenate([jnp.zeros_like(pos[:, :1]), pos], axis=1), axis=1) * k[..., None]
     c, s = jnp.cos(dpsi_kt), jnp.sin(dpsi_kt)
     new_pos = jnp.cumsum(jnp.stack([c * step[..., 0] - s * step[..., 1], s * step[..., 0] + c * step[..., 1]], -1), axis=1)
     vx, vy = k * norm_ktd[..., 2], k * norm_ktd[..., 3]
@@ -617,16 +647,20 @@ def shape_fan(
     amplitudes_deg: tuple[float, ...] = (15.0, 30.0),
     durations: tuple[float, ...] = (0.5, 1.0),
     speed_scales: tuple[float, ...] = (1.0,),
-    include_stop: bool = True,
+    brake_fracs: tuple[float, ...] = (0.3, 0.6),
     keep_frac: float = 0.25,
     denoise: bool = True,
+    denoise_steps: int | None = None,
+    noise_scale: float = 1.0,
 ) -> InitialPool:
     """Fan samples out in *curvature*: each fan member gets a heading-offset profile
     (``SHAPE_PROFILES``: arc, lane_change, swerve = out-and-back, reverse = out then the
     opposite way), both signs, each amplitude and manoeuvre duration (fraction of the
-    horizon), optionally a speed scale, plus one stopped plan. The sample is re-integrated
-    with the rotated step displacements (smooth, same speed profile), then re-denoised
-    (SDEdit) with the planner's ``resample_timesteps``.
+    horizon), optionally a constant speed scale, plus straight plans that brake smoothly to
+    a stop within each of ``brake_fracs`` of the horizon. The sample is re-integrated with
+    the rotated / scaled step displacements, then re-denoised (SDEdit) for ``denoise_steps``
+    (default: the planner's ``resample_timesteps``) at ``noise_scale`` (1.0 = the schedule's
+    noise level; production ES uses 2.0, which leaves visible jitter).
     """
 
     def pool(planner, *, cond_bf, inst_cond_bf, inst_cond_mask_bf, features, pre_batch, rng):
@@ -638,9 +672,11 @@ def shape_fan(
         horizon = int(base.shape[2])
         n_keep = int(round(keep_frac * planner.population_size))
         n_fan = planner.population_size - n_keep
-        combos = [(np.zeros((horizon,), np.float32), 0.0)] if include_stop else []
+        u = np.linspace(0.0, 1.0, horizon)
+        zero = np.zeros((horizon,), np.float32)
+        combos = [(zero, np.clip(1.0 - u / f, 0.0, 1.0).astype(np.float32)) for f in brake_fracs]
         combos += [
-            (_heading_profile(name, sign * np.deg2rad(a), d, horizon), k)
+            (_heading_profile(name, sign * np.deg2rad(a), d, horizon), np.full((horizon,), k, np.float32))
             for k in speed_scales
             for name in profiles
             for a in amplitudes_deg
@@ -651,22 +687,26 @@ def shape_fan(
             print(f"shape_fan: {len(combos)} shapes > {n_fan} slots; dropping the last {len(combos) - n_fan}")
         pick = [combos[i % len(combos)] for i in range(n_fan)]
         dpsi = jnp.asarray(np.stack([p[0] for p in pick]))
-        scale = jnp.asarray([p[1] for p in pick], dtype=jnp.float32)
-        fan = _reshape_heading(base[0, n_keep:], dpsi, scale)[None]
+        speed = jnp.asarray(np.stack([p[1] for p in pick]))
+        fan = _reshape_heading(base[0, n_keep:], dpsi, speed)[None]
         if denoise:
-            fan = planner._resample_population_jit(
+            fan = denoise_proposals(
+                planner,
                 cond_bf=cond_bf,
                 inst_cond_bf=inst_cond_bf,
                 inst_cond_mask_bf=inst_cond_mask_bf,
                 proposals_bktd=fan,
                 rng=k_denoise,
+                steps=denoise_steps or planner.resample_timesteps,
+                noise_scale=noise_scale,
             )
         return jnp.concatenate([base[:, :n_keep], fan], axis=1)
 
     pool.__name__ = (
         f"shape_fan[{'/'.join(profiles)} ±{'/'.join(f'{a:g}' for a in amplitudes_deg)}°"
         f"{'' if tuple(speed_scales) == (1.0,) else ' v' + '/'.join(f'{k:g}' for k in speed_scales)}"
-        f"{'+stop' if include_stop else ''}{'' if denoise else ',raw'}]"
+        f"{'+brake' if brake_fracs else ''}{'' if denoise else ',raw'}"
+        f"{'' if not denoise else f',dn{denoise_steps or 0}xσ{noise_scale:g}'}]"
     )
     return pool
 
@@ -804,6 +844,7 @@ class DebugESPlanner(DiffusionESPlanner):
         reward: Reward | None = None,
         acquisition: Acquisition = topk,
         initial_pool: InitialPool = standard_pool,
+        resample_noise_scale: float | None = None,
         label: str = "baseline",
     ) -> None:
         super().__init__(
@@ -821,6 +862,8 @@ class DebugESPlanner(DiffusionESPlanner):
         self.reward = reward if reward is not None else production_reward()
         self.acquisition = acquisition
         self.initial_pool = initial_pool
+        # None = production (policy default noise_scale=2.0); e.g. 1.0 = the schedule's noise.
+        self.resample_noise_scale = resample_noise_scale
         self.label = label
         self.last_trace: ESTrace | None = None
         self._scenario: Scenario | None = None
@@ -835,6 +878,7 @@ class DebugESPlanner(DiffusionESPlanner):
             reward=self.reward,
             acquisition=acquisition,
             initial_pool=initial_pool,
+            resample_noise_scale=resample_noise_scale,
             label=label,
         )
 
@@ -877,6 +921,7 @@ class DebugESPlanner(DiffusionESPlanner):
         new.reward = kwargs["reward"]
         new.acquisition = kwargs["acquisition"]
         new.initial_pool = kwargs["initial_pool"]
+        new.resample_noise_scale = kwargs["resample_noise_scale"]
         new.label = kwargs["label"]
         new.last_trace = None
         new._init_kwargs = kwargs
@@ -960,13 +1005,16 @@ class DebugESPlanner(DiffusionESPlanner):
             elite_norm = pool_norm[elite_idx][None]  # [1, E, T, D]
             replicated = self._replicate_elites(elite_norm, population_size=self.population_size)
             rng, key_resample = jax.random.split(rng)
-            new_norm = self._resample_population_jit(
-                cond_bf=cond_bf,
-                inst_cond_bf=inst_cond_bf,
-                inst_cond_mask_bf=instruction_mask,
-                proposals_bktd=replicated,
-                rng=key_resample,
+            resample_kw = dict(
+                cond_bf=cond_bf, inst_cond_bf=inst_cond_bf, inst_cond_mask_bf=instruction_mask,
+                proposals_bktd=replicated, rng=key_resample,
             )
+            if self.resample_noise_scale is None:
+                new_norm = self._resample_population_jit(**resample_kw)
+            else:
+                new_norm = denoise_proposals(
+                    self, **resample_kw, steps=self.resample_timesteps, noise_scale=self.resample_noise_scale
+                )
             new_world = np.asarray(self._postprocess_population(new_norm, pre_batch)[0][0])
             new_scores, new_breakdown = self._score(new_world, sim_state, timestep, goal_xy)
 
