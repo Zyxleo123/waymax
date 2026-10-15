@@ -391,12 +391,47 @@ def production_reward() -> Reward:
     return Reward(multiplicative={"collision": collision, "offroad": offroad})
 
 
+def collision_time_tiebreak(ctx: RewardContext) -> np.ndarray:
+    """Graded collision signal for plans that all collide: 1 if no WM mode of any agent is
+    hit; otherwise the earliest (over agents) mode-probability-weighted first-hit time,
+    / horizon. Later contact -> higher. Uses the same WM futures as ``collision``."""
+    from scores.polygon import pairwise_intersections, polygon_corners
+
+    wm = ctx.world_model_forecaster
+    ego = jnp.asarray(ctx.ego_boxes, dtype=jnp.float32)  # [P, T, 5]
+    p, t = int(ego.shape[0]), int(ego.shape[1])
+    if wm is None or not hasattr(wm, "forecast_modes"):
+        return np.ones((p,), dtype=np.float32)
+    fc = wm.forecast_modes(ctx.sim_state, timestep=int(ctx.timestep), traj_length=t, world_idx=ctx.world_idx)
+    traj_k = jnp.asarray(fc["traj_k"], dtype=jnp.float32)  # [N, K, T, 5]
+    probs = np.asarray(fc["mode_probs"], dtype=np.float32)  # [N, K]
+    masks = np.asarray(fc["masks"]).astype(bool)  # [N, T]
+    n, k = int(traj_k.shape[0]), int(traj_k.shape[1])
+    obj_poly = polygon_corners(traj_k.reshape((n * k, t, 5)))
+    ego_poly = polygon_corners(ego)
+    hits = jax.vmap(pairwise_intersections, in_axes=(1, 1), out_axes=0)(ego_poly, obj_poly)  # [T, P, N*K]
+    hits = np.asarray(hits).reshape(t, p, n, k) & np.repeat(masks.T[:, None, :, None], k, axis=3)
+    any_hit = hits.any(axis=0)  # [P, N, K]
+    first = np.where(any_hit, hits.argmax(axis=0), t).astype(np.float32)  # [P, N, K]
+    w = probs / np.clip(probs.sum(-1, keepdims=True), 1e-8, None)
+    expected_first = (first * w[None]).sum(-1)  # [P, N]
+    expected_first = np.where(masks.any(-1)[None], expected_first, t)
+    return (expected_first.min(-1) / t).astype(np.float32)
+
+
 class MarginTiebreakReward:
     """``--offroad_mode margin_tiebreak``: collision * edge-margin + 1e-3 * offroad tiebreak.
 
     Same algebra as ``Scorer.compute_score`` in that mode. ``breakdown['offroad']`` is the
     margin score (0 if offroad, 0.5..1 by clearance) so ``> 0`` still means on-road.
+
+    ``collision_eps > 0`` adds ``collision_eps * collision_time_tiebreak`` (not in
+    production): among plans that all collide, the one that hits later ranks higher, so ES
+    still has a direction when no candidate is collision-free.
     """
+
+    def __init__(self, collision_eps: float = 0.0) -> None:
+        self.collision_eps = float(collision_eps)
 
     def __call__(self, ctx: RewardContext) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         from scores.scorer_lane_graph import OFFROAD_TIEBREAK_EPS
@@ -408,14 +443,19 @@ class MarginTiebreakReward:
         margin = np.asarray(margin, dtype=np.float32)
         tiebreak = np.asarray(tiebreak, dtype=np.float32)
         score = coll * margin + OFFROAD_TIEBREAK_EPS * tiebreak
-        return score.astype(np.float32), {"collision": coll, "offroad": margin, "offroad_tiebreak": tiebreak}
+        breakdown = {"collision": coll, "offroad": margin, "offroad_tiebreak": tiebreak}
+        if self.collision_eps > 0:
+            ctb = collision_time_tiebreak(ctx)
+            score = score + self.collision_eps * ctb
+            breakdown["collision_tiebreak"] = ctb
+        return score.astype(np.float32), breakdown
 
     def __repr__(self) -> str:
-        return "MarginTiebreakReward()"
+        return f"MarginTiebreakReward(collision_eps={self.collision_eps:g})"
 
 
-def margin_tiebreak_reward() -> MarginTiebreakReward:
-    return MarginTiebreakReward()
+def margin_tiebreak_reward(collision_eps: float = 0.0) -> MarginTiebreakReward:
+    return MarginTiebreakReward(collision_eps=collision_eps)
 
 
 # ---------------------------------------------------------------------------
