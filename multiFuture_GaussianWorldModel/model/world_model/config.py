@@ -12,6 +12,8 @@ PLANNING_MODES = (
     "worst_case_independent",
 )
 DECODER_TYPES = ("per_step", "direct")
+WTA_STRATEGIES = ("hard", "ewta")
+STATIC_AGENT_MODES = ("compete", "all_modes", "fixed_mode")
 
 _PLANNING_MODE_ALIASES = {
     "expected": "expected_independent",
@@ -22,6 +24,28 @@ _PLANNING_MODE_ALIASES = {
 def canonicalize_planning_mode(mode: str) -> str:
     m = str(mode).strip().lower()
     return _PLANNING_MODE_ALIASES.get(m, m)
+
+
+def parse_ewta_schedule(schedule: str) -> list[tuple[int, int]]:
+    """Parse ``"k:start_epoch,..."`` (e.g. ``"6:0,4:50,2:100,1:150"``) sorted by epoch."""
+    stages = []
+    for item in str(schedule).split(","):
+        item = item.strip()
+        if not item:
+            continue
+        k_str, sep, epoch_str = item.partition(":")
+        if not sep:
+            raise ValueError(f"ewta_schedule entries must be 'k:start_epoch', got {item!r}")
+        k, start = int(k_str), int(epoch_str)
+        if k < 1 or start < 0:
+            raise ValueError(f"ewta_schedule needs k >= 1 and start_epoch >= 0, got {item!r}")
+        stages.append((start, k))
+    if not stages:
+        raise ValueError("ewta_schedule is empty")
+    stages.sort()
+    if stages[0][0] != 0:
+        raise ValueError(f"ewta_schedule must start at epoch 0, got {schedule!r}")
+    return [(k, start) for start, k in stages]
 
 
 @dataclass
@@ -65,11 +89,31 @@ class WorldModelConfig:
     # "per_step": future transformer over T, modes added per step (legacy).
     # "direct": one query per (agent, mode) -> whole [T, 6] trajectory in one MLP.
     decoder_type: str = "per_step"
+    # Init norm of each mode embedding row. None -> sqrt(hidden_dim), i.e. the
+    # norm of the LayerNorm'd latent it is added to; 1.0 reproduces legacy init,
+    # where modes were a ~6% perturbation and decoded near-identical trajectories.
+    mode_embed_scale: float | None = None
 
     yaw_loss_weight: float = 0.5
     mode_cls_weight: float = 1.0
     collision_focus_radius_m: float = 20.0
     collision_focus_weight: float = 2.0
+
+    # Training-only mode assignment (inference is unaffected).
+    # "hard": only the min-ADE mode is regressed. "ewta": evolving WTA, the
+    # top-k closest modes are regressed with k from ewta_schedule. The mode
+    # classifier target is always the single min-ADE mode.
+    wta_strategy: str = "hard"
+    ewta_schedule: str = "6:0,4:50,2:100,1:150"
+    # Agents with current speed < static_speed_thresh (m/s) and max future
+    # displacement < static_disp_thresh (m):
+    #   compete    -> treated like any other agent (legacy)
+    #   all_modes  -> all K modes regressed equally, no classifier loss
+    #   fixed_mode -> always assigned to static_mode_index (regression + classifier)
+    static_agents: str = "compete"
+    static_speed_thresh: float = 0.5
+    static_disp_thresh: float = 1.0
+    static_mode_index: int = 0
 
     # Planner-facing collision risk: top1 | expected_independent | worst_case_independent
     # (aliases: expected, worst_case). Modes are agent-wise, not scene-joint.
@@ -88,6 +132,25 @@ class WorldModelConfig:
         self.planning_mode = mode
         if self.decoder_type not in DECODER_TYPES:
             raise ValueError(f"decoder_type must be one of {DECODER_TYPES}, got {self.decoder_type!r}")
+        if self.wta_strategy not in WTA_STRATEGIES:
+            raise ValueError(f"wta_strategy must be one of {WTA_STRATEGIES}, got {self.wta_strategy!r}")
+        parse_ewta_schedule(self.ewta_schedule)
+        if self.static_agents not in STATIC_AGENT_MODES:
+            raise ValueError(f"static_agents must be one of {STATIC_AGENT_MODES}, got {self.static_agents!r}")
+        if not 0 <= int(self.static_mode_index) < self.num_modes:
+            raise ValueError(
+                f"static_mode_index must be in [0, {self.num_modes}), got {self.static_mode_index}"
+            )
+
+    def ewta_k(self, epoch: int) -> int:
+        """Number of modes regressed per agent at ``epoch`` (1 for hard WTA)."""
+        if self.wta_strategy != "ewta":
+            return 1
+        k = 1
+        for stage_k, start in parse_ewta_schedule(self.ewta_schedule):
+            if int(epoch) >= start:
+                k = stage_k
+        return max(1, min(int(k), self.num_modes))
 
     @property
     def agent_feature_dim(self) -> int:

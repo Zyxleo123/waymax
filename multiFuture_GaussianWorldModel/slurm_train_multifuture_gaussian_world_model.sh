@@ -31,6 +31,8 @@ fi
 
 # Decoder A/B: DECODER_TYPE=direct|per_step, AGENT_FRAME_DECODING=1|0.
 # Each run saves to SAVE_DIR/<WANDB_NAME>_<timestamp>/; use distinct WANDB_NAMEs per variant.
+# Mode collapse knobs: WTA_STRATEGY=hard|ewta, EWTA_SCHEDULE="k:start_epoch,...",
+# STATIC_AGENTS=compete|all_modes|fixed_mode, MODE_EMBED_SCALE (unset = sqrt(hidden_dim), 1.0 = legacy).
 DECODER_TYPE="${DECODER_TYPE:-direct}"
 if [[ "${AGENT_FRAME_DECODING:-1}" == "1" ]]; then
   AGENT_FRAME_FLAG="--agent_frame_decoding"
@@ -67,6 +69,13 @@ python train_world_model.py \
   --mode_cls_weight "${MODE_CLS_WEIGHT:-1.0}" \
   --sigma_eps "${SIGMA_EPS:-1e-3}" \
   --decoder_type "${DECODER_TYPE}" \
+  ${MODE_EMBED_SCALE:+--mode_embed_scale "${MODE_EMBED_SCALE}"} \
+  --wta_strategy "${WTA_STRATEGY:-hard}" \
+  --ewta_schedule "${EWTA_SCHEDULE:-6:0,4:50,2:100,1:150}" \
+  --static_agents "${STATIC_AGENTS:-compete}" \
+  --static_speed_thresh "${STATIC_SPEED_THRESH:-0.5}" \
+  --static_disp_thresh "${STATIC_DISP_THRESH:-1.0}" \
+  --static_mode_index "${STATIC_MODE_INDEX:-0}" \
   "${AGENT_FRAME_FLAG}" \
   --planning_mode "${PLANNING_MODE:-top1}" \
   --wandb_project "${WANDB_PROJECT:-world Model}" \

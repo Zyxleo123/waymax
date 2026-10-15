@@ -115,11 +115,18 @@ class LatentMultiAgentWorldModel(nn.Module):
         self.scene_norm = nn.LayerNorm(c)
 
         # K learned mode queries. Orthogonal rows keep modes distinct at init.
+        # Rows are added to a LayerNorm'd latent of norm ~sqrt(c), so scale them
+        # to match; unit-norm rows barely perturb the latent and modes collapse.
         self.mode_embeddings = nn.Parameter(torch.empty(k, c))
+        embed_scale = (
+            float(c) ** 0.5 if config.mode_embed_scale is None else float(config.mode_embed_scale)
+        )
         if k <= c:
             nn.init.orthogonal_(self.mode_embeddings)
+            with torch.no_grad():
+                self.mode_embeddings.mul_(embed_scale)
         else:
-            nn.init.normal_(self.mode_embeddings, std=0.2)
+            nn.init.normal_(self.mode_embeddings, std=embed_scale / float(c) ** 0.5)
 
         self.mode_fuse = _MLP(c, c, c, dropout=config.dropout)
 
