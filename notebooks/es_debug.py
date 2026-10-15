@@ -391,12 +391,120 @@ def production_reward() -> Reward:
     return Reward(multiplicative={"collision": collision, "offroad": offroad})
 
 
+class MarginTiebreakReward:
+    """``--offroad_mode margin_tiebreak``: collision * edge-margin + 1e-3 * offroad tiebreak.
+
+    Same algebra as ``Scorer.compute_score`` in that mode. ``breakdown['offroad']`` is the
+    margin score (0 if offroad, 0.5..1 by clearance) so ``> 0`` still means on-road.
+    """
+
+    def __call__(self, ctx: RewardContext) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+        from scores.scorer_lane_graph import OFFROAD_TIEBREAK_EPS
+
+        coll = np.asarray(collision(ctx), dtype=np.float32)
+        margin, tiebreak = ctx.scorer.compute_offroad_score_margin_tiebreak(
+            ctx.ego_boxes, sim_state=ctx.sim_state, timestep=ctx.timestep, world_idx=ctx.world_idx
+        )
+        margin = np.asarray(margin, dtype=np.float32)
+        tiebreak = np.asarray(tiebreak, dtype=np.float32)
+        score = coll * margin + OFFROAD_TIEBREAK_EPS * tiebreak
+        return score.astype(np.float32), {"collision": coll, "offroad": margin, "offroad_tiebreak": tiebreak}
+
+    def __repr__(self) -> str:
+        return "MarginTiebreakReward()"
+
+
+def margin_tiebreak_reward() -> MarginTiebreakReward:
+    return MarginTiebreakReward()
+
+
 # ---------------------------------------------------------------------------
 # Acquisition (elite selection)
 # ---------------------------------------------------------------------------
 
 # An acquisition maps (scores [P], trajectories [P, T, 5], n_elite, rng) -> indices [n_elite].
 Acquisition = Callable[[np.ndarray, np.ndarray, int, np.random.Generator], np.ndarray]
+
+
+# ---------------------------------------------------------------------------
+# Initial pool (iteration-0 sampling)
+# ---------------------------------------------------------------------------
+
+# An initial-pool sampler maps (planner, cond_bf, inst_cond_bf, inst_cond_mask_bf, features,
+# pre_batch, rng) -> normalized proposals [1, P, T, D]. Later ES iterations are unchanged
+# (elites are re-noised and denoised with the goal-conditioned cond_bf).
+InitialPool = Callable[..., jax.Array]
+
+
+def standard_pool(planner, *, cond_bf, inst_cond_bf, inst_cond_mask_bf, features, pre_batch, rng) -> jax.Array:
+    """Production behaviour: P i.i.d. diffusion samples."""
+    del features, pre_batch
+    return planner._sample_population_jit(
+        cond_bf=cond_bf, inst_cond_bf=inst_cond_bf, inst_cond_mask_bf=inst_cond_mask_bf, rng=rng
+    )
+
+
+def _farthest_points(feat_md: np.ndarray, n: int) -> np.ndarray:
+    """Greedy farthest-point selection; starts from row 0."""
+    chosen = [0]
+    d = np.linalg.norm(feat_md - feat_md[0], axis=-1)
+    for _ in range(1, n):
+        i = int(np.argmax(d))
+        chosen.append(i)
+        d = np.minimum(d, np.linalg.norm(feat_md - feat_md[i], axis=-1))
+    return np.asarray(chosen, dtype=np.int32)
+
+
+def oversample_fps(factor: int = 4, num_waypoints: int = 4) -> InitialPool:
+    """Draw ``factor * P`` samples and keep P by farthest-point sampling on world xy at
+    ``num_waypoints`` evenly spaced horizon steps. Same samples as the model would give,
+    just spread over its modes instead of concentrated on the dominant one."""
+
+    def pool(planner, *, cond_bf, inst_cond_bf, inst_cond_mask_bf, features, pre_batch, rng):
+        del features
+        keys = jax.random.split(rng, factor)
+        norm = jnp.concatenate(
+            [
+                planner._sample_population_jit(
+                    cond_bf=cond_bf, inst_cond_bf=inst_cond_bf, inst_cond_mask_bf=inst_cond_mask_bf, rng=k
+                )
+                for k in keys
+            ],
+            axis=1,
+        )  # [1, factor*P, T, D]
+        world = np.asarray(planner._postprocess_population(norm, pre_batch)[0][0])  # [M, T, 5]
+        t_idx = np.linspace(world.shape[1] // num_waypoints, world.shape[1] - 1, num_waypoints).astype(int)
+        feat = world[:, t_idx, :2].reshape(world.shape[0], -1)
+        keep = _farthest_points(feat, planner.population_size)
+        return norm[:, keep]
+
+    pool.__name__ = f"oversample_fps[x{factor}]"
+    return pool
+
+
+def goal_mix(frac_unconditioned: float = 0.25) -> InitialPool:
+    """Replace a fraction of the pool with goal-masked samples (goal_xy and
+    remaining_timesteps zeroed, as ``mask_goal=True``): proposals not pulled toward the
+    single logged route."""
+
+    def pool(planner, *, cond_bf, inst_cond_bf, inst_cond_mask_bf, features, pre_batch, rng):
+        del pre_batch
+        k_goal, k_free = jax.random.split(rng)
+        masked = dict(features)
+        masked["goal_xy"] = jnp.zeros_like(features["goal_xy"])
+        masked["remaining_timesteps"] = jnp.zeros_like(features["remaining_timesteps"])
+        cond_free, inst_free = planner._compute_condition_jit(masked)
+        n_free = int(round(frac_unconditioned * planner.population_size))
+        goal_pool = planner._sample_population_jit(
+            cond_bf=cond_bf, inst_cond_bf=inst_cond_bf, inst_cond_mask_bf=inst_cond_mask_bf, rng=k_goal
+        )
+        free_pool = planner._sample_population_jit(
+            cond_bf=cond_free, inst_cond_bf=inst_free, inst_cond_mask_bf=inst_cond_mask_bf, rng=k_free
+        )
+        return jnp.concatenate([goal_pool[:, : planner.population_size - n_free], free_pool[:, :n_free]], axis=1)
+
+    pool.__name__ = f"goal_mix[{frac_unconditioned:g}]"
+    return pool
 
 
 def topk(scores, trajectories, n_elite, rng) -> np.ndarray:
@@ -531,6 +639,7 @@ class DebugESPlanner(DiffusionESPlanner):
         world_model_forecaster: Any = None,
         reward: Reward | None = None,
         acquisition: Acquisition = topk,
+        initial_pool: InitialPool = standard_pool,
         label: str = "baseline",
     ) -> None:
         super().__init__(
@@ -547,6 +656,7 @@ class DebugESPlanner(DiffusionESPlanner):
         )
         self.reward = reward if reward is not None else production_reward()
         self.acquisition = acquisition
+        self.initial_pool = initial_pool
         self.label = label
         self.last_trace: ESTrace | None = None
         self._scenario: Scenario | None = None
@@ -560,6 +670,7 @@ class DebugESPlanner(DiffusionESPlanner):
             world_model_forecaster=world_model_forecaster,
             reward=self.reward,
             acquisition=acquisition,
+            initial_pool=initial_pool,
             label=label,
         )
 
@@ -578,7 +689,7 @@ class DebugESPlanner(DiffusionESPlanner):
         self._scenario = scenario
 
     def variant(self, **overrides) -> "DebugESPlanner":
-        """Copy with some settings changed, e.g. ``variant(reward=..., acquisition=..., label=...)``.
+        """Copy with some settings changed, e.g. ``variant(reward=..., acquisition=..., initial_pool=..., label=...)``.
 
         Changing ``population_size`` or ``resample_timesteps`` rebuilds (and re-jits);
         everything else reuses the compiled functions.
@@ -601,6 +712,7 @@ class DebugESPlanner(DiffusionESPlanner):
         new.num_iterations = int(kwargs["num_iterations"])
         new.reward = kwargs["reward"]
         new.acquisition = kwargs["acquisition"]
+        new.initial_pool = kwargs["initial_pool"]
         new.label = kwargs["label"]
         new.last_trace = None
         new._init_kwargs = kwargs
@@ -648,8 +760,14 @@ class DebugESPlanner(DiffusionESPlanner):
         goal_xy = np.asarray(goal).reshape(-1, 2)[0]
         np_rng = np.random.default_rng(int(timestep))
 
-        norm_bktd = self._sample_population_jit(
-            cond_bf=cond_bf, inst_cond_bf=inst_cond_bf, inst_cond_mask_bf=instruction_mask, rng=key_sample
+        norm_bktd = self.initial_pool(
+            self,
+            cond_bf=cond_bf,
+            inst_cond_bf=inst_cond_bf,
+            inst_cond_mask_bf=instruction_mask,
+            features=features,
+            pre_batch=pre_batch,
+            rng=key_sample,
         )
         world_bkt5, world_t_seconds_bt, world_t_valid_bt = self._postprocess_population(norm_bktd, pre_batch)
         pool_norm = norm_bktd[0]
@@ -911,6 +1029,50 @@ def replan_at(planner: DebugESPlanner, result: ClosedLoopResult, anchor: int, *,
         timestep=int(anchor),
     )
     return planner.last_trace
+
+
+# ---------------------------------------------------------------------------
+# Pool diversity diagnostics
+# ---------------------------------------------------------------------------
+
+
+def first_failure_t(result: ClosedLoopResult) -> int | None:
+    """First absolute timestep with overlap or offroad in the evaluation rollout."""
+    bad = np.flatnonzero(result.overlap_t | result.offroad_t)
+    return int(bad[0]) if bad.size else None
+
+
+def pool_stats(trace: ESTrace, iteration: int = 0, *, safe_collision: float = 0.99) -> dict[str, float]:
+    """Is there a safe plan in the pool, and how spread out is it?
+
+    safe = collision term >= ``safe_collision`` (no WM mode hits) and on-road (offroad term > 0).
+    Spread is over world-frame trajectories: mean pairwise endpoint distance, endpoint
+    std across / along the chosen plan's final heading, and final-speed std.
+    """
+    it = trace.iterations[iteration]
+    coll = it.breakdown.get("collision", np.ones_like(it.scores))
+    off = it.breakdown.get("offroad", np.ones_like(it.scores))
+    safe = (coll >= safe_collision) & (off > 0)
+    traj = np.asarray(it.trajectories)
+    end = traj[:, -1, :2]
+    pair = np.linalg.norm(end[:, None] - end[None], axis=-1)
+    yaw = float(trace.best_trajectory[-1, 2])
+    along = (end - end.mean(0)) @ np.array([np.cos(yaw), np.sin(yaw)])
+    across = (end - end.mean(0)) @ np.array([-np.sin(yaw), np.cos(yaw)])
+    speed = np.linalg.norm(traj[:, -1, 3:5], axis=-1)
+    return {
+        "iter": it.iteration,
+        "pool": len(it.scores),
+        "n_safe": int(safe.sum()),
+        "frac_safe": float(safe.mean()),
+        "frac_collision_free": float((coll >= safe_collision).mean()),
+        "frac_onroad": float((off > 0).mean()),
+        "best_score": float(it.scores.max()),
+        "endpoint_pairwise_m": float(pair[np.triu_indices(len(end), 1)].mean()),
+        "endpoint_std_across_m": float(across.std()),
+        "endpoint_std_along_m": float(along.std()),
+        "final_speed_std_mps": float(speed.std()),
+    }
 
 
 # ---------------------------------------------------------------------------
