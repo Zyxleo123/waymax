@@ -569,31 +569,43 @@ def heading_fan(
     return pool
 
 
-def _shape_norm(
-    norm_ktd: jax.Array, bend_rad: jax.Array, lateral: jax.Array, scale: jax.Array, ramp_frac: float
-) -> jax.Array:
-    """Per-plan shape edits in ego-normalized space (shapes [K]):
-    ``scale`` distance/speed about the ego (0 = stop), ``bend_rad`` rotation that grows
-    linearly from 0 to ``bend_rad`` over the horizon (an arc, not a straight ray), and
-    ``lateral`` offset (normalized units) along each point's left normal, eased in with a
-    smoothstep over the first ``ramp_frac`` of the horizon (a lane-change / nudge)."""
-    horizon = norm_ktd.shape[1]
-    u = jnp.linspace(0.0, 1.0, horizon)[None, :]  # [1, T]
-    theta = bend_rad[:, None] * u  # [K, T]
-    c, s = jnp.cos(theta), jnp.sin(theta)
-    k = scale[:, None]
-    x, y, vx, vy, yaw = (k * norm_ktd[..., i] if i < 4 else norm_ktd[..., i] for i in range(5))
-    xr, yr = c * x - s * y, s * x + c * y
-    yaw_rad = yaw * jnp.pi + theta
-    r = jnp.clip(u / max(ramp_frac, 1e-6), 0.0, 1.0)
-    offset = lateral[:, None] * r * r * (3.0 - 2.0 * r)  # [K, T]
+# Heading-offset profiles over normalized time v in [0, 1]; all start at 0 (no instant turn).
+#   arc:         a*v            keeps turning one way
+#   lane_change: a*sin(pi v)    out, then straightens: ends shifted sideways
+#   swerve:      a*sin(2 pi v)  out, then back the other way: returns to the original line
+#   reverse:     a*sin(1.5pi v) out, then curves past straight to the opposite side
+SHAPE_PROFILES = {
+    "arc": lambda v: v,
+    "lane_change": lambda v: np.sin(np.pi * v),
+    "swerve": lambda v: np.sin(2.0 * np.pi * v),
+    "reverse": lambda v: np.sin(1.5 * np.pi * v),
+}
+
+
+def _heading_profile(name: str, amp_rad: float, duration_frac: float, horizon: int) -> np.ndarray:
+    """[T] heading offset; the manoeuvre takes ``duration_frac`` of the horizon, then holds."""
+    u = np.linspace(0.0, 1.0, horizon)
+    v = np.clip(u / max(duration_frac, 1e-6), 0.0, 1.0)
+    return (amp_rad * SHAPE_PROFILES[name](v)).astype(np.float32)
+
+
+def _reshape_heading(norm_ktd: jax.Array, dpsi_kt: jax.Array, scale_k: jax.Array) -> jax.Array:
+    """Re-integrate ego-normalized [x, y, vx, vy, yaw/pi] plans with each step's displacement
+    rotated by ``dpsi_kt`` and scaled by ``scale_k`` (0 = stop). Keeps the sample's own speed
+    profile; changes its curvature."""
+    k = scale_k[:, None]
+    pos = norm_ktd[..., :2] * k[..., None]
+    step = jnp.diff(jnp.concatenate([jnp.zeros_like(pos[:, :1]), pos], axis=1), axis=1)
+    c, s = jnp.cos(dpsi_kt), jnp.sin(dpsi_kt)
+    new_pos = jnp.cumsum(jnp.stack([c * step[..., 0] - s * step[..., 1], s * step[..., 0] + c * step[..., 1]], -1), axis=1)
+    vx, vy = k * norm_ktd[..., 2], k * norm_ktd[..., 3]
     out = jnp.stack(
         [
-            xr - offset * jnp.sin(yaw_rad),
-            yr + offset * jnp.cos(yaw_rad),
+            new_pos[..., 0],
+            new_pos[..., 1],
             c * vx - s * vy,
             s * vx + c * vy,
-            yaw_rad / jnp.pi,
+            norm_ktd[..., 4] + dpsi_kt / jnp.pi,
         ],
         axis=-1,
     )
@@ -601,20 +613,20 @@ def _shape_norm(
 
 
 def shape_fan(
-    bend_deg: tuple[float, ...] = (-40.0, -20.0, 0.0, 20.0, 40.0),
-    lateral_m: tuple[float, ...] = (-3.5, -1.75, 0.0, 1.75, 3.5),
+    profiles: tuple[str, ...] = ("arc", "lane_change", "swerve", "reverse"),
+    amplitudes_deg: tuple[float, ...] = (15.0, 30.0),
+    durations: tuple[float, ...] = (0.5, 1.0),
     speed_scales: tuple[float, ...] = (1.0,),
     include_stop: bool = True,
-    ramp_frac: float = 0.4,
     keep_frac: float = 0.25,
     denoise: bool = True,
 ) -> InitialPool:
-    """Fan samples out in *shape*, not just heading: every (bend, lateral offset, speed)
-    combination, plus a stopped plan, applied to distinct diffusion samples, then
-    re-denoised (SDEdit) with the planner's ``resample_timesteps``.
-
-    bend: final heading change, reached gradually (curved paths).
-    lateral_m: sideways shift eased in over ``ramp_frac`` of the horizon (positive = left).
+    """Fan samples out in *curvature*: each fan member gets a heading-offset profile
+    (``SHAPE_PROFILES``: arc, lane_change, swerve = out-and-back, reverse = out then the
+    opposite way), both signs, each amplitude and manoeuvre duration (fraction of the
+    horizon), optionally a speed scale, plus one stopped plan. The sample is re-integrated
+    with the rotated step displacements (smooth, same speed profile), then re-denoised
+    (SDEdit) with the planner's ``resample_timesteps``.
     """
 
     def pool(planner, *, cond_bf, inst_cond_bf, inst_cond_mask_bf, features, pre_batch, rng):
@@ -623,23 +635,24 @@ def shape_fan(
         base = planner._sample_population_jit(
             cond_bf=cond_bf, inst_cond_bf=inst_cond_bf, inst_cond_mask_bf=inst_cond_mask_bf, rng=k_sample
         )  # [1, P, T, D]
+        horizon = int(base.shape[2])
         n_keep = int(round(keep_frac * planner.population_size))
         n_fan = planner.population_size - n_keep
-        combos = [(0.0, 0.0, 0.0)] if include_stop else []
+        combos = [(np.zeros((horizon,), np.float32), 0.0)] if include_stop else []
         combos += [
-            (np.deg2rad(b), d, k)
+            (_heading_profile(name, sign * np.deg2rad(a), d, horizon), k)
             for k in speed_scales
-            for b in bend_deg
-            for d in lateral_m
-            if not (b == 0 and d == 0 and k == 1.0)  # identity = the kept samples
+            for name in profiles
+            for a in amplitudes_deg
+            for d in durations
+            for sign in (1.0, -1.0)
         ]
         if len(combos) > n_fan:
             print(f"shape_fan: {len(combos)} shapes > {n_fan} slots; dropping the last {len(combos) - n_fan}")
         pick = [combos[i % len(combos)] for i in range(n_fan)]
-        bend = jnp.asarray([p[0] for p in pick], dtype=jnp.float32)
-        lateral = jnp.asarray([p[1] for p in pick], dtype=jnp.float32) / float(planner.preprocess_cfg.ego_range)
-        scale = jnp.asarray([p[2] for p in pick], dtype=jnp.float32)
-        fan = _shape_norm(base[0, n_keep:], bend, lateral, scale, ramp_frac)[None]
+        dpsi = jnp.asarray(np.stack([p[0] for p in pick]))
+        scale = jnp.asarray([p[1] for p in pick], dtype=jnp.float32)
+        fan = _reshape_heading(base[0, n_keep:], dpsi, scale)[None]
         if denoise:
             fan = planner._resample_population_jit(
                 cond_bf=cond_bf,
@@ -650,7 +663,11 @@ def shape_fan(
             )
         return jnp.concatenate([base[:, :n_keep], fan], axis=1)
 
-    pool.__name__ = f"shape_fan[{len(bend_deg)}b x {len(lateral_m)}l x {len(speed_scales)}v{'+stop' if include_stop else ''}{'' if denoise else ',raw'}]"
+    pool.__name__ = (
+        f"shape_fan[{'/'.join(profiles)} ±{'/'.join(f'{a:g}' for a in amplitudes_deg)}°"
+        f"{'' if tuple(speed_scales) == (1.0,) else ' v' + '/'.join(f'{k:g}' for k in speed_scales)}"
+        f"{'+stop' if include_stop else ''}{'' if denoise else ',raw'}]"
+    )
     return pool
 
 
