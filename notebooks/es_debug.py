@@ -569,6 +569,91 @@ def heading_fan(
     return pool
 
 
+def _shape_norm(
+    norm_ktd: jax.Array, bend_rad: jax.Array, lateral: jax.Array, scale: jax.Array, ramp_frac: float
+) -> jax.Array:
+    """Per-plan shape edits in ego-normalized space (shapes [K]):
+    ``scale`` distance/speed about the ego (0 = stop), ``bend_rad`` rotation that grows
+    linearly from 0 to ``bend_rad`` over the horizon (an arc, not a straight ray), and
+    ``lateral`` offset (normalized units) along each point's left normal, eased in with a
+    smoothstep over the first ``ramp_frac`` of the horizon (a lane-change / nudge)."""
+    horizon = norm_ktd.shape[1]
+    u = jnp.linspace(0.0, 1.0, horizon)[None, :]  # [1, T]
+    theta = bend_rad[:, None] * u  # [K, T]
+    c, s = jnp.cos(theta), jnp.sin(theta)
+    k = scale[:, None]
+    x, y, vx, vy, yaw = (k * norm_ktd[..., i] if i < 4 else norm_ktd[..., i] for i in range(5))
+    xr, yr = c * x - s * y, s * x + c * y
+    yaw_rad = yaw * jnp.pi + theta
+    r = jnp.clip(u / max(ramp_frac, 1e-6), 0.0, 1.0)
+    offset = lateral[:, None] * r * r * (3.0 - 2.0 * r)  # [K, T]
+    out = jnp.stack(
+        [
+            xr - offset * jnp.sin(yaw_rad),
+            yr + offset * jnp.cos(yaw_rad),
+            c * vx - s * vy,
+            s * vx + c * vy,
+            yaw_rad / jnp.pi,
+        ],
+        axis=-1,
+    )
+    return jnp.concatenate([out, norm_ktd[..., 5:]], axis=-1)
+
+
+def shape_fan(
+    bend_deg: tuple[float, ...] = (-40.0, -20.0, 0.0, 20.0, 40.0),
+    lateral_m: tuple[float, ...] = (-3.5, -1.75, 0.0, 1.75, 3.5),
+    speed_scales: tuple[float, ...] = (1.0,),
+    include_stop: bool = True,
+    ramp_frac: float = 0.4,
+    keep_frac: float = 0.25,
+    denoise: bool = True,
+) -> InitialPool:
+    """Fan samples out in *shape*, not just heading: every (bend, lateral offset, speed)
+    combination, plus a stopped plan, applied to distinct diffusion samples, then
+    re-denoised (SDEdit) with the planner's ``resample_timesteps``.
+
+    bend: final heading change, reached gradually (curved paths).
+    lateral_m: sideways shift eased in over ``ramp_frac`` of the horizon (positive = left).
+    """
+
+    def pool(planner, *, cond_bf, inst_cond_bf, inst_cond_mask_bf, features, pre_batch, rng):
+        del features, pre_batch
+        k_sample, k_denoise = jax.random.split(rng)
+        base = planner._sample_population_jit(
+            cond_bf=cond_bf, inst_cond_bf=inst_cond_bf, inst_cond_mask_bf=inst_cond_mask_bf, rng=k_sample
+        )  # [1, P, T, D]
+        n_keep = int(round(keep_frac * planner.population_size))
+        n_fan = planner.population_size - n_keep
+        combos = [(0.0, 0.0, 0.0)] if include_stop else []
+        combos += [
+            (np.deg2rad(b), d, k)
+            for k in speed_scales
+            for b in bend_deg
+            for d in lateral_m
+            if not (b == 0 and d == 0 and k == 1.0)  # identity = the kept samples
+        ]
+        if len(combos) > n_fan:
+            print(f"shape_fan: {len(combos)} shapes > {n_fan} slots; dropping the last {len(combos) - n_fan}")
+        pick = [combos[i % len(combos)] for i in range(n_fan)]
+        bend = jnp.asarray([p[0] for p in pick], dtype=jnp.float32)
+        lateral = jnp.asarray([p[1] for p in pick], dtype=jnp.float32) / float(planner.preprocess_cfg.ego_range)
+        scale = jnp.asarray([p[2] for p in pick], dtype=jnp.float32)
+        fan = _shape_norm(base[0, n_keep:], bend, lateral, scale, ramp_frac)[None]
+        if denoise:
+            fan = planner._resample_population_jit(
+                cond_bf=cond_bf,
+                inst_cond_bf=inst_cond_bf,
+                inst_cond_mask_bf=inst_cond_mask_bf,
+                proposals_bktd=fan,
+                rng=k_denoise,
+            )
+        return jnp.concatenate([base[:, :n_keep], fan], axis=1)
+
+    pool.__name__ = f"shape_fan[{len(bend_deg)}b x {len(lateral_m)}l x {len(speed_scales)}v{'+stop' if include_stop else ''}{'' if denoise else ',raw'}]"
+    return pool
+
+
 def topk(scores, trajectories, n_elite, rng) -> np.ndarray:
     """Production behaviour (``jax.lax.top_k``)."""
     del trajectories, rng
@@ -1122,6 +1207,7 @@ def pool_stats(trace: ESTrace, iteration: int = 0, *, safe_collision: float = 0.
     along = (end - end.mean(0)) @ np.array([np.cos(yaw), np.sin(yaw)])
     across = (end - end.mean(0)) @ np.array([-np.sin(yaw), np.cos(yaw)])
     speed = np.linalg.norm(traj[:, -1, 3:5], axis=-1)
+    dyaw = np.rad2deg(np.angle(np.exp(1j * (traj[:, -1, 2] - traj[:, 0, 2]))))
     return {
         "iter": it.iteration,
         "pool": len(it.scores),
@@ -1134,6 +1220,7 @@ def pool_stats(trace: ESTrace, iteration: int = 0, *, safe_collision: float = 0.
         "endpoint_std_across_m": float(across.std()),
         "endpoint_std_along_m": float(along.std()),
         "final_speed_std_mps": float(speed.std()),
+        "heading_change_std_deg": float(dyaw.std()),
     }
 
 
