@@ -484,6 +484,56 @@ def margin_tiebreak_reward(collision_eps: float = 0.0, progress_weight: float = 
     return MarginTiebreakReward(collision_eps=collision_eps, progress_weight=progress_weight)
 
 
+class LexicographicReward:
+    """Safety first, then goal progress (ES reward for the MCMC pool).
+
+    safety S = collision * 1[on-road] in [0, 1], quantized into ``1/bucket`` levels b = floor(S / bucket)
+    (collision-probability differences below ``bucket`` count as equal). Within a level:
+      b = 0 (colliding or off-road): (collision + collision_time_tiebreak + offroad_tiebreak) / 3,
+             i.e. less likely / later contact, shallower / later off-road;
+      b > 0: goal_progress, + ``jerk_eps`` * smoothness.
+    score = (b + 0.99 * within) / (levels + 1), so a higher safety level always wins.
+    """
+
+    def __init__(self, bucket: float = 0.05, jerk_eps: float = 0.0, jerk_ref: float = 2.0, goal_step: int = 90) -> None:
+        self.bucket, self.jerk_eps, self.jerk_ref, self.goal_step = float(bucket), float(jerk_eps), float(jerk_ref), int(goal_step)
+
+    def __call__(self, ctx: RewardContext) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+        coll = np.asarray(collision(ctx), dtype=np.float32)
+        margin, tiebreak = ctx.scorer.compute_offroad_score_margin_tiebreak(
+            ctx.ego_boxes, sim_state=ctx.sim_state, timestep=ctx.timestep, world_idx=ctx.world_idx
+        )
+        margin, tiebreak = np.asarray(margin, np.float32), np.asarray(tiebreak, np.float32)
+        ctb = collision_time_tiebreak(ctx)
+        prog = goal_progress(ctx, goal_step=self.goal_step)
+        levels = int(round(1.0 / self.bucket))
+        level = np.clip(np.floor(coll * (margin > 0) * levels + 1e-6), 0, levels)
+        within = np.where(level == 0, (coll + ctb + tiebreak) / 3.0, prog)
+        breakdown = {"collision": coll, "offroad": margin, "offroad_tiebreak": tiebreak,
+                     "collision_tiebreak": ctb, "progress": prog, "safety_level": level.astype(np.float32)}
+        if self.jerk_eps > 0:
+            smooth = np.exp(-plan_jerk(np.asarray(ctx.trajectories)) / self.jerk_ref**2)
+            within = np.where(level > 0, (1 - self.jerk_eps) * within + self.jerk_eps * smooth, within)
+            breakdown["smoothness"] = smooth.astype(np.float32)
+        score = (level + 0.99 * within) / (levels + 1)
+        return score.astype(np.float32), breakdown
+
+    def __repr__(self) -> str:
+        return f"LexicographicReward(bucket={self.bucket:g}, jerk_eps={self.jerk_eps:g})"
+
+
+def lexicographic_reward(bucket: float = 0.05, jerk_eps: float = 0.0) -> LexicographicReward:
+    return LexicographicReward(bucket=bucket, jerk_eps=jerk_eps)
+
+
+def plan_jerk(traj_pt5: np.ndarray, dt: float = 0.1) -> np.ndarray:
+    """[P] mean squared jerk (longitudinal + lateral, m^2/s^6) of world-frame plans [P, T, 5]."""
+    vel = traj_pt5[..., 3:5]
+    acc = np.gradient(vel, dt, axis=1)
+    jerk = np.gradient(acc, dt, axis=1)
+    return (jerk**2).sum(-1).mean(-1)
+
+
 # ---------------------------------------------------------------------------
 # Acquisition (elite selection)
 # ---------------------------------------------------------------------------
@@ -617,7 +667,7 @@ class CostWeights:
     contact_time: float = 2.0
     offroad: float = 4.0
     offroad_depth: float = 2.0
-    progress: float = 2.0
+    progress: float = 0.0  # progress is ES's job (lexicographic_reward); MCMC only maps the safe region
     comfort: float = 0.5
     jerk_ref: float = 2.0  # m/s^3
     goal_step: int = 90  # the episode goal is the logged position at this step
@@ -759,11 +809,19 @@ def mcmc_pool(
     step_size: float = 0.3,
     target_accept: float = 0.3,
     keep_frac: float = 0.25,
+    select: str = "diverse_safe",
+    safe_collision: float = 0.99,
+    max_jerk: float = 1.0,
     denoise: bool = False,
     denoise_steps: int | None = None,
     noise_scale: float = 1.0,
 ) -> InitialPool:
     """Initial pool from P parallel pCN-MCMC chains over smooth kinematic plans.
+
+    ``select='diverse_safe'``: every scored, feasible plan (initial states + all proposals) is a
+    candidate; the pool is a farthest-point (diverse) subset of the safe ones (collision >=
+    ``safe_collision``, on-road, jerk cost <= ``max_jerk``), topped up by the lowest-energy rest.
+    ``select='final'``: the chain states after the last step.
 
     Target: pi(z) ∝ N(z; 0, I) 1[feasible] exp(-lambda_k E(tau(z)) / temperature), lambda_k
     ramping 0 -> 1 over the first ``anneal_frac`` of the steps (step size adapts there too).
@@ -811,6 +869,7 @@ def mcmc_pool(
 
         e, parts = energy(z)
         e_hist, acc_hist, lam_hist = [e.copy()], [], []
+        seen_z, seen_e, seen_parts = [z.copy()], [e.copy()], [parts]
         beta = float(step_size)
         n_anneal = max(1, int(round(anneal_frac * num_steps)))
         for k in range(num_steps):
@@ -826,7 +885,15 @@ def mcmc_pool(
             if k < n_anneal:
                 beta = float(np.clip(beta * np.exp(rate - target_accept), 0.02, 0.95))
             e_hist.append(e.copy()); acc_hist.append(rate); lam_hist.append(lam)
+            seen_z.append(prop[ok]); seen_e.append(e_prop[ok]); seen_parts.append({n: v[ok] for n, v in parts_prop.items()})
 
+        all_z, all_e = np.concatenate(seen_z), np.concatenate(seen_e)
+        all_parts = {n: np.concatenate([sp[n] for sp in seen_parts]) for n in parts}
+        safe_all = (all_parts["collision"] >= safe_collision) & (all_parts["offroad_margin"] > 0)
+        if select == "diverse_safe":
+            pick = _select_diverse_safe(space, all_z, all_e, all_parts, n_chain,
+                                        safe_collision=safe_collision, max_jerk=max_jerk)
+            z, e, parts = all_z[pick], all_e[pick], {n: v[pick] for n, v in all_parts.items()}
         chains = space.to_norm(z, planner.preprocess_cfg, extra)
         if denoise:
             chains = denoise_proposals(
@@ -839,6 +906,8 @@ def mcmc_pool(
             "theta": space.theta(z), "rollout": space.rollout(z), "t_model": t_model, "energy": np.stack(e_hist),
             "accept": np.asarray(acc_hist), "lambda": np.asarray(lam_hist), "step_size": beta, "parts": parts,
             "n_feasible_init": int(min(len(cand), n_chain)),
+            "n_scored": int(len(all_e)), "n_safe_found": int(safe_all.sum()),
+            "n_safe_smooth_found": int((safe_all & (all_parts["jerk"] <= max_jerk)).sum()),
         }
         return jnp.concatenate([base[:, :n_keep], chains], axis=1)
 
@@ -847,6 +916,35 @@ def mcmc_pool(
         f"{'' if not denoise else f', dn{denoise_steps or 0}xσ{noise_scale:g}'}]"
     )
     return pool
+
+
+def _plan_features(space: KinematicPlanSpace, z: np.ndarray, times=(1.25, 2.5, 3.75, 5.0)) -> np.ndarray:
+    """Ego-frame (x, y) at a few horizon times: separates speed (along) and curvature (across)."""
+    r = space.rollout(z)
+    idx = [int(np.argmin(np.abs(space.t_model - t))) for t in times]
+    return np.concatenate([r["x"][:, idx], r["y"][:, idx]], axis=1)
+
+
+def _select_diverse_safe(space, z, e, parts, n, *, safe_collision, max_jerk) -> np.ndarray:
+    """Indices of n plans: diverse (farthest-point) among safe & smooth ones, lowest energy first;
+    if there are fewer than n of those, all of them plus the lowest-energy rest (also spread out)."""
+    safe = (parts["collision"] >= safe_collision) & (parts["offroad_margin"] > 0)
+    good = np.flatnonzero(safe & (parts["jerk"] <= max_jerk))
+    good = good[np.argsort(e[good])]
+    if len(good) >= n:
+        return good[_farthest_points(_plan_features(space, z[good]), n)]
+    rest = np.setdiff1d(np.arange(len(e)), good)
+    rest = rest[np.argsort(e[rest])][: max(3 * (n - len(good)), n - len(good))]
+    if len(good) == 0:
+        return rest[_farthest_points(_plan_features(space, z[rest]), min(n, len(rest)))] if len(rest) >= n else rest
+    feat = _plan_features(space, z[np.concatenate([good, rest])])
+    chosen = list(range(len(good)))
+    d = np.min(np.linalg.norm(feat[:, None] - feat[None, chosen], axis=-1), axis=1)
+    while len(chosen) < n:
+        i = int(np.argmax(d))
+        chosen.append(i)
+        d = np.minimum(d, np.linalg.norm(feat - feat[i], axis=-1))
+    return np.concatenate([good, rest])[chosen]
 
 
 def mcmc_summary(info: dict) -> dict[str, float]:
@@ -861,6 +959,9 @@ def mcmc_summary(info: dict) -> dict[str, float]:
         "progress_median": float(np.median(p["progress"])),
         "jerk_median": float(np.median(p["jerk"])),
         "accept_final": float(info["accept"][-1]) if len(info["accept"]) else float("nan"),
+        "n_scored": info.get("n_scored", 0),
+        "n_safe_found": info.get("n_safe_found", 0),
+        "n_safe_smooth_found": info.get("n_safe_smooth_found", 0),
     }
 
 
@@ -987,6 +1088,7 @@ class ESTrace:
     best_collision_debug: dict[str, Any] | None  # per-agent collision prob for the chosen plan
     label: str = ""
     n_diffusion_slots: int | None = None  # initial slots < this are diffusion samples, the rest from the sampler
+    pool_info: dict[str, Any] | None = None  # initial-pool sampler diagnostics (mcmc_pool), if any
 
     def source(self, k: int | None = None, iteration: int = -1) -> str:
         """'diffusion' or 'sampler' (e.g. an MCMC chain) for plan ``k`` (default: the chosen plan)."""
@@ -1264,6 +1366,7 @@ class DebugESPlanner(DiffusionESPlanner):
             best_collision_debug=best_debug,
             label=self.label,
             n_diffusion_slots=(self.last_pool_info or {}).get("n_keep", self.population_size),
+            pool_info=self.last_pool_info,
         )
         return PlannerResult(
             start_t_b=pre_batch.aux["anchor_step"].astype(jnp.int32),
@@ -1617,6 +1720,41 @@ def animate_closed_loop(
     html = HTML(anim.to_jshtml())
     plt.close(fig)
     return html
+
+
+def plot_closed_loop_replans(result: ClosedLoopResult, *, view_m: float = 40.0, cols: int = 4, size: float = 4.0):
+    """One panel per replan: agents (evaluation rollout) at the replan time, the ego's executed path
+    over the next replan interval (green), the chosen plan (red), the last ES elites (blue) and
+    the goal (star). Title: speed, plan source, chosen plan's safety level / progress, failures in the interval."""
+    steps = result.replan_steps
+    rows = int(np.ceil(len(steps) / cols))
+    fig, axes = plt.subplots(rows, cols, figsize=(size * cols, size * rows), squeeze=False)
+    traj, ego = result.rollout_traj, result.scenario.ego_idx
+    v = np.hypot(np.asarray(traj.vel_x[ego]), np.asarray(traj.vel_y[ego]))
+    gx, gy = np.asarray(result.scenario.goal_xy_b2[0])
+    for n, (ax, s) in enumerate(zip(axes.ravel(), steps)):
+        nxt = steps[n + 1] if n + 1 < len(steps) else len(v) - 1
+        _base_axes(ax, result.scenario.sim_state)
+        _draw_boxes(ax, traj, s, ego, ego_hit=bool((result.overlap_t[s:nxt + 1] | result.offroad_t[s:nxt + 1]).any()))
+        tr = result.traces[s]
+        last = tr.iterations[-1]
+        for k in last.elite_indices:
+            ax.plot(last.trajectories[k][:, 0], last.trajectories[k][:, 1], color=PLAN_COLOR, lw=0.7, alpha=0.5, zorder=4)
+        plan = result.plans[s]
+        ax.plot(plan[:, 0], plan[:, 1], color=HIT_COLOR, lw=1.8, zorder=6)
+        ax.plot(np.asarray(traj.x[ego, s:nxt + 1]), np.asarray(traj.y[ego, s:nxt + 1]), color=EGO_COLOR, lw=2.5, zorder=7)
+        ax.plot(gx, gy, marker="*", ms=12, color="gold", mec="k", zorder=8)
+        _set_view(ax, _ego_xy(traj, ego, s), view_m)
+        b = last.breakdown
+        terms = " ".join(f"{k[:4]}={float(b[k][tr.best_index]):.2f}" for k in ("collision", "offroad", "progress", "safety_level") if k in b)
+        flags = [f for f, a in (("OVERLAP", result.overlap_t), ("OFFROAD", result.offroad_t)) if a[s:nxt + 1].any()]
+        ax.set_title(f"t={s} v={v[s]:.1f} [{tr.source()}] {' '.join(flags)}\n{terms}", fontsize=8,
+                     color=HIT_COLOR if flags else "k")
+    for ax in axes.ravel()[len(steps):]:
+        ax.axis("off")
+    fig.suptitle(f"[{result.label}] {result.report()}", fontsize=9)
+    fig.tight_layout()
+    return fig
 
 
 def plot_speed_profile(results: list[ClosedLoopResult], *, t_range: tuple[int, int] | None = None, figsize=(12, 7)):
