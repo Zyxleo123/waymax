@@ -56,7 +56,28 @@ def extract_ego_index(state: datatypes.SimulatorState) -> jax.Array:
     return jnp.argmax(is_sdc.astype(jnp.int32), axis=-1)
 
 
-def compute_world_dt_seconds(state: datatypes.SimulatorState, fallback_dt: float = 0.1) -> jax.Array:
+# How `compute_world_dt_seconds` reads a scene's dt off its timestamps.
+WORLD_DT_METHODS = ("first", "median")
+
+
+def compute_world_dt_seconds(state: datatypes.SimulatorState, fallback_dt: float = 0.1,
+                             method: str = "first") -> jax.Array:
+    """Per-scene world step, seconds, ``[B]``; ``fallback_dt`` where no valid,
+    increasing timestamp pair exists.
+
+    ``method``:
+
+    * ``"first"`` (the default, kept for training) -- the dt of the FIRST valid pair.
+    * ``"median"`` -- the median over every valid pair.
+
+    Ported from yixiz's posthoc-opt-es branch. At inference the plan is laid onto
+    a ``k * world_dt`` grid and the env advances one log step per grid point.
+    WOMD timestamps are not quite uniform and in some scenes the first interval
+    is short (~0.075 s where the median is 0.100 s), so under ``"first"`` those
+    scenes execute the plan at ~0.75x speed while its velocity field still
+    reports full speed. Measured there on ``failure_heldout``: 44/173 scenes,
+    43 of which never reach the goal. The planners pass ``"median"``.
+    """
     ego_idx = extract_ego_index(state)
     ego_ts_us = _gather_ego(state.log_trajectory.timestamp_micros, ego_idx).astype(jnp.float32)
     ego_valid = _gather_ego(state.log_trajectory.valid, ego_idx)
@@ -65,9 +86,14 @@ def compute_world_dt_seconds(state: datatypes.SimulatorState, fallback_dt: float
     valid_pair = ego_valid[:, 1:] & ego_valid[:, :-1] & (dt > 0.0)
     any_valid = jnp.any(valid_pair, axis=-1)
 
-    first_idx = _first_true_index(valid_pair)
-    first_dt = jnp.take_along_axis(dt, first_idx[:, None], axis=1)[:, 0]
-    return jnp.where(any_valid, first_dt, jnp.full_like(first_dt, fallback_dt))
+    if method == "first":
+        first_idx = _first_true_index(valid_pair)
+        est = jnp.take_along_axis(dt, first_idx[:, None], axis=1)[:, 0]
+    elif method == "median":
+        est = jnp.nanmedian(jnp.where(valid_pair, dt, jnp.nan), axis=-1)
+    else:
+        raise ValueError(f"world dt method must be one of {WORLD_DT_METHODS}, got {method!r}")
+    return jnp.where(any_valid, est, jnp.full_like(est, fallback_dt))
 
 
 def sample_anchor_step(
@@ -354,10 +380,11 @@ def _preprocess_single_batch(
     anchor_step_override: int | None = None,
     goal_step_override: int | None = None,
     goal_xy_override: jax.Array | None = None,
+    world_dt_method: str = "first",
 ) -> tuple[PreprocessBatch, jax.Array]:
     bsz = state.log_trajectory.x.shape[0]
     ego_idx = extract_ego_index(state)
-    world_dt_b = compute_world_dt_seconds(state, cfg.world_dt_fallback)
+    world_dt_b = compute_world_dt_seconds(state, cfg.world_dt_fallback, world_dt_method)
 
     total_horizon_s = cfg.predict_horizon * cfg.model_dt
     horizon_world_steps_b = jnp.ceil(total_horizon_s / jnp.maximum(world_dt_b, 1e-3)).astype(jnp.int32)
@@ -487,7 +514,9 @@ def preprocess_simulator_state(
     anchor_step_override: int | None = None,
     goal_step_override: int | None = None,
     goal_xy_override: jax.Array | None = None,
+    world_dt_method: str = "first",
 ) -> tuple[PreprocessBatch, jax.Array]:
+    """``world_dt_method``: see :func:`compute_world_dt_seconds`."""
     if state.log_trajectory.x.ndim < 3:
         raise ValueError("Expected batched SimulatorState with shape [..., N, T].")
 
@@ -495,7 +524,9 @@ def preprocess_simulator_state(
         n_devices = state.log_trajectory.x.shape[0]
         keys = jax.random.split(rng, n_devices)
         return jax.vmap(
-            lambda s, k, t, t_g, g: preprocess_simulator_state(s, k, cfg, t, t_g, g)
+            lambda s, k, t, t_g, g: preprocess_simulator_state(
+                s, k, cfg, t, t_g, g, world_dt_method=world_dt_method)
         )(state, keys, anchor_step_override, goal_step_override, goal_xy_override)
 
-    return _preprocess_single_batch(state, rng, cfg, anchor_step_override, goal_step_override, goal_xy_override)
+    return _preprocess_single_batch(state, rng, cfg, anchor_step_override, goal_step_override,
+                                    goal_xy_override, world_dt_method=world_dt_method)

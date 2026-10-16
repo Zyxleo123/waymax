@@ -99,6 +99,7 @@ class FMESPlanner(FMPlanner):
             anchor_step_override=timestep,
             goal_step_override=90,
             goal_xy_override=goal,
+            world_dt_method="median",
         )
 
         features = pre_batch.features

@@ -945,7 +945,8 @@ class DebugESPlanner(DiffusionESPlanner):
         # Preprocessing / postprocessing are pure JAX; jitted they take ~ms instead of ~300 / ~30 ms eager.
         self._preprocess_jit = jax.jit(
             lambda state, key, t, goal: preprocess_simulator_state(
-                state, key, cfg, anchor_step_override=t, goal_step_override=90, goal_xy_override=goal
+                state, key, cfg, anchor_step_override=t, goal_step_override=90, goal_xy_override=goal,
+                world_dt_method="median",
             )
         )
         self._postprocess_jit = jax.jit(

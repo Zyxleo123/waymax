@@ -132,6 +132,7 @@ class TemporalVLAPlanner(AbstractPlanner):
 			anchor_step_override=int(timestep),
 			goal_step_override=90,
 			goal_xy_override=goal,
+			world_dt_method="median",
 		)
 		current_features = self._prepare_current_features(current_pre_batch.features, mask_goal=mask_goal)
 
@@ -245,6 +246,7 @@ class TemporalVLAPlanner(AbstractPlanner):
 				anchor_step_override=int(step),
 				goal_step_override=90,
 				goal_xy_override=goal,
+				world_dt_method="median",
 			)
 			step_batches.append(pre_batch)
 
