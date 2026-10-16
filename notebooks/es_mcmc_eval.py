@@ -80,6 +80,20 @@ def replan_rows(result: esd.ClosedLoopResult) -> list[dict]:
         }
         for k, vals in last.breakdown.items():
             row[f"best_{k}"] = round(float(vals[tr.best_index]), 3)
+        dbg = tr.best_collision_debug or {}
+        if "p_collision_i" in dbg:
+            p_hit = np.asarray(dbg["p_collision_i"])
+            st = esd._single_state(result.snapshots[s]).log_trajectory
+            ex, ey, eyaw = (float(np.asarray(a)[ego, s]) for a in (st.x, st.y, st.yaw))
+            parts = []
+            for i in np.argsort(-p_hit)[:2]:
+                if p_hit[i] < 0.05:
+                    break
+                dx, dy = float(np.asarray(st.x)[i, s]) - ex, float(np.asarray(st.y)[i, s]) - ey
+                fwd, left = dx * np.cos(eyaw) + dy * np.sin(eyaw), -dx * np.sin(eyaw) + dy * np.cos(eyaw)
+                spd = float(np.hypot(np.asarray(st.vel_x)[i, s], np.asarray(st.vel_y)[i, s]))
+                parts.append(f"a{i}:p{p_hit[i]:.2f}@({fwd:+.0f},{left:+.0f})v{spd:.0f}")
+            row["risky"] = " ".join(parts)
         if tr.pool_info is not None:
             row.update({f"mcmc_{k}": (round(x, 3) if isinstance(x, float) else x)
                         for k, x in esd.mcmc_summary(tr.pool_info).items()})
@@ -123,6 +137,13 @@ def main() -> None:
             fig = esd.plot_closed_loop_replans(r)
             fig.savefig(out / f"{tag}.png", dpi=80)
             plt.close(fig)
+            t_fail = esd.first_failure_t(r)
+            if t_fail is not None:  # ES at the two decisions before the failure
+                fa = r.anchor_for(t_fail)
+                for a in [x for x in r.replan_steps if fa - 10 <= x <= fa]:
+                    fig = esd.plot_es_iterations(r.traces[a], r.snapshots[a], ego_idx=scen.ego_idx, view_m=30)
+                    fig.savefig(out / f"{tag}_es_t{a}.png", dpi=70)
+                    plt.close(fig)
             summary.append({"scenario": f"{shard}#{idx}", "variant": name, "success": r.success,
                             "goal_reached": r.goal_reached, "overlap": r.overlap, "offroad": r.offroad,
                             "min_goal_dist_m": round(r.min_goal_distance_m, 2),

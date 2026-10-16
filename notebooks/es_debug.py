@@ -420,22 +420,32 @@ def collision_time_tiebreak(ctx: RewardContext) -> np.ndarray:
 
 
 def goal_progress(ctx: RewardContext, goal_step: int = 90, dt: float = 0.1, reach_m: float = 2.0) -> np.ndarray:
-    """Progress toward the episode goal relative to the pace needed to reach it by ``goal_step``.
+    """Pace adherence toward the episode goal, averaged over 1 s checkpoints up to ``goal_step``.
 
-    Only the part of the plan up to ``goal_step`` counts (the episode ends there): with H' = min(H,
-    time left) and d_t the plan-to-goal distance,
-    G = clip((d_0 - min_{t<=H'} d_t) / (d_0 H' / time left), 0, 1), and G = 1 if min_{t<=H'} d_t <= ``reach_m``.
-    When the deadline is inside the horizon the plan must actually get within ``reach_m`` (lateral
-    offset included) for G = 1; earlier, keeping the required pace is enough and faster earns nothing.
+    d_t = plan-to-goal distance, D_k = min_{t <= t_k} d_t at checkpoints t_k = 1 s, 2 s, ... (only up
+    to the deadline: the episode ends at ``goal_step``). The pace needed to arrive on time covers
+    d_0 t_k / (time left) by t_k, so
+        g_k = 1 if D_k <= reach_m else clip((d_0 - D_k) / (d_0 t_k / time left), 0, 1),   G = mean_k g_k.
+    Averaging over checkpoints rewards being on pace *now*: a plan that only speeds up late scores
+    lower, which matters because only its first second is executed before the next replan. Going
+    faster than needed earns nothing; when the deadline is inside the horizon the plan must get
+    within ``reach_m`` (lateral offset included) for the last checkpoints to score 1.
     """
     xy = np.asarray(ctx.trajectories[..., :2], dtype=np.float64)
     d = np.linalg.norm(xy - np.asarray(ctx.goal_xy, np.float64)[None, None], axis=-1)  # [P, T]
     steps_left = max(int(goal_step) - int(ctx.timestep), 1)
     n = min(xy.shape[1] - 1, steps_left)
-    d_min = d[:, : n + 1].min(axis=1)
-    need = d[:, 0] * n / steps_left
-    g = np.clip((d[:, 0] - d_min) / np.maximum(need, 1e-3), 0.0, 1.0)
-    return np.where(d_min <= reach_m, 1.0, g).astype(np.float32)
+    per = max(1, int(round(1.0 / dt)))
+    ks = list(range(per, n + 1, per)) or [n]
+    if ks[-1] != n:
+        ks.append(n)
+    d_cummin = np.minimum.accumulate(d, axis=1)
+    g = []
+    for k in ks:
+        need = d[:, 0] * k / steps_left
+        gk = np.clip((d[:, 0] - d_cummin[:, k]) / np.maximum(need, 1e-3), 0.0, 1.0)
+        g.append(np.where(d_cummin[:, k] <= reach_m, 1.0, gk))
+    return np.mean(g, axis=0).astype(np.float32)
 
 
 def kinematic_feasibility(
@@ -672,8 +682,10 @@ class KinematicPrior:
          continue the current motion), free w_j ~ N(v0, (accel_sigma * t_j)^2)
     k(t) = sum_j c_j b_{j,n_k}(t/H): c_0 = k0, free c_j ~ N(k0, (lat_accel_sigma / max(v0, v_floor)^2)^2)
     Feasible set (convex-hull property makes the first three exact for all t):
-      0 <= w_j <= v_max,  accel_min <= n_v (w_{j+1} - w_j) / H <= accel_max,  |c_j| <= kappa_max,
+      -v_undershoot <= w_j <= v_max,  accel_min <= n_v (w_{j+1} - w_j) / H <= accel_max,  |c_j| <= kappa_max,
       |k(t)| v(t)^2 <= lat_accel_max on a dense grid.
+    The executed speed is max(v(t), 0): a polynomial cannot reach 0 and stay there, so knots may
+    undershoot and the clip turns that into a stop-and-hold.
     """
 
     speed_degree: int = 4
@@ -687,6 +699,7 @@ class KinematicPrior:
     kappa_max: float = 0.2  # 1/m: ~5 m turning radius
     v_floor: float = 3.0  # m/s: caps the curvature std at low speed
     v_max: float = 25.0  # m/s
+    v_undershoot: float = 6.0  # m/s: speed knots may go this far below 0; the rollout clips v at 0 (stop and hold)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -757,6 +770,39 @@ class KinematicPlanSpace:
     def theta(self, z: np.ndarray) -> np.ndarray:
         return self.mu + self.sigma * z
 
+    def z_for_speed(self, v_target: np.ndarray, kappa_z: np.ndarray | None = None) -> np.ndarray:
+        """z whose speed profile best fits ``v_target`` [F] (least squares on the free knots), curvature
+        knots at ``kappa_z`` (whitened, default 0 = keep the current curvature)."""
+        n_fixed = len(self.w_fixed)
+        a = self.basis_v[:, n_fixed:]
+        b = v_target - self.basis_v[:, :n_fixed] @ np.asarray(self.w_fixed)
+        w_free = np.linalg.lstsq(a, b, rcond=None)[0]
+        # Project onto the speed constraints: each knot step within the accel bounds, knots in range.
+        pr, step = self.prior, self.horizon_s / self.nv
+        w = list(self.w_fixed)
+        for wj in w_free:
+            w.append(float(np.clip(np.clip(wj, w[-1] + pr.accel_min * step, w[-1] + pr.accel_max * step),
+                                   -pr.v_undershoot, pr.v_max)))
+        z_w = (np.asarray(w[n_fixed:]) - self.mu[: self.n_w]) / self.sigma[: self.n_w]
+        return np.concatenate([z_w, np.zeros(self.nk) if kappa_z is None else kappa_z])
+
+    def braking_anchors(self, decels=(2.0, 4.0, 6.0), kappa_z=(0.0, 0.7, -0.7)) -> np.ndarray:
+        """Feasible z for braking at each of ``decels`` (m/s^2, to a stop), each with a few curvature
+        offsets. Hard stops are ~3 sigma out in the speed prior, so random chains rarely start there."""
+        out = []
+        for dec in decels:
+            # Fit the unclipped ramp (down to -v_undershoot); the rollout clip makes it a stop.
+            v = np.maximum(self.v0 - dec * self.t_fine, -self.prior.v_undershoot)
+            for kz in kappa_z:
+                z = self.z_for_speed(v, np.full(self.nk, kz))
+                # The least-squares fit can overshoot below 0 m/s or past the accel bounds: shrink
+                # toward the prior mean until feasible.
+                for scale in np.linspace(1.0, 0.3, 8):
+                    if self.feasible((scale * z)[None])[0]:
+                        out.append(scale * z)
+                        break
+        return np.asarray(out).reshape(-1, self.dim)
+
     def controls(self, z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Control points: speed [P, nv+1], curvature [P, nk+1] (leading ones pinned to the current state)."""
         th = self.theta(z)
@@ -767,7 +813,7 @@ class KinematicPlanSpace:
 
     def profiles(self, z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         w, c = self.controls(z)
-        return w @ self.basis_v.T, c @ self.basis_k.T  # [P, F] speed, curvature
+        return np.maximum(w @ self.basis_v.T, 0.0), c @ self.basis_k.T  # [P, F] speed (clipped at 0), curvature
 
     def feasible(self, z: np.ndarray) -> np.ndarray:
         pr = self.prior
@@ -775,7 +821,7 @@ class KinematicPlanSpace:
         accel = self.nv * np.diff(w, axis=1) / self.horizon_s
         v, kappa = self.profiles(z)
         return (
-            (w >= -1e-9).all(1) & (w <= pr.v_max).all(1)
+            (w >= -pr.v_undershoot).all(1) & (w <= pr.v_max).all(1)
             & (accel >= pr.accel_min - 1e-6).all(1) & (accel <= pr.accel_max + 1e-6).all(1)
             & (np.abs(c) <= pr.kappa_max).all(1)
             & (np.abs(kappa) * v**2 <= pr.lat_accel_max + 1e-6).all(1)
@@ -843,6 +889,7 @@ def mcmc_pool(
     select: str = "diverse_safe",
     safe_collision: float = 0.99,
     max_jerk: float = 1.0,
+    braking_anchors: bool = True,
     denoise: bool = False,
     denoise_steps: int | None = None,
     noise_scale: float = 1.0,
@@ -852,7 +899,8 @@ def mcmc_pool(
     ``select='diverse_safe'``: every scored, feasible plan (initial states + all proposals) is a
     candidate; the pool is a farthest-point (diverse) subset of the safe ones (collision >=
     ``safe_collision``, on-road, jerk cost <= ``max_jerk``), topped up by the lowest-energy rest.
-    ``select='final'``: the chain states after the last step.
+    ``select='final'``: the chain states after the last step. ``braking_anchors``: a few chains start
+    from smooth stops (2/4/6 m/s^2, straight and slightly curved) so emergency braking is explored.
 
     Target: pi(z) ∝ N(z; 0, I) 1[feasible] exp(-lambda_k E(tau(z)) / temperature), lambda_k
     ramping 0 -> 1 over the first ``anneal_frac`` of the steps (step size adapts there too).
@@ -887,6 +935,8 @@ def mcmc_pool(
         half = np_rng.standard_normal((32 * n_chain, space.dim))
         cand = np.stack([half, -half], axis=1).reshape(-1, space.dim)  # z, -z, z', -z', ...
         cand = cand[space.feasible(cand)]
+        if braking_anchors:
+            cand = np.concatenate([space.braking_anchors(), cand])
         z = np.zeros((n_chain, space.dim))  # theta = mu (keep speed and curvature) is always feasible
         z[: min(len(cand), n_chain)] = cand[:n_chain]
 
