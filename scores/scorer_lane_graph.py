@@ -35,7 +35,8 @@ _EDGE_FAR = 1.0e6
 
 @jax.jit
 def _corner_signed_distances(ego_trajectories, edge_xyz, edge_dir_xyz, edge_ids, ego_z):
-    """[P, T, 4] signed corner distance to the nearest road edge point (> 0 = offroad)."""
+    """[P, T, 4] signed corner distance to the nearest road edge point (> 0 = offroad).
+    ``ego_z``: box height, a scalar or broadcastable to [P, T, 1, 1]."""
     bbox_corners_xy = polygon_corners(ego_trajectories)
     z = jnp.full_like(bbox_corners_xy[..., :1], ego_z)
     bbox_corners = jnp.concatenate([bbox_corners_xy, z], axis=-1)
@@ -67,6 +68,90 @@ def _corner_signed_distances(ego_trajectories, edge_xyz, edge_dir_xyz, edge_ids,
     )
     distances = jnp.linalg.norm(nearest_xys - bbox_corners[..., :2], axis=-1) * offroad_sign
     return jnp.reshape(distances, [*shape_prefix, num_agents, num_points])
+
+
+def _world_slice(a, world_idx: int, ndim: int) -> np.ndarray:
+    a = np.asarray(a)
+    return a[world_idx] if a.ndim > ndim else a
+
+
+def road_edge_points(roadgraph_points, world_idx: int = 0):
+    """Valid road-edge points (xyz, dir_xyz, ids) padded to a multiple of ``_EDGE_PAD`` with far-away
+    points (never nearest), or None when there are none."""
+    xyz = _world_slice(roadgraph_points.xyz, world_idx, 2).astype(np.float32)
+    dxyz = _world_slice(roadgraph_points.dir_xyz, world_idx, 2).astype(np.float32)
+    types = _world_slice(roadgraph_points.types, world_idx, 1)
+    valid = _world_slice(roadgraph_points.valid, world_idx, 1).astype(bool)
+    ids = _world_slice(roadgraph_points.ids, world_idx, 1)
+    if xyz.ndim != 2 or xyz.shape[-1] != 3 or dxyz.shape != xyz.shape or not (
+        types.shape[0] == valid.shape[0] == ids.shape[0] == xyz.shape[0]
+    ):
+        return None
+    keep = valid & np.asarray(datatypes.is_road_edge(jnp.asarray(types)))
+    if not keep.any():
+        return None
+    pad = (-int(keep.sum())) % _EDGE_PAD
+    return (
+        jnp.asarray(np.concatenate([xyz[keep], np.full((pad, 3), _EDGE_FAR, np.float32)])),
+        jnp.asarray(np.concatenate([dxyz[keep], np.zeros((pad, 3), np.float32)])),
+        jnp.asarray(np.concatenate([ids[keep], np.full((pad,), -1, ids.dtype)])),
+    )
+
+
+# Points on the driving surface: lane centres (1-3) and road lines (5-13).
+_GROUND_TYPES = tuple(range(1, 14))
+
+
+def ground_points(roadgraph_points, world_idx: int = 0) -> jax.Array:
+    """[M, 3] driving-surface roadgraph points, padded to a multiple of ``_EDGE_PAD`` with far-away points."""
+    xyz = _world_slice(roadgraph_points.xyz, world_idx, 2).astype(np.float32)
+    types = _world_slice(roadgraph_points.types, world_idx, 1)
+    valid = _world_slice(roadgraph_points.valid, world_idx, 1).astype(bool)
+    pts = xyz[valid & np.isin(types, _GROUND_TYPES)]
+    pad = (-len(pts)) % _EDGE_PAD or (_EDGE_PAD if len(pts) == 0 else 0)
+    return jnp.asarray(np.concatenate([pts, np.full((pad, 3), _EDGE_FAR, np.float32)]))
+
+
+@jax.jit
+def track_ground_z(xy_pt2, z0_p, ground_xyz):
+    """[P, T] road-surface height under each path point, followed step by step from ``z0_p``: the height
+    of the surface point nearest in (x, y, 2 z) to (x_t, y_t, z_{t-1}).
+
+    The offroad checks find the nearest road edge in 3D, so they need the box height at every step.
+    A fixed height (the ego's at the replan time, or Waymax's sim z, which StateDynamics never
+    updates) drifts off the road on slopes and can pick the edges of a bridge the path passes under.
+    Following the surface keeps the path on its own level."""
+
+    def step(z, xy):
+        d = jnp.sum((ground_xyz[None, :, :2] - xy[:, None]) ** 2, axis=-1) + (
+            2.0 * (ground_xyz[None, :, 2] - z[:, None])
+        ) ** 2
+        z_new = ground_xyz[jnp.argmin(d, axis=-1), 2]
+        return z_new, z_new
+
+    _, zs = jax.lax.scan(step, z0_p, jnp.swapaxes(xy_pt2, 0, 1))
+    return jnp.swapaxes(zs, 0, 1)
+
+
+def ego_offroad_along_trajectory(trajectory, roadgraph_points, ego_idx: int, start_t: int, world_idx: int = 0):
+    """[T] bool: ego box offroad at each timestep of a Waymax trajectory [N, T] (or [B, N, T] with
+    ``world_idx``), with the box height following the road from the ego's height at ``start_t``.
+    False before ``start_t`` and where the ego is invalid; None without road edges."""
+    edges = road_edge_points(roadgraph_points, world_idx)
+    if edges is None:
+        return None
+    get = lambda a: _world_slice(a, world_idx, 2)[ego_idx]  # noqa: E731
+    boxes = np.stack([get(trajectory.x), get(trajectory.y), get(trajectory.yaw), get(trajectory.length),
+                      get(trajectory.width)], axis=-1).astype(np.float32)  # [T, 5]
+    valid = get(trajectory.valid).astype(bool)
+    t0 = int(start_t)
+    z = np.full((len(valid),), float(get(trajectory.z)[t0]), np.float32)
+    z[t0:] = np.asarray(track_ground_z(jnp.asarray(boxes[None, t0:, :2]), jnp.asarray([z[t0]]),
+                                       ground_points(roadgraph_points, world_idx)))[0]
+    d = np.asarray(_corner_signed_distances(jnp.asarray(boxes[None]), *edges, jnp.asarray(z)[None, :, None, None]))[0]
+    off = (d > 0.0).any(-1) & valid
+    off[:t0] = False
+    return off
 
 
 @jax.jit
@@ -437,66 +522,38 @@ class Scorer:
         if edges is None:
             return None
 
-        # Waymax is_offroad uses the agent's own elevation for the box corners; the
-        # nearest-edge lookup stretches z by 2x, so z=0 picks wrong edge points in
-        # scenes far from z=0 (e.g. z≈-72 m) and flags valid plans as offroad.
+        # Box height per plan step: the road surface followed from the ego's height at the replan
+        # time (track_ground_z). A single height for the whole plan (as Waymax is_offroad assumes for
+        # one step) drifts off the road on slopes and picks the edges of bridges the plan passes under.
         ego_idx = scorer_helpers.get_ego_idx(sim_state, world_idx)
-        log_z = jnp.asarray(sim_state.log_trajectory.z[world_idx], dtype=jnp.float32)
-        ego_z = log_z[ego_idx, int(np.clip(int(timestep), 0, int(log_z.shape[1]) - 1))]
-        return _corner_signed_distances(ego_trajectories, *edges, ego_z)
+        log_z = np.asarray(sim_state.log_trajectory.z[world_idx], dtype=np.float32)
+        ego_z = float(log_z[ego_idx, int(np.clip(int(timestep), 0, int(log_z.shape[1]) - 1))])
+        z_pt = track_ground_z(
+            ego_trajectories[..., :2],
+            jnp.full((ego_trajectories.shape[0],), ego_z, jnp.float32),
+            self._cached_roadgraph(sim_state, world_idx, "ground", ground_points),
+        )
+        return _corner_signed_distances(ego_trajectories, *edges, z_pt[..., None, None])
 
     def _road_edges(self, sim_state, world_idx=0):
-        """Valid road-edge points (xyz, dir_xyz, ids) of the roadgraph, padded to a multiple of
-        ``_EDGE_PAD`` with far-away points (never nearest), or None. Cached per roadgraph so the
-        boolean filtering (a host sync) runs once per scenario instead of on every scoring call."""
+        """``road_edge_points`` of the state's roadgraph, cached per roadgraph so the boolean filtering
+        (a host sync) runs once per scenario instead of on every scoring call."""
+        return self._cached_roadgraph(sim_state, world_idx, "edges", road_edge_points)
+
+    def _cached_roadgraph(self, sim_state, world_idx, name, fn):
         roadgraph_points = getattr(sim_state, "roadgraph_points", None)
         if roadgraph_points is None or not hasattr(roadgraph_points, "xyz"):
             return None
-        key = (id(roadgraph_points.xyz), int(world_idx))
-        cache = self.__dict__.setdefault("_road_edge_cache", {})
+        key = (name, id(roadgraph_points.xyz), int(world_idx))
+        cache = self.__dict__.setdefault("_roadgraph_cache", {})
         hit = cache.get(key)
         if hit is not None and hit[0] is roadgraph_points.xyz:
             return hit[1]
-
-        roadgraph_xyz = jnp.asarray(roadgraph_points.xyz, dtype=jnp.float32)
-        roadgraph_dir_xyz = jnp.asarray(roadgraph_points.dir_xyz, dtype=jnp.float32)
-        roadgraph_types = jnp.asarray(roadgraph_points.types)
-        roadgraph_valid = jnp.asarray(roadgraph_points.valid).astype(bool)
-        roadgraph_ids = jnp.asarray(roadgraph_points.ids)
-
-        if roadgraph_xyz.ndim >= 3:
-            roadgraph_xyz = roadgraph_xyz[world_idx]
-        if roadgraph_dir_xyz.ndim >= 3:
-            roadgraph_dir_xyz = roadgraph_dir_xyz[world_idx]
-        if roadgraph_types.ndim >= 2:
-            roadgraph_types = roadgraph_types[world_idx]
-        if roadgraph_valid.ndim >= 2:
-            roadgraph_valid = roadgraph_valid[world_idx]
-        if roadgraph_ids.ndim >= 2:
-            roadgraph_ids = roadgraph_ids[world_idx]
-
-        edges = None
-        if (
-            roadgraph_xyz.ndim == 2
-            and roadgraph_xyz.shape[-1] == 3
-            and roadgraph_dir_xyz.ndim == 2
-            and roadgraph_dir_xyz.shape[-1] == 3
-            and roadgraph_types.shape[0] == roadgraph_xyz.shape[0]
-            and roadgraph_valid.shape[0] == roadgraph_xyz.shape[0]
-            and roadgraph_ids.shape[0] == roadgraph_xyz.shape[0]
-        ):
-            keep = np.asarray(roadgraph_valid & datatypes.is_road_edge(roadgraph_types))
-            if keep.any():
-                n = int(keep.sum())
-                pad = (-n) % _EDGE_PAD
-                xyz = np.concatenate([np.asarray(roadgraph_xyz)[keep], np.full((pad, 3), _EDGE_FAR, np.float32)])
-                dxyz = np.concatenate([np.asarray(roadgraph_dir_xyz)[keep], np.zeros((pad, 3), np.float32)])
-                ids = np.concatenate([np.asarray(roadgraph_ids)[keep], np.full((pad,), -1, np.asarray(roadgraph_ids).dtype)])
-                edges = (jnp.asarray(xyz), jnp.asarray(dxyz), jnp.asarray(ids))
-        if len(cache) > 8:
+        out = fn(roadgraph_points, int(world_idx))
+        if len(cache) > 16:
             cache.clear()
-        cache[key] = (roadgraph_points.xyz, edges)
-        return edges
+        cache[key] = (roadgraph_points.xyz, out)
+        return out
 
     def compute_direction_score(self, ego_trajectories):
         ego_trajectories = jnp.asarray(ego_trajectories)

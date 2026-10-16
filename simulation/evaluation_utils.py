@@ -96,6 +96,10 @@ def rollout_predicted_trajectories_with_metrics(
     rollout_t = np.asarray(rollout_out.state.timestep)
     rollout_timestep = rollout_t.reshape(rollout_t.shape[0], -1)[:, 0]
 
+    if "offroad" in metric_timeseries:
+        metric_timeseries["offroad_waymax"] = metric_timeseries["offroad"]
+        metric_timeseries["offroad"] = road_tracked_offroad(rollout_out, rollout_timestep)
+
     return {
         "metric_timeseries": metric_timeseries,
         "metric_valid": metric_valid,
@@ -103,6 +107,33 @@ def rollout_predicted_trajectories_with_metrics(
         "timestep": rollout_timestep,
         "num_log_steps": length,
     }
+
+
+def road_tracked_offroad(rollout_out, rollout_timestep) -> np.ndarray:
+    """[T_rollout, B] SDC offroad per rollout row, like Waymax's "offroad" metric but with the box height
+    following the road along the executed path.
+
+    Waymax's StateDynamics never updates z, so the ego keeps its height from the rollout start; on
+    slopes and under bridges the nearest-edge lookup (which uses z) then picks the edges of another
+    level and flags on-road driving as offroad (00011#168: the logged human drive itself is flagged).
+    """
+    from scores.scorer_lane_graph import ego_offroad_along_trajectory
+
+    final = jax.tree_util.tree_map(lambda x: x[-1], rollout_out.state)
+    traj = final.sim_trajectory
+    is_sdc = np.asarray(final.object_metadata.is_sdc)
+    t = np.asarray(rollout_timestep)
+    num_steps = int(np.asarray(traj.x).shape[-1])
+    batch = int(np.asarray(traj.x).shape[0])
+    waymax_tb = np.asarray(rollout_out.metrics["offroad"].value).reshape(len(t), batch) > 0
+    out = np.zeros((len(t), batch), dtype=bool)
+    in_range = (t >= 0) & (t < num_steps)
+    for b in range(batch):
+        off = ego_offroad_along_trajectory(
+            traj, final.roadgraph_points, int(np.argmax(is_sdc[b])), int(t[0]), world_idx=b
+        )
+        out[:, b] = waymax_tb[:, b] if off is None else np.where(in_range, off[np.clip(t, 0, num_steps - 1)], False)
+    return out
 
 
 def episode_failure_flags(
