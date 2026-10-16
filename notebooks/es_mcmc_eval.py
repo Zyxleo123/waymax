@@ -52,6 +52,9 @@ def build_variants(base: esd.DebugESPlanner) -> dict:
         "baseline": lambda: base,
         # diffusion pool, lexicographic reward: what does the reward alone do?
         "lex": lambda: base.variant(label="lex", reward=lex, resample_noise_scale=1.0),
+        # diffusion pool, lexicographic-with-slack reward (risk > road margin > progress > lane > jerk)
+        "slack_lex": lambda: base.variant(label="slack_lex", reward=esd.slack_lexicographic_reward(),
+                                          resample_noise_scale=1.0),
         # MCMC safe-diverse pool + lexicographic reward
         "mcmc_lex": lambda: base.variant(label="mcmc_lex", initial_pool=mcmc, reward=lex, resample_noise_scale=1.0),
         # same, but ES only re-ranks (no diffusion re-noising of the MCMC plans)

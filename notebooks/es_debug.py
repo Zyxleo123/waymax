@@ -567,6 +567,155 @@ def lexicographic_reward(bucket: float = 0.05, jerk_eps: float = 0.05, **kw) -> 
     return LexicographicReward(bucket=bucket, jerk_eps=jerk_eps, **kw)
 
 
+def collision_risk(ctx: RewardContext, near_s: float = 3.0, decay_s: float = 3.0, dv_ref: float = 10.0,
+                   dt: float = 0.1) -> np.ndarray:
+    """[P] discounted, severity-weighted collision probability under independent WM modes:
+        R = 1 - prod_a (1 - min(1, sum_k p_ak 1[hit_ak] w(t_ak) s(dv_ak)))
+    w(t) = 1 for t <= near_s, then exp(-(t - near_s) / decay_s) (later contact leaves replans to react);
+    s(dv) = clip(0.25 + 0.75 dv / dv_ref, 0.25, 1), dv = |v_ego - v_agent| at first contact."""
+    from scores.polygon import pairwise_intersections, polygon_corners
+
+    wm = ctx.world_model_forecaster
+    ego = jnp.asarray(ctx.ego_boxes, dtype=jnp.float32)  # [P, T, 5]
+    p, t = int(ego.shape[0]), int(ego.shape[1])
+    if wm is None or not hasattr(wm, "forecast_modes"):
+        return 1.0 - np.asarray(collision(ctx), dtype=np.float32)
+    fc = wm.forecast_modes(ctx.sim_state, timestep=int(ctx.timestep), traj_length=t, world_idx=ctx.world_idx)
+    traj_k = np.asarray(fc["traj_k"], dtype=np.float32)  # [N, K, T, 5]
+    probs = np.asarray(fc["mode_probs"], dtype=np.float32)  # [N, K]
+    masks = np.asarray(fc["masks"]).astype(bool)  # [N, T]
+    n, k = traj_k.shape[:2]
+    obj_poly = polygon_corners(jnp.asarray(traj_k).reshape((n * k, t, 5)))
+    hits = jax.vmap(pairwise_intersections, in_axes=(1, 1), out_axes=0)(polygon_corners(ego), obj_poly)
+    hits = np.asarray(hits).reshape(t, p, n, k) & masks.T[:, None, :, None]
+    any_hit = hits.any(axis=0)  # [P, N, K]
+    first = hits.argmax(axis=0)  # [P, N, K]
+    t_s = first * dt
+    w = np.where(t_s <= near_s, 1.0, np.exp(-(t_s - near_s) / decay_s))
+    ego_v = np.asarray(ctx.trajectories[..., 3:5], dtype=np.float32)  # [P, T, 2]
+    obj_v = np.gradient(traj_k[..., :2], dt, axis=2)  # [N, K, T, 2]
+    ev = np.take_along_axis(ego_v[:, None, None], first[..., None, None], axis=3)[:, :, :, 0]  # [P, N, K, 2]
+    ov = np.take_along_axis(np.broadcast_to(obj_v[None], (p, n, k, t, 2)), first[..., None, None], axis=3)[:, :, :, 0]
+    sev = np.clip(0.25 + 0.75 * np.linalg.norm(ev - ov, axis=-1) / dv_ref, 0.25, 1.0)
+    pn = probs / np.clip(probs.sum(-1, keepdims=True), 1e-8, None)
+    r_a = np.clip((pn[None] * any_hit * w * sev).sum(-1), 0.0, 1.0)  # [P, N]
+    return (1.0 - np.prod(1.0 - r_a, axis=-1)).astype(np.float32)
+
+
+def lane_keeping_cost(ctx: RewardContext, heading_w: float = 1.0, max_heading_rad: float = np.pi / 3,
+                      max_lat_m: float = 5.0, stride: int = 5) -> np.ndarray:
+    """[P] mean over time of |lateral offset| (m) to the nearest direction-consistent lane centreline
+    point + ``heading_w`` * |heading error| (rad). Offsets are capped at ``max_lat_m``."""
+    lanes = getattr(ctx.scorer, "lane_points", None)
+    traj = np.asarray(ctx.trajectories, dtype=np.float32)[:, ::stride]  # [P, T', 5]
+    if lanes is None or int(np.shape(lanes)[0]) == 0:
+        return np.zeros((traj.shape[0],), dtype=np.float32)
+    lanes = np.asarray(lanes, dtype=np.float32)
+    lxy, ldir = lanes[:, :2], lanes[:, 2:4] / np.maximum(np.linalg.norm(lanes[:, 2:4], axis=-1, keepdims=True), 1e-6)
+    lyaw = np.arctan2(ldir[:, 1], ldir[:, 0])
+    d = traj[:, :, None, :2] - lxy[None, None]  # [P, T', L, 2]
+    herr = np.abs(np.angle(np.exp(1j * (traj[:, :, None, 2] - lyaw[None, None]))))
+    dist2 = np.where(herr <= max_heading_rad, (d**2).sum(-1), np.inf)
+    j = dist2.argmin(-1)  # [P, T']
+    dj = np.take_along_axis(d, j[..., None, None], axis=2)[:, :, 0]
+    lat = np.abs(dj[..., 0] * ldir[j][..., 1] - dj[..., 1] * ldir[j][..., 0])
+    lat = np.where(np.isfinite(np.take_along_axis(dist2, j[..., None], axis=2)[..., 0]), lat, max_lat_m)
+    he = np.take_along_axis(herr, j[..., None], axis=2)[..., 0]
+    return (np.minimum(lat, max_lat_m) + heading_w * he).mean(-1).astype(np.float32)
+
+
+class SlackLexicographicReward:
+    """Lexicographic reward with slack (Wray et al. 2015) and good-enough thresholds (Gabor et al. 1998).
+
+    Levels, in order, each a filter of the survivors of the previous one (A_0 = all plans):
+      0 kinematically feasible (hard; if none is, all pass)
+      1 collision risk R (``collision_risk``)    keep R <= max(risk_ok, min R + risk_slack)
+      2 road-edge margin m (m, < 0 = offroad)    keep m >= min(margin_ok_m, max m - margin_slack_m)
+      3 goal progress G                          keep G >= max G - progress_slack
+      4 lane-keeping cost c (m)                  keep c <= max(lane_ok_m, min c + lane_slack_m)
+      5 final: lowest jerk.
+    Thresholds are relative to the best plan *in the scored set*, so the ES pool is re-ranked as a
+    whole (``rank``) whenever elites and children are merged. Score = (d + 0.99 r) / 6, with d the
+    number of filters passed and r the within-group rank by the objective of the level that failed
+    (jerk for plans that pass all), so top-k elites prefer deeper survivors, then the nearest misses.
+    """
+
+    def __init__(self, risk_ok: float = 0.01, risk_slack: float = 0.02, margin_ok_m: float = 0.5,
+                 margin_slack_m: float = 0.3, progress_slack: float = 0.05, lane_ok_m: float = 0.5,
+                 lane_slack_m: float = 0.3, goal_step: int = 90, max_accel: float = 8.0,
+                 max_accel_step: float | None = 2.0, reach_m: float = 1.0) -> None:
+        self.risk_ok, self.risk_slack = float(risk_ok), float(risk_slack)
+        self.margin_ok_m, self.margin_slack_m = float(margin_ok_m), float(margin_slack_m)
+        self.progress_slack = float(progress_slack)
+        self.lane_ok_m, self.lane_slack_m = float(lane_ok_m), float(lane_slack_m)
+        self.goal_step, self.max_accel, self.max_accel_step, self.reach_m = int(goal_step), float(max_accel), max_accel_step, float(reach_m)
+
+    def __call__(self, ctx: RewardContext) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+        traj = np.asarray(ctx.trajectories)
+        coll = np.asarray(collision(ctx), dtype=np.float32)
+        margin, _ = ctx.scorer.compute_offroad_score_margin_tiebreak(
+            ctx.ego_boxes, sim_state=ctx.sim_state, timestep=ctx.timestep, world_idx=ctx.world_idx
+        )
+        dist = ctx.scorer._offroad_corner_distances(ctx.ego_boxes, ctx.sim_state, ctx.timestep, ctx.world_idx)
+        margin_m = (np.full((traj.shape[0],), 10.0, np.float32) if dist is None
+                    else -np.asarray(dist, np.float32).max(axis=(1, 2)))
+        a0 = None if self.max_accel_step is None else _ego_kinematics(ctx.sim_state, ctx.timestep, ctx.world_idx)[1]
+        breakdown = {
+            "collision": coll,
+            "offroad": np.asarray(margin, np.float32),
+            "feasible": kinematic_feasibility(traj, max_accel=self.max_accel, max_lat_accel=self.max_accel, a0=a0,
+                                              max_accel_step=self.max_accel_step or 0.0),
+            "risk": collision_risk(ctx),
+            "margin_m": margin_m.astype(np.float32),
+            "progress": goal_progress(ctx, goal_step=self.goal_step, reach_m=self.reach_m),
+            "lane_cost_m": lane_keeping_cost(ctx),
+            "jerk": plan_jerk(traj).astype(np.float32),
+        }
+        scores, depth = self._rank(breakdown)
+        breakdown["lex_depth"] = depth
+        return scores, breakdown
+
+    def rank(self, breakdown: dict[str, np.ndarray]) -> np.ndarray:
+        scores, depth = self._rank(breakdown)
+        breakdown["lex_depth"] = depth
+        return scores
+
+    def _rank(self, b: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+        # Every objective as "higher is better".
+        objs = [b["feasible"], -b["risk"], b["margin_m"], b["progress"], -b["lane_cost_m"]]
+        cut = [
+            lambda v: v.max(),  # binary: keep the feasible ones if any
+            lambda v: min(-self.risk_ok, v.max() - self.risk_slack),
+            lambda v: min(self.margin_ok_m, v.max() - self.margin_slack_m),
+            lambda v: v.max() - self.progress_slack,
+            lambda v: min(-self.lane_ok_m, v.max() - self.lane_slack_m),
+        ]
+        n = len(b["risk"])
+        alive = np.ones(n, dtype=bool)
+        depth = np.zeros(n, dtype=np.int32)
+        for v, c in zip(objs, cut):
+            keep = alive & (v >= c(v[alive]) - 1e-9)
+            depth[keep] += 1
+            alive = keep
+        # Group d failed level d: rank by that level's objective. Infeasible (d = 0) by risk; all passed by jerk.
+        within = np.zeros(n, dtype=np.float32)
+        for d in np.unique(depth):
+            g = np.flatnonzero(depth == d)
+            key = -b["risk"] if d == 0 else (objs[d] if d < len(objs) else -b["jerk"])
+            r = np.argsort(np.argsort(key[g], kind="stable"), kind="stable")
+            within[g] = r / max(len(g) - 1, 1)
+        scores = (depth + 0.99 * within) / (len(objs) + 1)
+        return scores.astype(np.float32), depth.astype(np.float32)
+
+    def __repr__(self) -> str:
+        return (f"SlackLexicographicReward(risk {self.risk_ok:g}/{self.risk_slack:g}, margin {self.margin_ok_m:g}/"
+                f"{self.margin_slack_m:g} m, progress {self.progress_slack:g}, lane {self.lane_ok_m:g}/{self.lane_slack_m:g} m)")
+
+
+def slack_lexicographic_reward(**kw) -> SlackLexicographicReward:
+    return SlackLexicographicReward(**kw)
+
+
 def plan_jerk(traj_pt5: np.ndarray, dt: float = 0.1) -> np.ndarray:
     """[P] mean squared jerk (longitudinal + lateral, m^2/s^6) of world-frame plans [P, T, 5]."""
     vel = traj_pt5[..., 3:5]
@@ -1451,6 +1600,8 @@ class DebugESPlanner(DiffusionESPlanner):
                 k: np.concatenate([pool_breakdown[k][elite_idx], new_breakdown[k]], axis=0)
                 for k in new_breakdown
             }
+            if hasattr(self.reward, "rank"):  # set-relative rewards: re-rank the merged pool
+                pool_scores = np.asarray(self.reward.rank(pool_breakdown), dtype=np.float32)
             carried = np.concatenate(
                 [np.ones((len(elite_idx),), dtype=bool), np.zeros((len(new_scores),), dtype=bool)]
             )
