@@ -2071,3 +2071,31 @@ def shift_lane_right(scorer: Any, lane, shift_distance_m=3.5):
     shifted_xy = shifted_lane[:, :2] + jnp.asarray(shift_distance_m, dtype=jnp.float32) * right_vec
     shifted_lane = shifted_lane.at[:, :2].set(shifted_xy)
     return shifted_lane
+
+def goal_progress(
+    traj_pt5: Any, goal_xy: Any, timestep: int, goal_step: int = 90, dt: float = 0.1, reach_m: float = 1.0,
+) -> np.ndarray:
+    """[P] pace adherence toward the episode goal, averaged over 1 s checkpoints up to ``goal_step``.
+
+    d_t = plan-to-goal distance, D_k = min_{t <= t_k} d_t at checkpoints t_k = 1 s, 2 s, ... (only up
+    to the deadline: the episode ends at ``goal_step``). The pace needed to arrive on time covers
+    d_0 t_k / (time left) by t_k, so
+        g_k = 1 if D_k <= reach_m else clip((d_0 - D_k) / (d_0 t_k / time left), 0, 1),   G = mean_k g_k.
+    Averaging over checkpoints rewards being on pace now (only the first second of a plan is executed
+    before the next replan); going faster than needed earns nothing.
+    """
+    xy = np.asarray(traj_pt5, dtype=np.float64)[..., :2]
+    d = np.linalg.norm(xy - np.asarray(goal_xy, np.float64).reshape(1, 1, 2), axis=-1)  # [P, T]
+    steps_left = max(int(goal_step) - int(timestep), 1)
+    n = min(xy.shape[1] - 1, steps_left)
+    per = max(1, int(round(1.0 / dt)))
+    ks = list(range(per, n + 1, per)) or [n]
+    if ks[-1] != n:
+        ks.append(n)
+    d_cummin = np.minimum.accumulate(d, axis=1)
+    g = []
+    for k in ks:
+        need = d[:, 0] * k / steps_left
+        gk = np.clip((d[:, 0] - d_cummin[:, k]) / np.maximum(need, 1e-3), 0.0, 1.0)
+        g.append(np.where(d_cummin[:, k] <= reach_m, 1.0, gk))
+    return np.mean(g, axis=0).astype(np.float32)

@@ -51,8 +51,6 @@ def build_variants(base: esd.DebugESPlanner) -> dict:
         "baseline": lambda: base,
         # diffusion pool, lexicographic reward: what does the reward alone do?
         "lex": lambda: base.variant(label="lex", reward=lex, resample_noise_scale=1.0),
-        # diffusion pool, rulebook violations (collision > off-road > goal > tiebreaks), slack on P(collision)
-        "violation": lambda: base.variant(label="violation", reward=esd.violation_reward(), resample_noise_scale=1.0),
         # diffusion pool thinned to 64 by farthest-point sampling over 4x samples
         "fps_x4": lambda: base.variant(label="fps_x4", initial_pool=esd.oversample_fps(4)),
     }

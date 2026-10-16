@@ -7,7 +7,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from scores import violation_ranking as vr
+from scores import helpers as scorer_helpers
 from scores.scorer_lane_graph import Scorer
 from data.postprocess import postprocess_predictions
 from data.preprocess import preprocess_simulator_state
@@ -32,8 +32,7 @@ class DiffusionESPlanner(DiffusionPlanner):
         other_agent_forecast: str = "cv",
         world_model_forecaster: Any = None,
         offroad_mode: str = "binary",
-        ranking: str = "score",
-        collision_slack: float = 0.02,
+        progress_slack: float = 0.0,
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -47,12 +46,9 @@ class DiffusionESPlanner(DiffusionPlanner):
         self.num_iterations = num_iterations
         self.other_agent_forecast = str(other_agent_forecast).strip().lower()
         self.world_model_forecaster = world_model_forecaster
-        # "score": Scorer.compute_score (metrics / offroad_mode). "violation": rulebook violations ranked
-        # with slack on collision probability (scores.violation_ranking); offroad_mode is then unused.
-        if ranking not in ("score", "violation"):
-            raise ValueError(f"ranking must be 'score' or 'violation', got {ranking!r}")
-        self.ranking = ranking
-        self.collision_slack = float(collision_slack)
+        # > 0: two-level ranking. Plans within progress_slack of the best Scorer score (the safety
+        # score) are ranked first, by goal pace (helpers.goal_progress); the rest keep their score.
+        self.progress_slack = float(progress_slack)
         self.scorers = [
             Scorer(
                 metrics=metrics,
@@ -123,7 +119,8 @@ class DiffusionESPlanner(DiffusionPlanner):
             current_norm_bktd,
             pre_batch,
         )
-        current_scores_bk, current_viol = self._score_population(current_world_bkt5, sim_state, timestep, goal)
+        safety_bk, progress_bk = self._score_population(current_world_bkt5, sim_state, timestep, goal)
+        current_scores_bk = self._rank(safety_bk, progress_bk)
         # print(f"Initial scores: {current_scores_bk} \n Shape: {current_scores_bk.shape} \n Mean: {jnp.mean(current_scores_bk)}, Std: {jnp.std(current_scores_bk)}")
         for iteration_index in range(self.num_iterations + 1):
             elite_indices_bk, elite_scores_bk = self._select_topk_per_scenario(
@@ -158,21 +155,16 @@ class DiffusionESPlanner(DiffusionPlanner):
                 current_norm_bktd,
                 pre_batch,
             )
-            new_scores_bk, new_viol = self._score_population(current_world_bkt5, sim_state, timestep, goal)
+            new_safety_bk, new_progress_bk = self._score_population(current_world_bkt5, sim_state, timestep, goal)
             current_norm_bktd = jnp.concat([elite_norm_betd, current_norm_bktd], axis=1)
             current_world_bkt5 = jnp.concat([elite_world_bet5, current_world_bkt5], axis=1)
-            if current_viol is None:
-                current_scores_bk = jnp.concat([elite_scores_bk, new_scores_bk], axis=1)
-            else:
-                # Violation scores are relative to the ranked set: re-rank elites + children together.
-                elite_idx = np.asarray(elite_indices_bk)
-                current_viol = [
-                    vr.concat_violations([vr.take_violations(current_viol[w], elite_idx[w]), new_viol[w]])
-                    for w in range(len(new_viol))
-                ]
-                current_scores_bk = jnp.stack(
-                    [jnp.asarray(vr.rank_violations(b, self.collision_slack)[0]) for b in current_viol]
+            # The slack is relative to the best plan in the pool, so re-rank elites + children together.
+            safety_bk = jnp.concat([jnp.take_along_axis(safety_bk, elite_indices_bk, axis=1), new_safety_bk], axis=1)
+            if progress_bk is not None:
+                progress_bk = jnp.concat(
+                    [jnp.take_along_axis(progress_bk, elite_indices_bk, axis=1), new_progress_bk], axis=1
                 )
+            current_scores_bk = self._rank(safety_bk, progress_bk)
 
         # print(f"Final scores: {current_scores_bk} \n Shape: {current_scores_bk.shape} \n Mean: {jnp.mean(current_scores_bk)}, Std: {jnp.std(current_scores_bk)}")
         best_indices_b1, best_scores_b1 = self._select_topk_per_scenario(
@@ -213,24 +205,29 @@ class DiffusionESPlanner(DiffusionPlanner):
         )
 
     def _score_population(self, world_bkt5, sim_state, timestep, goal):
-        """(scores [B, K], per-world violation dicts or None) for world-frame plans [B, K, T, 5]."""
-        if self.ranking == "violation":
-            goal_b2 = np.asarray(goal, dtype=np.float32).reshape(-1, 2)
-            viol = [
-                vr.compute_violations(
-                    self.scorers[w], np.asarray(world_bkt5[w]), sim_state, int(timestep), goal_b2[w], w
-                )
-                for w in range(world_bkt5.shape[0])
-            ]
-            scores = jnp.stack([jnp.asarray(vr.rank_violations(b, self.collision_slack)[0]) for b in viol])
-            return scores, viol
-        scores = [
+        """(Scorer scores [B, K], goal pace [B, K] or None) for world-frame plans [B, K, T, 5]."""
+        safety = jnp.stack([
             self.scorers[w].compute_score(
                 trajectories=world_bkt5[w, :, :], sim_state=sim_state, timestep=timestep, world_idx=w
             )
             for w in range(world_bkt5.shape[0])
-        ]
-        return jnp.stack(scores), None
+        ])
+        if self.progress_slack <= 0:
+            return safety, None
+        goal_b2 = np.asarray(goal, dtype=np.float32).reshape(-1, 2)
+        progress = jnp.stack([
+            jnp.asarray(scorer_helpers.goal_progress(np.asarray(world_bkt5[w]), goal_b2[w], int(timestep)))
+            for w in range(world_bkt5.shape[0])
+        ])
+        return safety, progress
+
+    def _rank(self, safety_bk, progress_bk):
+        """Scores [B, K]: plans with safety >= best - progress_slack score 2 + pace + 1e-3 * safety
+        (above every other plan, pace first); the rest keep their safety score (<= ~1)."""
+        if progress_bk is None:
+            return safety_bk
+        top = safety_bk >= safety_bk.max(axis=1, keepdims=True) - self.progress_slack
+        return jnp.where(top, 2.0 + progress_bk + 1e-3 * safety_bk, safety_bk)
 
     def _resample_population(
         self,

@@ -24,10 +24,10 @@
 #   sbatch --export=ALL,NUM_ES_ITERATIONS=6,REPLAN_INTERVAL_STEPS=40 slurm_es_fail1500_wm_mf.sh es_fm log "${CKPT}"
 #   # ES offroad objective (default binary); margin_tiebreak adds _offmargin_tiebreak to the run name:
 #   sbatch --export=ALL,OFFROAD_MODE=margin_tiebreak slurm_es_fail1500_wm_mf.sh es_fm log "${CKPT}"
-#   # Diffusion ES ranked by rulebook violations (adds _rankviolation; OFFROAD_MODE then unused):
-#   sbatch --export=ALL,ES_RANKING=violation slurm_es_fail1500_wm_mf.sh es log "${CKPT}"
+#   # Diffusion ES: plans within PROGRESS_SLACK of the best score ranked by goal pace (adds _progslack<v>):
+#   sbatch --export=ALL,OFFROAD_MODE=margin_tiebreak,PROGRESS_SLACK=0.05 slurm_es_fail1500_wm_mf.sh es log "${CKPT}"
 #   # Only part of the targets (e.g. one chunk per GPU; merge the summaries afterwards):
-#   sbatch --export=ALL,ES_RANKING=violation,TARGET_JSON=/path/chunk0.json,RUN_SUFFIX=_c0 slurm_es_fail1500_wm_mf.sh es log "${CKPT}"
+#   sbatch --export=ALL,TARGET_JSON=/path/chunk0.json,RUN_SUFFIX=_c0 slurm_es_fail1500_wm_mf.sh es log "${CKPT}"
 set -euo pipefail
 
 USAGE="Usage: sbatch slurm_es_fail1500_wm_mf.sh {es|es_fm} {log|idm} <world_model_ckpt.pt>"
@@ -55,14 +55,13 @@ case "${OFFROAD_MODE}" in
   margin_tiebreak) OFF_TAG="_off${OFFROAD_MODE}" ;;
   *) echo "ERROR: OFFROAD_MODE must be binary or margin_tiebreak, got '${OFFROAD_MODE}'"; exit 1 ;;
 esac
-ES_RANKING="${ES_RANKING:-score}"
-case "${ES_RANKING}" in
-  score) RANK_TAG="" ;;
-  violation)
-    [[ "${PLANNER}" == "es" ]] || { echo "ERROR: ES_RANKING=violation is diffusion ES (es) only"; exit 1; }
-    RANK_TAG="_rankviolation"; OFF_TAG="" ;;
-  *) echo "ERROR: ES_RANKING must be score or violation, got '${ES_RANKING}'"; exit 1 ;;
-esac
+
+PROGRESS_SLACK="${PROGRESS_SLACK:-0}"
+PROG_TAG=""
+if [[ "${PROGRESS_SLACK}" != "0" ]]; then
+  [[ "${PLANNER}" == "es" ]] || { echo "ERROR: PROGRESS_SLACK is diffusion ES (es) only"; exit 1; }
+  PROG_TAG="_progslack${PROGRESS_SLACK}"
+fi
 
 ROOT="/zfsauton/scratch/ishanj/waymax_rs"
 EXP_ROOT="/zfsauton/scratch/ishanj/world_model_sim"
@@ -84,7 +83,7 @@ export PYTHONPATH="${ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 # Tag runs with the checkpoint folder + file, e.g. 20261005_092950_latest.
 WM_RUN="$(basename "$(dirname "${WORLD_MODEL_CKPT}")")"
 WM_TAG="${WM_RUN#multiFuture_GaussianWorldModel_}_$(basename "${WORLD_MODEL_CKPT}" .pt)"
-RUN_NAME="${PLANNER_TAG}_wm_mf_${WM_TAG}_expected_independent_${SIM_AGENTS}${ES_TAG}${OFF_TAG}${RANK_TAG}_fail1500${RUN_SUFFIX:-}"
+RUN_NAME="${PLANNER_TAG}_wm_mf_${WM_TAG}_expected_independent_${SIM_AGENTS}${ES_TAG}${OFF_TAG}${PROG_TAG}_fail1500${RUN_SUFFIX:-}"
 EXP_DIR="${EXP_ROOT}/${RUN_NAME}"
 LOG_FILE="${EXP_ROOT}/logs/${RUN_NAME}_$(date +%Y%m%d_%H%M%S).log"
 mkdir -p "${EXP_DIR}" "${EXP_ROOT}/logs"
@@ -96,7 +95,7 @@ for p in "${TARGET_JSON}" "${TFRECORD_DIR}/training" "${LANE_GRAPH_DIR}" "${WORL
   fi
 done
 
-echo "RUN_NAME=${RUN_NAME}  planner=${PLANNER}  sim_agents=${SIM_AGENTS}  es_iterations=${NUM_ES_ITERATIONS}  replan_interval=${REPLAN_INTERVAL_STEPS}  offroad_mode=${OFFROAD_MODE}  es_ranking=${ES_RANKING}  targets=${TARGET_JSON}  ckpt=${WORLD_MODEL_CKPT}" | tee -a "${LOG_FILE}"
+echo "RUN_NAME=${RUN_NAME}  planner=${PLANNER}  sim_agents=${SIM_AGENTS}  es_iterations=${NUM_ES_ITERATIONS}  replan_interval=${REPLAN_INTERVAL_STEPS}  offroad_mode=${OFFROAD_MODE}  progress_slack=${PROGRESS_SLACK}  targets=${TARGET_JSON}  ckpt=${WORLD_MODEL_CKPT}" | tee -a "${LOG_FILE}"
 
 CMD=(
   python "${ROOT}/simulation/run_simulation.py"
@@ -125,8 +124,10 @@ CMD=(
   --collision_sample_seed 0
   --wm_planning_mode expected_independent
   --offroad_mode "${OFFROAD_MODE}"
-  --es_ranking "${ES_RANKING}"
 )
+if [[ "${PLANNER}" == "es" ]]; then
+  CMD+=(--es_progress_slack "${PROGRESS_SLACK}")
+fi
 
 if [[ "${PLANNER}" == "es" ]]; then
   CMD+=(--diffusion_ckpt_path "${DIFFUSION_CKPT}" --resample_timesteps 5)

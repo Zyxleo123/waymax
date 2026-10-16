@@ -146,19 +146,11 @@ def _parse_args() -> argparse.Namespace:
         "edge-clearance margin + small graded tiebreak for offroad plans.",
     )
     parser.add_argument(
-        "--es_ranking",
-        type=str,
-        default="score",
-        choices=["score", "violation"],
-        help="Diffusion ES only. score = Scorer.compute_score (metrics + --offroad_mode); violation = "
-        "rulebook violations (collision > off-road > goal pace > tiebreaks) with slack on collision "
-        "probability, see scores/violation_ranking.py.",
-    )
-    parser.add_argument(
-        "--collision_slack",
+        "--es_progress_slack",
         type=float,
-        default=0.02,
-        help="--es_ranking violation: plans within this collision probability of the best are tied.",
+        default=0.0,
+        help="Diffusion ES only. > 0: plans within this much of the best collision/offroad score are "
+        "ranked by pace toward the goal first (0 = score only, the default).",
     )
     parser.add_argument(
         "--wm_refresh_steps",
@@ -506,8 +498,7 @@ def main(args: argparse.Namespace) -> None:
             other_agent_forecast=args.other_agent_forecast,
             world_model_forecaster=_load_world_model_forecaster(args),
             offroad_mode=args.offroad_mode,
-            ranking=args.es_ranking,
-            collision_slack=args.collision_slack,
+            progress_slack=args.es_progress_slack,
         )
     elif args.planner == "fm":
         fm_ckpt_path = args.fm_ckpt_path or args.diffusion_ckpt_path
