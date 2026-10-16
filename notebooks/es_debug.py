@@ -471,12 +471,12 @@ Acquisition = Callable[[np.ndarray, np.ndarray, int, np.random.Generator], np.nd
 # ---------------------------------------------------------------------------
 
 # An initial-pool sampler maps (planner, cond_bf, inst_cond_bf, inst_cond_mask_bf, features,
-# pre_batch, rng) -> normalized proposals [1, P, T, D]. Later ES iterations are unchanged
+# pre_batch, rng, sim_state, timestep) -> normalized proposals [1, P, T, D]. Later ES iterations are unchanged
 # (elites are re-noised and denoised with the goal-conditioned cond_bf).
 InitialPool = Callable[..., jax.Array]
 
 
-def standard_pool(planner, *, cond_bf, inst_cond_bf, inst_cond_mask_bf, features, pre_batch, rng) -> jax.Array:
+def standard_pool(planner, *, cond_bf, inst_cond_bf, inst_cond_mask_bf, features, pre_batch, rng, **_) -> jax.Array:
     """Production behaviour: P i.i.d. diffusion samples."""
     del features, pre_batch
     return planner._sample_population_jit(
@@ -500,7 +500,7 @@ def oversample_fps(factor: int = 4, num_waypoints: int = 4) -> InitialPool:
     ``num_waypoints`` evenly spaced horizon steps. Same samples as the model would give,
     just spread over its modes instead of concentrated on the dominant one."""
 
-    def pool(planner, *, cond_bf, inst_cond_bf, inst_cond_mask_bf, features, pre_batch, rng):
+    def pool(planner, *, cond_bf, inst_cond_bf, inst_cond_mask_bf, features, pre_batch, rng, **_):
         del features
         keys = jax.random.split(rng, factor)
         norm = jnp.concatenate(
@@ -519,31 +519,6 @@ def oversample_fps(factor: int = 4, num_waypoints: int = 4) -> InitialPool:
         return norm[:, keep]
 
     pool.__name__ = f"oversample_fps[x{factor}]"
-    return pool
-
-
-def goal_mix(frac_unconditioned: float = 0.25) -> InitialPool:
-    """Replace a fraction of the pool with goal-masked samples (goal_xy and
-    remaining_timesteps zeroed, as ``mask_goal=True``): proposals not pulled toward the
-    single logged route."""
-
-    def pool(planner, *, cond_bf, inst_cond_bf, inst_cond_mask_bf, features, pre_batch, rng):
-        del pre_batch
-        k_goal, k_free = jax.random.split(rng)
-        masked = dict(features)
-        masked["goal_xy"] = jnp.zeros_like(features["goal_xy"])
-        masked["remaining_timesteps"] = jnp.zeros_like(features["remaining_timesteps"])
-        cond_free, inst_free = planner._compute_condition_jit(masked)
-        n_free = int(round(frac_unconditioned * planner.population_size))
-        goal_pool = planner._sample_population_jit(
-            cond_bf=cond_bf, inst_cond_bf=inst_cond_bf, inst_cond_mask_bf=inst_cond_mask_bf, rng=k_goal
-        )
-        free_pool = planner._sample_population_jit(
-            cond_bf=cond_free, inst_cond_bf=inst_free, inst_cond_mask_bf=inst_cond_mask_bf, rng=k_free
-        )
-        return jnp.concatenate([goal_pool[:, : planner.population_size - n_free], free_pool[:, :n_free]], axis=1)
-
-    pool.__name__ = f"goal_mix[{frac_unconditioned:g}]"
     return pool
 
 
@@ -577,178 +552,269 @@ def denoise_proposals(
     return cache[key](cond_bf, inst_cond_bf, inst_cond_mask_bf, proposals_bktd, rng)
 
 
-def _rotate_scale_norm(norm_ktd: jax.Array, delta_rad: jax.Array, scale: jax.Array) -> jax.Array:
-    """Rotate ego-normalized [x, y, vx, vy, yaw/pi] plans about the ego (origin) by ``delta_rad``
-    and scale distance/speed by ``scale`` (per plan, shape [K])."""
-    c, s = jnp.cos(delta_rad)[:, None], jnp.sin(delta_rad)[:, None]
-    x, y, vx, vy, yaw = (norm_ktd[..., i] for i in range(5))
-    k = scale[:, None]
-    out = jnp.stack(
-        [
-            k * (c * x - s * y),
-            k * (s * x + c * y),
-            k * (c * vx - s * vy),
-            k * (s * vx + c * vy),
-            yaw + delta_rad[:, None] / jnp.pi,
-        ],
-        axis=-1,
-    )
-    return jnp.concatenate([out, norm_ktd[..., 5:]], axis=-1)
+# ---------------------------------------------------------------------------
+# MCMC proposal pool: sample smooth kinematic plans from p0(theta) * exp(-E(tau(theta)))
+# ---------------------------------------------------------------------------
 
 
-def heading_fan(
-    max_deg: float = 30.0,
-    num_headings: int = 12,
-    keep_frac: float = 0.25,
-    speed_scales: tuple[float, ...] = (1.0,),
-    denoise: bool = True,
-) -> InitialPool:
-    """Fan the diffusion samples out in heading, then re-denoise them (SDEdit).
+@dataclasses.dataclass(frozen=True)
+class KinematicPrior:
+    """Prior over Bernstein control points of speed v(t) and curvature kappa(t).
 
-    ``keep_frac`` of the pool stays as plain samples; each remaining sample is rotated about
-    the ego by one of ``num_headings`` angles in [-max_deg, max_deg] (and optionally scaled
-    by one of ``speed_scales``, < 1 = slower), then partially noised and denoised with the
-    planner's ``resample_timesteps`` so the result is back on the model's manifold.
-    ``denoise=False`` keeps the raw rotated plans (useful to see what the fan looks like).
+    v(t) = sum_j w_j b_{j,n}(t/H), w_0 = v0, w_j ~ N(v0, (accel_sigma * t_j)^2)
+    k(t) = sum_j c_j b_{j,n}(t/H), c_0 = k0, c_j ~ N(k0, (lat_accel_sigma / max(v0, v_floor)^2)^2)
+    Feasible set (convex-hull property makes the first three exact for all t):
+      0 <= w_j <= v_max,  accel_min <= n (w_{j+1} - w_j) / H <= accel_max,  |c_j| <= kappa_max,
+      |k(t)| v(t)^2 <= lat_accel_max on a dense grid.
     """
 
-    def pool(planner, *, cond_bf, inst_cond_bf, inst_cond_mask_bf, features, pre_batch, rng):
-        del features, pre_batch
-        k_sample, k_denoise = jax.random.split(rng)
-        base = planner._sample_population_jit(
-            cond_bf=cond_bf, inst_cond_bf=inst_cond_bf, inst_cond_mask_bf=inst_cond_mask_bf, rng=k_sample
-        )  # [1, P, T, D]
-        n_keep = int(round(keep_frac * planner.population_size))
-        combos = [(d, k) for k in speed_scales for d in np.deg2rad(np.linspace(-max_deg, max_deg, num_headings))]
-        n_fan = planner.population_size - n_keep
-        delta = jnp.asarray([combos[i % len(combos)][0] for i in range(n_fan)], dtype=jnp.float32)
-        scale = jnp.asarray([combos[i % len(combos)][1] for i in range(n_fan)], dtype=jnp.float32)
-        fan = _rotate_scale_norm(base[0, n_keep:], delta, scale)[None]  # [1, n_fan, T, D]
-        if denoise:
-            fan = planner._resample_population_jit(
-                cond_bf=cond_bf,
-                inst_cond_bf=inst_cond_bf,
-                inst_cond_mask_bf=inst_cond_mask_bf,
-                proposals_bktd=fan,
-                rng=k_denoise,
-            )
-        return jnp.concatenate([base[:, :n_keep], fan], axis=1)
-
-    speeds = "" if tuple(speed_scales) == (1.0,) else f",v{'/'.join(f'{k:g}' for k in speed_scales)}"
-    pool.__name__ = f"heading_fan[±{max_deg:g}°x{num_headings}{speeds}{'' if denoise else ',raw'}]"
-    return pool
+    degree: int = 3
+    accel_sigma: float = 1.5  # m/s^2: speed std grows as accel_sigma * t
+    accel_min: float = -6.0  # m/s^2: hard braking
+    accel_max: float = 3.0  # m/s^2
+    lat_accel_sigma: float = 2.0  # m/s^2: curvature std = lat_accel_sigma / v0^2
+    lat_accel_max: float = 5.0  # m/s^2
+    kappa_max: float = 0.2  # 1/m: ~5 m turning radius
+    v_floor: float = 3.0  # m/s: caps the curvature std at low speed
+    v_max: float = 25.0  # m/s
 
 
-# Heading-offset profiles over normalized time v in [0, 1]; all start at 0 (no instant turn).
-#   arc:         a*v            keeps turning one way
-#   lane_change: a*sin(pi v)    out, then straightens: ends shifted sideways
-#   swerve:      a*sin(2 pi v)  out, then back the other way: returns to the original line
-#   reverse:     a*sin(1.5pi v) out, then curves past straight to the opposite side
-SHAPE_PROFILES = {
-    "arc": lambda v: v,
-    "lane_change": lambda v: np.sin(np.pi * v),
-    "swerve": lambda v: np.sin(2.0 * np.pi * v),
-    "reverse": lambda v: np.sin(1.5 * np.pi * v),
-}
+@dataclasses.dataclass(frozen=True)
+class CostWeights:
+    """E(tau) = collision * (1 - C) + contact_time * (1 - T_hit) + offroad * (1 - M) + offroad_depth * (1 - R)."""
+
+    collision: float = 4.0
+    contact_time: float = 2.0
+    offroad: float = 4.0
+    offroad_depth: float = 2.0
 
 
-def _heading_profile(name: str, amp_rad: float, duration_frac: float, horizon: int) -> np.ndarray:
-    """[T] heading offset; the manoeuvre takes ``duration_frac`` of the horizon, then holds."""
-    u = np.linspace(0.0, 1.0, horizon)
-    v = np.clip(u / max(duration_frac, 1e-6), 0.0, 1.0)
-    return (amp_rad * SHAPE_PROFILES[name](v)).astype(np.float32)
+def _bernstein(n: int, u: np.ndarray) -> np.ndarray:
+    """[len(u), n + 1] Bernstein basis b_{j,n}(u)."""
+    from math import comb
+
+    j = np.arange(n + 1)
+    return np.asarray([comb(n, k) for k in j], np.float64)[None] * u[:, None] ** j * (1.0 - u[:, None]) ** (n - j)
 
 
-def _reshape_heading(norm_ktd: jax.Array, dpsi_kt: jax.Array, speed_kt: jax.Array) -> jax.Array:
-    """Re-integrate ego-normalized [x, y, vx, vy, yaw/pi] plans with each step's displacement
-    rotated by ``dpsi_kt`` and multiplied by ``speed_kt`` (1 = the sample's own speed,
-    ramping to 0 = braking to a stop). Changes curvature / speed, keeps smoothness."""
-    k = speed_kt
-    pos = norm_ktd[..., :2]
-    step = jnp.diff(jnp.concatenate([jnp.zeros_like(pos[:, :1]), pos], axis=1), axis=1) * k[..., None]
-    c, s = jnp.cos(dpsi_kt), jnp.sin(dpsi_kt)
-    new_pos = jnp.cumsum(jnp.stack([c * step[..., 0] - s * step[..., 1], s * step[..., 0] + c * step[..., 1]], -1), axis=1)
-    vx, vy = k * norm_ktd[..., 2], k * norm_ktd[..., 3]
-    out = jnp.stack(
-        [
-            new_pos[..., 0],
-            new_pos[..., 1],
-            c * vx - s * vy,
-            s * vx + c * vy,
-            norm_ktd[..., 4] + dpsi_kt / jnp.pi,
-        ],
-        axis=-1,
+def _ego_kinematics(sim_state, timestep: int, world_idx: int = 0, lookback: int = 5) -> tuple[float, float]:
+    """(speed, curvature) of the ego at ``timestep``; curvature from the yaw change over ``lookback`` steps."""
+    ego = scorer_helpers.get_ego_idx(sim_state, world_idx)
+    tr = sim_state.sim_trajectory
+    t1 = int(timestep)
+    t0 = max(t1 - lookback, 0)
+    speed = np.hypot(np.asarray(tr.vel_x[world_idx, ego, t0 : t1 + 1]), np.asarray(tr.vel_y[world_idx, ego, t0 : t1 + 1]))
+    if t1 == t0:
+        return float(speed[-1]), 0.0
+    dyaw = float(np.angle(np.exp(1j * (float(tr.yaw[world_idx, ego, t1]) - float(tr.yaw[world_idx, ego, t0])))))
+    dist = float(speed.mean()) * 0.1 * (t1 - t0)
+    return float(speed[-1]), dyaw / dist if dist > 0.5 else 0.0
+
+
+class KinematicPlanSpace:
+    """theta = (w_1..w_n, c_1..c_n) <-> smooth ego-frame plans; whitened coords z ~ N(0, I) under the prior."""
+
+    def __init__(self, prior: KinematicPrior, *, v0: float, kappa0: float, horizon_s: float, t_model: np.ndarray):
+        self.prior, self.n, self.horizon_s = prior, prior.degree, float(horizon_s)
+        self.v0 = float(np.clip(v0, 0.0, prior.v_max))
+        # Start curvature must itself be feasible at the current speed.
+        k_lat = prior.lat_accel_max / max(self.v0, 1e-3) ** 2
+        self.kappa0 = float(np.clip(kappa0, -min(prior.kappa_max, k_lat), min(prior.kappa_max, k_lat)))
+        t_ctrl = np.arange(1, self.n + 1) * self.horizon_s / self.n
+        self.mu = np.concatenate([np.full(self.n, self.v0), np.full(self.n, self.kappa0)])
+        self.sigma = np.concatenate([
+            prior.accel_sigma * t_ctrl,
+            np.full(self.n, prior.lat_accel_sigma / max(self.v0, prior.v_floor) ** 2),
+        ])
+        # Fine grid for integration (0.05 s), sampled at the model timestamps.
+        self.t_fine = np.linspace(0.0, self.horizon_s, int(round(self.horizon_s / 0.05)) + 1)
+        self.basis = _bernstein(self.n, self.t_fine / self.horizon_s)  # [F, n+1]
+        self.t_model = np.asarray(t_model, np.float64)
+
+    def theta(self, z: np.ndarray) -> np.ndarray:
+        return self.mu + self.sigma * z
+
+    def controls(self, z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Control points [P, n+1] for speed and curvature (index 0 pinned to the current state)."""
+        th = self.theta(z)
+        p = th.shape[0]
+        w = np.concatenate([np.full((p, 1), self.v0), th[:, : self.n]], axis=1)
+        c = np.concatenate([np.full((p, 1), self.kappa0), th[:, self.n :]], axis=1)
+        return w, c
+
+    def feasible(self, z: np.ndarray) -> np.ndarray:
+        pr = self.prior
+        w, c = self.controls(z)
+        accel = self.n * np.diff(w, axis=1) / self.horizon_s
+        v, kappa = w @ self.basis.T, c @ self.basis.T
+        return (
+            (w >= 0.0).all(1) & (w <= pr.v_max).all(1)
+            & (accel >= pr.accel_min).all(1) & (accel <= pr.accel_max).all(1)
+            & (np.abs(c) <= pr.kappa_max).all(1)
+            & (np.abs(kappa) * v**2 <= pr.lat_accel_max + 1e-6).all(1)
+        )
+
+    def rollout(self, z: np.ndarray) -> dict[str, np.ndarray]:
+        """Integrate psi' = kappa v, x' = v cos psi, y' = v sin psi (trapezoid) -> ego-frame states at t_model."""
+        w, c = self.controls(z)
+        v, kappa = w @ self.basis.T, c @ self.basis.T  # [P, F]
+        dt = np.diff(self.t_fine)[None]
+
+        def cumtrapz(f):
+            return np.concatenate([np.zeros_like(f[:, :1]), np.cumsum(0.5 * (f[:, 1:] + f[:, :-1]) * dt, axis=1)], 1)
+
+        psi = cumtrapz(kappa * v)
+        x, y = cumtrapz(v * np.cos(psi)), cumtrapz(v * np.sin(psi))
+        at = lambda f: np.stack([np.interp(self.t_model, self.t_fine, row) for row in f])
+        x_m, y_m, psi_m, v_m = at(x), at(y), at(psi), at(v)
+        return {"x": x_m, "y": y_m, "psi": psi_m, "v": v_m, "kappa": at(kappa),
+                "vx": v_m * np.cos(psi_m), "vy": v_m * np.sin(psi_m)}
+
+    def to_norm(self, z: np.ndarray, cfg, extra_ptd: np.ndarray) -> jax.Array:
+        """Diffusion-normalized [1, P, T, D]: [x, y]/ego_range, [vx, vy]/max_velocity, psi/pi, extra dims copied."""
+        r = self.rollout(z)
+        core = np.stack([r["x"] / cfg.ego_range, r["y"] / cfg.ego_range,
+                         r["vx"] / cfg.max_velocity, r["vy"] / cfg.max_velocity, r["psi"] / np.pi], axis=-1)
+        return jnp.asarray(np.concatenate([core, extra_ptd], axis=-1), dtype=jnp.float32)[None]
+
+
+def plan_energy(planner, norm_bktd, *, pre_batch, sim_state, timestep: int, weights: CostWeights):
+    """E [P] and its parts for normalized plans, scored with the planner's WM / lane graph (same as ES)."""
+    world = np.asarray(planner._postprocess_population(norm_bktd, pre_batch)[0][0])
+    ctx = build_reward_context(world, sim_state=sim_state, timestep=timestep, scorer=planner.scorer, goal_xy=np.zeros(2))
+    coll = np.asarray(collision(ctx), np.float32)
+    hit_t = collision_time_tiebreak(ctx)
+    margin, depth = ctx.scorer.compute_offroad_score_margin_tiebreak(
+        ctx.ego_boxes, sim_state=sim_state, timestep=timestep, world_idx=0
     )
-    return jnp.concatenate([out, norm_ktd[..., 5:]], axis=-1)
+    margin, depth = np.asarray(margin, np.float32), np.asarray(depth, np.float32)
+    parts = {"collision": coll, "contact_time": hit_t, "offroad_margin": margin, "offroad_depth": depth}
+    energy = (weights.collision * (1 - coll) + weights.contact_time * (1 - hit_t)
+              + weights.offroad * (1 - margin) + weights.offroad_depth * (1 - depth))
+    return energy.astype(np.float64), parts
 
 
-def shape_fan(
-    profiles: tuple[str, ...] = ("arc", "lane_change", "swerve", "reverse"),
-    amplitudes_deg: tuple[float, ...] = (15.0, 30.0),
-    durations: tuple[float, ...] = (0.5, 1.0),
-    speed_scales: tuple[float, ...] = (1.0,),
-    brake_fracs: tuple[float, ...] = (0.3, 0.6),
+def mcmc_pool(
+    num_steps: int = 30,
+    prior: KinematicPrior = KinematicPrior(),
+    weights: CostWeights = CostWeights(),
+    temperature: float = 1.0,
+    anneal_frac: float = 0.5,
+    step_size: float = 0.3,
+    target_accept: float = 0.3,
     keep_frac: float = 0.25,
-    denoise: bool = True,
+    denoise: bool = False,
     denoise_steps: int | None = None,
     noise_scale: float = 1.0,
 ) -> InitialPool:
-    """Fan samples out in *curvature*: each fan member gets a heading-offset profile
-    (``SHAPE_PROFILES``: arc, lane_change, swerve = out-and-back, reverse = out then the
-    opposite way), both signs, each amplitude and manoeuvre duration (fraction of the
-    horizon), optionally a constant speed scale, plus straight plans that brake smoothly to
-    a stop within each of ``brake_fracs`` of the horizon. The sample is re-integrated with
-    the rotated / scaled step displacements, then re-denoised (SDEdit) for ``denoise_steps``
-    (default: the planner's ``resample_timesteps``) at ``noise_scale`` (1.0 = the schedule's
-    noise level; production ES uses 2.0, which leaves visible jitter).
+    """Initial pool from P parallel pCN-MCMC chains over smooth kinematic plans.
+
+    Target: pi(z) ∝ N(z; 0, I) 1[feasible] exp(-lambda_k E(tau(z)) / temperature), lambda_k
+    ramping 0 -> 1 over the first ``anneal_frac`` of the steps (step size adapts there too).
+    Chains start from the prior (symmetrized: z and -z, so left/right and faster/slower come in
+    pairs). ``keep_frac`` of the pool are plain diffusion samples. ``denoise`` = SDEdit the chain
+    states. ``num_steps=0`` = prior samples only. Diagnostics go to ``planner.last_pool_info``.
     """
 
-    def pool(planner, *, cond_bf, inst_cond_bf, inst_cond_mask_bf, features, pre_batch, rng):
-        del features, pre_batch
-        k_sample, k_denoise = jax.random.split(rng)
+    def pool(planner, *, cond_bf, inst_cond_bf, inst_cond_mask_bf, features, pre_batch, rng, sim_state, timestep):
+        del features
+        k_sample, k_denoise, k_mcmc = jax.random.split(rng, 3)
+        np_rng = np.random.default_rng(int(jax.random.randint(k_mcmc, (), 0, 2**31 - 1)))
         base = planner._sample_population_jit(
             cond_bf=cond_bf, inst_cond_bf=inst_cond_bf, inst_cond_mask_bf=inst_cond_mask_bf, rng=k_sample
         )  # [1, P, T, D]
-        horizon = int(base.shape[2])
         n_keep = int(round(keep_frac * planner.population_size))
-        n_fan = planner.population_size - n_keep
-        u = np.linspace(0.0, 1.0, horizon)
-        zero = np.zeros((horizon,), np.float32)
-        combos = [(zero, np.clip(1.0 - u / f, 0.0, 1.0).astype(np.float32)) for f in brake_fracs]
-        combos += [
-            (_heading_profile(name, sign * np.deg2rad(a), d, horizon), np.full((horizon,), k, np.float32))
-            for k in speed_scales
-            for name in profiles
-            for a in amplitudes_deg
-            for d in durations
-            for sign in (1.0, -1.0)
-        ]
-        if len(combos) > n_fan:
-            print(f"shape_fan: {len(combos)} shapes > {n_fan} slots; dropping the last {len(combos) - n_fan}")
-        pick = [combos[i % len(combos)] for i in range(n_fan)]
-        dpsi = jnp.asarray(np.stack([p[0] for p in pick]))
-        speed = jnp.asarray(np.stack([p[1] for p in pick]))
-        fan = _reshape_heading(base[0, n_keep:], dpsi, speed)[None]
+        n_chain = planner.population_size - n_keep
+        horizon = int(base.shape[2])
+        t_model = np.asarray(pre_batch.aux["model_t_seconds"][0], np.float64)
+        t_model = t_model[1:] if t_model.shape[0] == horizon + 1 else t_model[:horizon]
+        v0 = float(np.hypot(*np.asarray(pre_batch.aux["anchor_world_state"][0, 2:4])))
+        _, kappa0 = _ego_kinematics(sim_state, timestep)
+        space = KinematicPlanSpace(
+            dataclasses.replace(prior, v_max=min(prior.v_max, planner.preprocess_cfg.max_velocity)),
+            v0=v0, kappa0=kappa0, horizon_s=float(t_model[-1]), t_model=t_model,
+        )
+        extra = np.asarray(base[0, n_keep:, :, 5:])
+        dim = 2 * space.n
+
+        # Initial states: feasible draws from the prior, symmetrized.
+        half = np_rng.standard_normal((32 * n_chain, dim))
+        cand = np.stack([half, -half], axis=1).reshape(-1, dim)  # z, -z, z', -z', ...
+        cand = cand[space.feasible(cand)]
+        z = np.zeros((n_chain, dim))  # theta = mu (keep speed and curvature) is always feasible
+        z[: min(len(cand), n_chain)] = cand[:n_chain]
+
+        def energy(z_):
+            return plan_energy(planner, space.to_norm(z_, planner.preprocess_cfg, extra),
+                               pre_batch=pre_batch, sim_state=sim_state, timestep=timestep, weights=weights)
+
+        e, parts = energy(z)
+        e_hist, acc_hist, lam_hist = [e.copy()], [], []
+        beta = float(step_size)
+        n_anneal = max(1, int(round(anneal_frac * num_steps)))
+        for k in range(num_steps):
+            lam = min(1.0, (k + 1) / n_anneal) / temperature
+            prop = np.sqrt(1.0 - beta**2) * z + beta * np_rng.standard_normal(z.shape)
+            ok = space.feasible(prop)
+            e_prop, parts_prop = energy(prop)
+            accept = ok & (np.log(np_rng.uniform(size=n_chain)) < -lam * (e_prop - e))
+            z = np.where(accept[:, None], prop, z)
+            e = np.where(accept, e_prop, e)
+            parts = {name: np.where(accept, parts_prop[name], parts[name]) for name in parts}
+            rate = float(accept.mean())
+            if k < n_anneal:
+                beta = float(np.clip(beta * np.exp(rate - target_accept), 0.02, 0.95))
+            e_hist.append(e.copy()); acc_hist.append(rate); lam_hist.append(lam)
+
+        chains = space.to_norm(z, planner.preprocess_cfg, extra)
         if denoise:
-            fan = denoise_proposals(
-                planner,
-                cond_bf=cond_bf,
-                inst_cond_bf=inst_cond_bf,
-                inst_cond_mask_bf=inst_cond_mask_bf,
-                proposals_bktd=fan,
-                rng=k_denoise,
-                steps=denoise_steps or planner.resample_timesteps,
-                noise_scale=noise_scale,
+            chains = denoise_proposals(
+                planner, cond_bf=cond_bf, inst_cond_bf=inst_cond_bf, inst_cond_mask_bf=inst_cond_mask_bf,
+                proposals_bktd=chains, rng=k_denoise,
+                steps=denoise_steps or planner.resample_timesteps, noise_scale=noise_scale,
             )
-        return jnp.concatenate([base[:, :n_keep], fan], axis=1)
+        planner.last_pool_info = {
+            "v0": space.v0, "kappa0": space.kappa0, "n_keep": n_keep, "z": z, "theta": space.theta(z),
+            "rollout": space.rollout(z), "t_model": t_model, "energy": np.stack(e_hist),
+            "accept": np.asarray(acc_hist), "lambda": np.asarray(lam_hist), "step_size": beta, "parts": parts,
+            "n_feasible_init": int(min(len(cand), n_chain)),
+        }
+        return jnp.concatenate([base[:, :n_keep], chains], axis=1)
 
     pool.__name__ = (
-        f"shape_fan[{'/'.join(profiles)} ±{'/'.join(f'{a:g}' for a in amplitudes_deg)}°"
-        f"{'' if tuple(speed_scales) == (1.0,) else ' v' + '/'.join(f'{k:g}' for k in speed_scales)}"
-        f"{'+brake' if brake_fracs else ''}{'' if denoise else ',raw'}"
-        f"{'' if not denoise else f',dn{denoise_steps or 0}xσ{noise_scale:g}'}]"
+        f"mcmc_pool[{num_steps} steps, T={temperature:g}"
+        f"{'' if not denoise else f', dn{denoise_steps or 0}xσ{noise_scale:g}'}]"
     )
     return pool
+
+
+def plot_mcmc(info: dict, *, figsize=(15, 3.6)):
+    """MCMC diagnostics for ``planner.last_pool_info``: energy quantiles and acceptance per step,
+    speed and curvature profiles of the final chain states."""
+    fig, ax = plt.subplots(1, 4, figsize=figsize)
+    e = info["energy"]
+    steps = np.arange(len(e))
+    ax[0].fill_between(steps, *np.percentile(e, [10, 90], axis=1), alpha=0.3, label="10-90%")
+    ax[0].plot(steps, np.median(e, axis=1), label="median")
+    ax[0].plot(steps, e.min(axis=1), label="min")
+    ax[0].set(xlabel="MCMC step", ylabel="energy E", title="energy of the chains")
+    ax[0].legend(fontsize=8)
+    if len(info["accept"]):
+        ax[1].plot(np.arange(1, len(steps)), info["accept"], label="accept rate")
+        ax[1].plot(np.arange(1, len(steps)), info["lambda"], label="λ (anneal)")
+    ax[1].set(xlabel="MCMC step", ylim=(0, 1.05), title="acceptance / annealing")
+    ax[1].legend(fontsize=8)
+    r, t = info["rollout"], info["t_model"]
+    col = plt.cm.viridis((e[-1] - e[-1].min()) / max(np.ptp(e[-1]), 1e-6))
+    for i in range(len(r["v"])):
+        ax[2].plot(t, r["v"][i], color=col[i], lw=0.8)
+        ax[3].plot(t, r["kappa"][i], color=col[i], lw=0.8)
+    ax[2].set(xlabel="t [s]", ylabel="m/s", title=f"speed (v0={info['v0']:.1f})")
+    ax[3].set(xlabel="t [s]", ylabel="1/m", title=f"curvature (κ0={info['kappa0']:.3f})")
+    ax[3].axhline(0, color="k", lw=0.5)
+    fig.suptitle("color = final energy (dark = low)", fontsize=9)
+    fig.tight_layout()
+    return fig
 
 
 def topk(scores, trajectories, n_elite, rng) -> np.ndarray:
@@ -906,6 +972,7 @@ class DebugESPlanner(DiffusionESPlanner):
         self.resample_noise_scale = resample_noise_scale
         self.label = label
         self.last_trace: ESTrace | None = None
+        self.last_pool_info: dict[str, Any] | None = None  # set by samplers that have diagnostics (mcmc_pool)
         self._scenario: Scenario | None = None
         # Kept so variant() can rebuild when jitted closures must change.
         self._init_kwargs = dict(
@@ -1017,6 +1084,8 @@ class DebugESPlanner(DiffusionESPlanner):
             features=features,
             pre_batch=pre_batch,
             rng=key_sample,
+            sim_state=sim_state,
+            timestep=int(timestep),
         )
         world_bkt5, world_t_seconds_bt, world_t_valid_bt = self._postprocess_population(norm_bktd, pre_batch)
         pool_norm = norm_bktd[0]
