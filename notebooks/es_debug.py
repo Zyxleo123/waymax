@@ -420,19 +420,33 @@ def collision_time_tiebreak(ctx: RewardContext) -> np.ndarray:
 
 
 def goal_progress(ctx: RewardContext, goal_step: int = 90, dt: float = 0.1, reach_m: float = 2.0) -> np.ndarray:
-    """Progress toward the episode goal relative to the pace needed to reach it in time.
+    """Progress toward the episode goal relative to the pace needed to reach it by ``goal_step``.
 
-    G = clip((d_0 - min_t d_t) / (v_req H), 0, 1), v_req = d_0 / max(time left until ``goal_step``, H),
-    d_t = plan-to-goal distance, H = plan horizon. 1 = keeps (at least) the pace to reach the goal by
-    ``goal_step`` or gets within ``reach_m``; going faster than needed earns nothing.
+    Only the part of the plan up to ``goal_step`` counts (the episode ends there): with H' = min(H,
+    time left) and d_t the plan-to-goal distance,
+    G = clip((d_0 - min_{t<=H'} d_t) / (d_0 H' / time left), 0, 1), and G = 1 if min_{t<=H'} d_t <= ``reach_m``.
+    When the deadline is inside the horizon the plan must actually get within ``reach_m`` (lateral
+    offset included) for G = 1; earlier, keeping the required pace is enough and faster earns nothing.
     """
     xy = np.asarray(ctx.trajectories[..., :2], dtype=np.float64)
     d = np.linalg.norm(xy - np.asarray(ctx.goal_xy, np.float64)[None, None], axis=-1)  # [P, T]
-    horizon = (xy.shape[1] - 1) * dt
-    t_left = max((goal_step - ctx.timestep) * dt, horizon)
-    need = d[:, 0] * horizon / t_left
-    g = np.clip((d[:, 0] - d.min(axis=1)) / np.maximum(need, 1e-3), 0.0, 1.0)
-    return np.where(d.min(axis=1) <= reach_m, 1.0, g).astype(np.float32)
+    steps_left = max(int(goal_step) - int(ctx.timestep), 1)
+    n = min(xy.shape[1] - 1, steps_left)
+    d_min = d[:, : n + 1].min(axis=1)
+    need = d[:, 0] * n / steps_left
+    g = np.clip((d[:, 0] - d_min) / np.maximum(need, 1e-3), 0.0, 1.0)
+    return np.where(d_min <= reach_m, 1.0, g).astype(np.float32)
+
+
+def kinematic_feasibility(traj_pt5: np.ndarray, *, dt: float = 0.1, max_accel: float = 8.0, max_lat_accel: float = 8.0) -> np.ndarray:
+    """[P] 1 if the world-frame plan (index 0 = current state) never exceeds ``max_accel`` longitudinally
+    or ``max_lat_accel`` laterally (speed * yaw rate), else 0. Catches plans that start at a speed the
+    ego is not at (a velocity jump between index 0 and 1)."""
+    speed = np.hypot(traj_pt5[..., 3], traj_pt5[..., 4])
+    lon = np.abs(np.diff(speed, axis=1)) / dt
+    yaw_rate = np.abs(np.angle(np.exp(1j * np.diff(traj_pt5[..., 2], axis=1)))) / dt
+    lat = 0.5 * (speed[:, 1:] + speed[:, :-1]) * yaw_rate
+    return ((lon.max(axis=1) <= max_accel) & (lat.max(axis=1) <= max_lat_accel)).astype(np.float32)
 
 
 class MarginTiebreakReward:
@@ -487,7 +501,7 @@ def margin_tiebreak_reward(collision_eps: float = 0.0, progress_weight: float = 
 class LexicographicReward:
     """Safety first, then goal progress (ES reward for the MCMC pool).
 
-    safety S = collision * 1[on-road] in [0, 1], quantized into ``1/bucket`` levels b = floor(S / bucket)
+    safety S = collision * 1[on-road] * 1[kinematically feasible] in [0, 1], quantized into ``1/bucket`` levels b = floor(S / bucket)
     (collision-probability differences below ``bucket`` count as equal). Within a level:
       b = 0 (colliding or off-road): (collision + collision_time_tiebreak + offroad_tiebreak) / 3,
              i.e. less likely / later contact, shallower / later off-road;
@@ -495,8 +509,10 @@ class LexicographicReward:
     score = (b + 0.99 * within) / (levels + 1), so a higher safety level always wins.
     """
 
-    def __init__(self, bucket: float = 0.05, jerk_eps: float = 0.0, jerk_ref: float = 2.0, goal_step: int = 90) -> None:
+    def __init__(self, bucket: float = 0.05, jerk_eps: float = 0.05, jerk_ref: float = 2.0, goal_step: int = 90,
+                 max_accel: float = 8.0) -> None:
         self.bucket, self.jerk_eps, self.jerk_ref, self.goal_step = float(bucket), float(jerk_eps), float(jerk_ref), int(goal_step)
+        self.max_accel = float(max_accel)
 
     def __call__(self, ctx: RewardContext) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         coll = np.asarray(collision(ctx), dtype=np.float32)
@@ -507,10 +523,12 @@ class LexicographicReward:
         ctb = collision_time_tiebreak(ctx)
         prog = goal_progress(ctx, goal_step=self.goal_step)
         levels = int(round(1.0 / self.bucket))
-        level = np.clip(np.floor(coll * (margin > 0) * levels + 1e-6), 0, levels)
-        within = np.where(level == 0, (coll + ctb + tiebreak) / 3.0, prog)
+        feasible = kinematic_feasibility(np.asarray(ctx.trajectories), max_accel=self.max_accel, max_lat_accel=self.max_accel)
+        level = np.clip(np.floor(coll * (margin > 0) * feasible * levels + 1e-6), 0, levels)
+        within = np.where(level == 0, (coll + ctb + tiebreak + feasible) / 4.0, prog)
         breakdown = {"collision": coll, "offroad": margin, "offroad_tiebreak": tiebreak,
-                     "collision_tiebreak": ctb, "progress": prog, "safety_level": level.astype(np.float32)}
+                     "collision_tiebreak": ctb, "progress": prog, "feasible": feasible,
+                     "safety_level": level.astype(np.float32)}
         if self.jerk_eps > 0:
             smooth = np.exp(-plan_jerk(np.asarray(ctx.trajectories)) / self.jerk_ref**2)
             within = np.where(level > 0, (1 - self.jerk_eps) * within + self.jerk_eps * smooth, within)
@@ -522,7 +540,7 @@ class LexicographicReward:
         return f"LexicographicReward(bucket={self.bucket:g}, jerk_eps={self.jerk_eps:g})"
 
 
-def lexicographic_reward(bucket: float = 0.05, jerk_eps: float = 0.0) -> LexicographicReward:
+def lexicographic_reward(bucket: float = 0.05, jerk_eps: float = 0.05) -> LexicographicReward:
     return LexicographicReward(bucket=bucket, jerk_eps=jerk_eps)
 
 
@@ -908,6 +926,7 @@ def mcmc_pool(
             "n_feasible_init": int(min(len(cand), n_chain)),
             "n_scored": int(len(all_e)), "n_safe_found": int(safe_all.sum()),
             "n_safe_smooth_found": int((safe_all & (all_parts["jerk"] <= max_jerk)).sum()),
+            "space": space,  # lets ES mutate these plans in z (es_mutation='hybrid')
         }
         return jnp.concatenate([base[:, :n_keep], chains], axis=1)
 
@@ -1139,6 +1158,8 @@ class DebugESPlanner(DiffusionESPlanner):
         acquisition: Acquisition = topk,
         initial_pool: InitialPool = standard_pool,
         resample_noise_scale: float | None = None,
+        es_mutation: str = "diffusion",
+        kinematic_step: float = 0.2,
         label: str = "baseline",
     ) -> None:
         super().__init__(
@@ -1158,6 +1179,10 @@ class DebugESPlanner(DiffusionESPlanner):
         self.initial_pool = initial_pool
         # None = production (policy default noise_scale=2.0); e.g. 1.0 = the schedule's noise.
         self.resample_noise_scale = resample_noise_scale
+        # 'diffusion' = production (re-noise + denoise every elite); 'hybrid' = elites that come from a
+        # kinematic sampler (mcmc_pool) are mutated with a pCN step of size kinematic_step in its z-space.
+        self.es_mutation = es_mutation
+        self.kinematic_step = float(kinematic_step)
         self.label = label
         self.last_trace: ESTrace | None = None
         self.last_pool_info: dict[str, Any] | None = None  # set by samplers that have diagnostics (mcmc_pool)
@@ -1174,6 +1199,8 @@ class DebugESPlanner(DiffusionESPlanner):
             acquisition=acquisition,
             initial_pool=initial_pool,
             resample_noise_scale=resample_noise_scale,
+            es_mutation=es_mutation,
+            kinematic_step=kinematic_step,
             label=label,
         )
 
@@ -1217,10 +1244,27 @@ class DebugESPlanner(DiffusionESPlanner):
         new.acquisition = kwargs["acquisition"]
         new.initial_pool = kwargs["initial_pool"]
         new.resample_noise_scale = kwargs["resample_noise_scale"]
+        new.es_mutation = kwargs["es_mutation"]
+        new.kinematic_step = float(kwargs["kinematic_step"])
         new.label = kwargs["label"]
         new.last_trace = None
         new._init_kwargs = kwargs
         return new
+
+    def _mutate_kinematic(self, space, z, np_rng, tries: int = 8):
+        """pCN step z' = sqrt(1 - b^2) z + b xi, redrawn until feasible (else keep z)."""
+        b = self.kinematic_step
+        out = z.copy()
+        todo = np.ones(len(z), dtype=bool)
+        for _ in range(tries):
+            prop = np.sqrt(1.0 - b**2) * z[todo] + b * np_rng.standard_normal((int(todo.sum()), z.shape[1]))
+            ok = space.feasible(prop)
+            idx = np.flatnonzero(todo)
+            out[idx[ok]] = prop[ok]
+            todo[idx[ok]] = False
+            if not todo.any():
+                break
+        return out
 
     def _score(self, traj_pt5, sim_state, timestep, goal_xy):
         ctx = build_reward_context(
@@ -1283,6 +1327,11 @@ class DebugESPlanner(DiffusionESPlanner):
         pool_scores, pool_breakdown = self._score(pool_world, sim_state, timestep, goal_xy)
         carried = np.zeros((len(pool_scores),), dtype=bool)
         origin = np.arange(len(pool_scores))
+        info = self.last_pool_info or {}
+        space = info.get("space") if self.es_mutation == "hybrid" else None
+        if space is not None:  # z of every pool member, NaN for diffusion samples
+            pool_z = np.full((len(pool_scores), space.dim), np.nan)
+            pool_z[info["n_keep"]:] = info["z"]
         # Same elite -> slot mapping as _replicate_elites.
         n_el, n_pop = self.elite_size, self.population_size
         replica_of = np.repeat(np.arange(n_el), [n_pop // n_el + (i < n_pop % n_el) for i in range(n_el)])
@@ -1319,6 +1368,14 @@ class DebugESPlanner(DiffusionESPlanner):
                 new_norm = denoise_proposals(
                     self, **resample_kw, steps=self.resample_timesteps, noise_scale=self.resample_noise_scale
                 )
+            if space is not None:
+                child_z = pool_z[elite_idx][replica_of]
+                kin = ~np.isnan(child_z[:, 0])
+                if kin.any():
+                    child_z[kin] = self._mutate_kinematic(space, child_z[kin], np_rng)
+                    kin_norm = space.to_norm(child_z[kin], self.preprocess_cfg, np.asarray(replicated[0, kin, :, 5:]))
+                    new_norm = new_norm.at[0, np.flatnonzero(kin)].set(kin_norm[0])
+                pool_z = np.concatenate([pool_z[elite_idx], child_z], axis=0)
             new_world = np.asarray(self._postprocess_population(new_norm, pre_batch)[0][0])
             new_scores, new_breakdown = self._score(new_world, sim_state, timestep, goal_xy)
 

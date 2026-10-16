@@ -56,8 +56,10 @@ def build_variants(base: esd.DebugESPlanner) -> dict:
         "mcmc_lex": lambda: base.variant(label="mcmc_lex", initial_pool=mcmc, reward=lex, resample_noise_scale=1.0),
         # same, but ES only re-ranks (no diffusion re-noising of the MCMC plans)
         "mcmc_lex_noes": lambda: base.variant(label="mcmc_lex_noes", initial_pool=mcmc, reward=lex, num_iterations=0),
-        "mcmc_lex_jerk": lambda: base.variant(label="mcmc_lex_jerk", initial_pool=mcmc, resample_noise_scale=1.0,
-                                              reward=esd.lexicographic_reward(jerk_eps=0.2)),
+        # ES mutates MCMC-born elites in the kinematic space (smooth, stays near the safe region),
+        # diffusion-born elites with the diffusion model
+        "mcmc_lex_hybrid": lambda: base.variant(label="mcmc_lex_hybrid", initial_pool=mcmc, reward=lex,
+                                                resample_noise_scale=1.0, es_mutation="hybrid"),
     }
 
 
