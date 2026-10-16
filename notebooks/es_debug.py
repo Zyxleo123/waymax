@@ -630,7 +630,8 @@ class SlackLexicographicReward:
     Levels, in order, each a filter of the survivors of the previous one (A_0 = all plans):
       0 kinematically feasible (hard; if none is, all pass)
       1 collision risk R (``collision_risk``)    keep R <= max(risk_ok, min R + risk_slack)
-      2 road-edge margin m (m, < 0 = offroad)    keep m >= min(margin_ok_m, max m - margin_slack_m)
+      2 road-edge margin m (m, < 0 = offroad)    keep m >= min(margin_ok_m, max m - margin_slack_m),
+                                                 and m >= 0 if any survivor is on-road
       3 goal progress G                          keep G >= max G - progress_slack
       4 lane-keeping cost c (m)                  keep c <= max(lane_ok_m, min c + lane_slack_m)
       5 final: lowest jerk.
@@ -687,7 +688,9 @@ class SlackLexicographicReward:
         cut = [
             lambda v: v.max(),  # binary: keep the feasible ones if any
             lambda v: min(-self.risk_ok, v.max() - self.risk_slack),
-            lambda v: min(self.margin_ok_m, v.max() - self.margin_slack_m),
+            # Slack never crosses the road edge: if any survivor is on-road, off-road plans are cut.
+            lambda v: min(self.margin_ok_m, v.max() - self.margin_slack_m) if v.max() < 0
+            else max(0.0, min(self.margin_ok_m, v.max() - self.margin_slack_m)),
             lambda v: v.max() - self.progress_slack,
             lambda v: min(-self.lane_ok_m, v.max() - self.lane_slack_m),
         ]
