@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import copy
 import dataclasses
+import inspect
 import os
 import sys
 import types
@@ -617,8 +618,71 @@ def _ego_kinematics(sim_state, timestep: int, world_idx: int = 0, lookback: int 
 # Acquisition (elite selection)
 # ---------------------------------------------------------------------------
 
-# An acquisition maps (scores [P], trajectories [P, T, 5], n_elite, rng) -> indices [n_elite].
-Acquisition = Callable[[np.ndarray, np.ndarray, int, np.random.Generator], np.ndarray]
+# An acquisition maps (scores [P], trajectories [P, T, 5], n_elite, rng) -> elite indices into the pool.
+# If it also takes an ``info`` keyword it gets an AcquisitionInfo (reward terms, iteration, scene, ...).
+# It may return any number >= 1 of indices; each elite is replicated over the next population of P.
+Acquisition = Callable[..., np.ndarray]
+
+
+@dataclasses.dataclass
+class AcquisitionInfo:
+    """Context passed as ``info=`` to acquisitions that accept it.
+
+    Example::
+
+        def lateral_spread(scores, trajectories, n_elite, rng, *, info):
+            ok = info.breakdown["collision"] >= 0.99          # plans no WM mode hits
+            ...
+    """
+
+    iteration: int  # pool being selected from: 0 = initial pool, ..., num_iterations = final pool
+    num_iterations: int
+    breakdown: dict[str, np.ndarray]  # reward term -> [P] (e.g. collision, offroad, offroad_tiebreak)
+    is_carried_elite: np.ndarray  # [P] True for elites carried over from the previous iteration
+    timestep: int
+    goal_xy: np.ndarray  # [2] world frame
+    sim_state: Any  # state the planner scores against (batched, B=1)
+    ego_idx: int
+    planner: Any  # the DebugESPlanner (e.g. planner.reward, planner.scorer)
+
+    def ego_state(self) -> dict[str, float]:
+        """x, y, yaw, speed of the ego at the replan time (world frame)."""
+        log = _single_state(self.sim_state).log_trajectory
+        i, t = self.ego_idx, self.timestep
+        return {"x": float(log.x[i, t]), "y": float(log.y[i, t]), "yaw": float(log.yaw[i, t]),
+                "speed": float(np.hypot(log.vel_x[i, t], log.vel_y[i, t]))}
+
+    def to_ego_frame(self, trajectories: np.ndarray) -> np.ndarray:
+        """[P, T, 2] xy in the ego frame at the replan time (x forward, y left)."""
+        e = self.ego_state()
+        d = np.asarray(trajectories)[..., :2] - np.asarray([e["x"], e["y"]])
+        c, s_ = np.cos(e["yaw"]), np.sin(e["yaw"])
+        return np.stack([d[..., 0] * c + d[..., 1] * s_, -d[..., 0] * s_ + d[..., 1] * c], axis=-1)
+
+    def agent_forecast(self) -> tuple[np.ndarray, np.ndarray]:
+        """Other agents' forecast used for scoring: trajectories [N, T, 5] (x, y, yaw, length, width)
+        and masks [N, T]. With the WM this is its top-1 future."""
+        for (t, _), fc in self.planner._forecast.items():
+            if t == self.timestep:
+                return np.asarray(fc[0]), np.asarray(fc[1])
+        raise RuntimeError("No forecast cached for this replan.")
+
+
+def _takes_info(fn) -> bool:
+    try:
+        params = inspect.signature(fn).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(p.name == "info" or p.kind is inspect.Parameter.VAR_KEYWORD for p in params)
+
+
+def _select_elites(acq, scores, trajectories, n_elite, rng, info: AcquisitionInfo) -> np.ndarray:
+    out = acq(scores, trajectories, n_elite, rng, info=info) if _takes_info(acq) else acq(scores, trajectories, n_elite, rng)
+    idx = np.asarray(out).astype(np.int64).reshape(-1)
+    name = getattr(acq, "__name__", repr(acq))
+    if idx.size == 0 or idx.min() < 0 or idx.max() >= len(scores):
+        raise ValueError(f"acquisition {name} returned {idx.size} indices outside [0, {len(scores)})")
+    return idx.astype(np.int32)
 
 
 # ---------------------------------------------------------------------------
@@ -1008,12 +1072,16 @@ class DebugESPlanner(DiffusionESPlanner):
         pool_world = np.asarray(world_bkt5[0])
         pool_scores, pool_breakdown = self._score(pool_world, sim_state, timestep, goal_xy)
         carried = np.zeros((len(pool_scores),), dtype=bool)
+        ego_idx = int(scorer_helpers.get_ego_idx(sim_state, 0))
 
         iterations: list[ESIteration] = []
         for it in range(self.num_iterations + 1):
-            elite_idx = np.asarray(
-                self.acquisition(pool_scores, pool_world, self.elite_size, np_rng), dtype=np.int32
+            info = AcquisitionInfo(
+                iteration=it, num_iterations=self.num_iterations, breakdown=pool_breakdown,
+                is_carried_elite=carried, timestep=int(timestep), goal_xy=goal_xy, sim_state=sim_state,
+                ego_idx=ego_idx, planner=self,
             )
+            elite_idx = _select_elites(self.acquisition, pool_scores, pool_world, self.elite_size, np_rng, info)
             iterations.append(
                 ESIteration(
                     iteration=it,
@@ -1257,12 +1325,23 @@ def run_closed_loop(
 
 
 def replan_at(planner: DebugESPlanner, result: ClosedLoopResult, anchor: int, *, seed: int = 0) -> ESTrace:
-    """Re-run one ES planning call on the exact state the baseline saw at ``anchor``."""
+    """Re-run one ES planning call on the exact state the baseline saw at ``anchor``.
+
+    Uses the RNG key ``run_closed_loop`` used at that replan (same ``seed``), so the result's own
+    planner reproduces ``result.traces[anchor]`` and other planners start from the same random draws.
+    """
     planner.prepare(result.scenario)
+    key = jax.random.PRNGKey(int(seed))
+    for s in result.replan_steps:  # same split sequence as run_closed_loop
+        key, key_plan = jax.random.split(key)
+        if s == anchor:
+            break
+    else:
+        raise ValueError(f"anchor must be one of {result.replan_steps}, got {anchor}")
     planner.plan_trajectory(
         result.snapshots[anchor],
         result.scenario.goal_xy_b2,
-        rng=jax.random.PRNGKey(int(seed) * 1000 + int(anchor)),
+        rng=key_plan,
         timestep=int(anchor),
     )
     return planner.last_trace
@@ -1350,8 +1429,9 @@ def _draw_boxes(ax, traj, t, ego_idx, *, highlight=(), ego_hit=False, labels=Fal
         )
         ax.add_patch(poly)
         artists.append(poly)
-        if labels and i != ego_idx:
-            artists.append(ax.text(x[i], y[i], str(i), fontsize=6, ha="center", va="center", zorder=7))
+        if labels:
+            artists.append(ax.text(x[i], y[i], f"ego {i}" if i == ego_idx else str(i), fontsize=6,
+                                   ha="center", va="center", zorder=7, clip_on=True))
     return artists
 
 
@@ -1545,6 +1625,41 @@ def plot_timeline(result: ClosedLoopResult, *, compare: list[ClosedLoopResult] =
     return fig
 
 
+def _draw_es_iteration(ax, trace: ESTrace, it: ESIteration, sim_state, *, ego_idx: int, view_m: float,
+                       show_wm_top1: bool, risky: list[int], cmap, labels: bool = False) -> None:
+    """One ES pool on ``ax``: plans coloured by score, elites bold, chosen plan red (final pool only)."""
+    traj = _single_state(sim_state).log_trajectory
+    t = trace.timestep
+    _base_axes(ax, sim_state)
+    _draw_boxes(ax, traj, t, ego_idx, highlight=risky, labels=labels)
+    if show_wm_top1 and trace.wm_forecast is not None:
+        top1 = trace.wm_forecast["top1_traj"]
+        mask = trace.wm_forecast["masks"][:, 0]
+        for i in np.flatnonzero(mask):
+            if i in risky:
+                ax.plot(top1[i, :, 0], top1[i, :, 1], color="#fc8d59", lw=1.5, zorder=7)
+                ax.plot(top1[i, ::10, 0], top1[i, ::10, 1], "o", color="#fc8d59", ms=3, zorder=7)
+            else:
+                ax.plot(top1[i, :, 0], top1[i, :, 1], color=AGENT_COLOR, lw=0.8, ls=":", zorder=3)
+    for k in np.argsort(it.scores):
+        xy = it.trajectories[k]
+        ax.plot(xy[:, 0], xy[:, 1], color=cmap(float(np.clip(it.scores[k], 0, 1))), lw=0.7, alpha=0.6, zorder=4)
+    for k in it.elite_indices:
+        xy = it.trajectories[k]
+        ax.plot(xy[:, 0], xy[:, 1], color=cmap(float(np.clip(it.scores[k], 0, 1))), lw=2.2, zorder=5)
+    if it.iteration == trace.iterations[-1].iteration:
+        b = trace.best_trajectory
+        ax.plot(b[:, 0], b[:, 1], color=HIT_COLOR, lw=2.5, zorder=6)
+        ax.plot(b[::10, 0], b[::10, 1], "o", color=HIT_COLOR, ms=3, zorder=7)
+    _set_view(ax, _ego_xy(traj, ego_idx, t), view_m)
+
+
+def _risky_agents(trace: ESTrace, risk_threshold: float) -> tuple[list[int], np.ndarray]:
+    dbg = trace.best_collision_debug or {}
+    p_hit = np.asarray(dbg.get("p_collision_i", np.zeros(0)))
+    return [int(i) for i in np.flatnonzero(p_hit >= risk_threshold)], p_hit
+
+
 def plot_es_iterations(
     trace: ESTrace,
     sim_state,
@@ -1553,6 +1668,7 @@ def plot_es_iterations(
     view_m: float = 35.0,
     show_wm_top1: bool = True,
     risk_threshold: float = 0.05,
+    labels: bool = False,
     figsize_per=(4.2, 4.2),
 ):
     """One panel per ES iteration: pool coloured by score, elites bold, final best red.
@@ -1560,41 +1676,17 @@ def plot_es_iterations(
     Agents shown at the replan time (the state the planner scored against). Orange = agents with
     WM collision probability >= ``risk_threshold`` against the chosen plan; their WM top-1 future is
     drawn solid orange, the dots on it and on the chosen plan mark the same instants (every 1 s).
+    ``labels=True`` writes agent ids on the boxes.
     """
     n = len(trace.iterations)
     cols = min(n, 3)
     rows = int(np.ceil(n / cols))
     fig, axes = plt.subplots(rows, cols, figsize=(figsize_per[0] * cols, figsize_per[1] * rows), squeeze=False)
     cmap = plt.get_cmap("viridis")
-    traj = _single_state(sim_state).log_trajectory
-    t = trace.timestep
-    dbg = trace.best_collision_debug or {}
-    p_hit = np.asarray(dbg.get("p_collision_i", np.zeros(0)))
-    risky = [int(i) for i in np.flatnonzero(p_hit >= risk_threshold)]
+    risky, p_hit = _risky_agents(trace, risk_threshold)
     for ax, it in zip(axes.ravel(), trace.iterations):
-        _base_axes(ax, sim_state)
-        _draw_boxes(ax, traj, t, ego_idx, highlight=risky)
-        if show_wm_top1 and trace.wm_forecast is not None:
-            top1 = trace.wm_forecast["top1_traj"]
-            mask = trace.wm_forecast["masks"][:, 0]
-            for i in np.flatnonzero(mask):
-                if i in risky:
-                    ax.plot(top1[i, :, 0], top1[i, :, 1], color="#fc8d59", lw=1.5, zorder=7)
-                    ax.plot(top1[i, ::10, 0], top1[i, ::10, 1], "o", color="#fc8d59", ms=3, zorder=7)
-                else:
-                    ax.plot(top1[i, :, 0], top1[i, :, 1], color=AGENT_COLOR, lw=0.8, ls=":", zorder=3)
-        order = np.argsort(it.scores)
-        for k in order:
-            xy = it.trajectories[k]
-            ax.plot(xy[:, 0], xy[:, 1], color=cmap(float(np.clip(it.scores[k], 0, 1))), lw=0.7, alpha=0.6, zorder=4)
-        for k in it.elite_indices:
-            xy = it.trajectories[k]
-            ax.plot(xy[:, 0], xy[:, 1], color=cmap(float(np.clip(it.scores[k], 0, 1))), lw=2.2, zorder=5)
-        if it.iteration == trace.iterations[-1].iteration:
-            b = trace.best_trajectory
-            ax.plot(b[:, 0], b[:, 1], color=HIT_COLOR, lw=2.5, zorder=6)
-            ax.plot(b[::10, 0], b[::10, 1], "o", color=HIT_COLOR, ms=3, zorder=7)
-        _set_view(ax, _ego_xy(traj, ego_idx, t), view_m)
+        _draw_es_iteration(ax, trace, it, sim_state, ego_idx=ego_idx, view_m=view_m, show_wm_top1=show_wm_top1,
+                           risky=risky, cmap=cmap, labels=labels)
         ax.set_title(
             f"iter {it.iteration}: max={it.scores.max():.2f} mean={it.scores.mean():.2f} "
             f"zero={100 * (it.scores <= 0).mean():.0f}%",
@@ -1608,10 +1700,90 @@ def plot_es_iterations(
     terms = " ".join(f"{k}={float(v[trace.best_index]):.2f}" for k, v in last.breakdown.items())
     risk = ", ".join(f"{i}:{p_hit[i]:.2f}" for i in sorted(risky, key=lambda i: -p_hit[i])[:4]) or "none"
     fig.suptitle(
-        f"[{trace.label}] ES at t={t} (bold = elites, red = chosen plan, dotted = WM top-1)\n"
+        f"[{trace.label}] ES at t={trace.timestep} (bold = elites, red = chosen plan, dotted = WM top-1)\n"
         f"chosen: {terms} | P(hit) per agent: {risk}",
         fontsize=10,
     )
+    return fig
+
+
+def compare_acquisitions(
+    planner: DebugESPlanner,
+    result: ClosedLoopResult,
+    anchor: int,
+    acquisitions: dict[str, Acquisition],
+    *,
+    seed: int = 0,
+    **overrides,
+) -> dict[str, ESTrace]:
+    """Re-plan at ``anchor`` once per acquisition, everything else equal (same initial pool, same RNG).
+
+    ``overrides`` go to ``planner.variant`` (e.g. ``num_iterations=6``). Returns {name: ESTrace}; view
+    with ``plot_acquisition_compare`` and ``acquisition_table``.
+    """
+    return {
+        name: replan_at(planner.variant(label=name, acquisition=acq, **overrides), result, anchor, seed=seed)
+        for name, acq in acquisitions.items()
+    }
+
+
+def acquisition_table(traces: dict[str, ESTrace], *, safe_collision: float = 0.99):
+    """Per acquisition and iteration: best / elite scores, safe plans in the pool, elites that are safe,
+    elite spread (mean pairwise endpoint distance, m) and number of distinct elites."""
+    import pandas as pd
+
+    rows = []
+    for name, tr in traces.items():
+        for it in tr.iterations:
+            b = it.breakdown
+            safe = (b["collision"] >= safe_collision) & (b.get("offroad", np.ones_like(it.scores)) > 0)
+            e = np.unique(it.elite_indices)
+            end = it.trajectories[e, -1, :2]
+            pair = np.linalg.norm(end[:, None] - end[None], axis=-1)
+            rows.append({
+                "acquisition": name, "iter": it.iteration,
+                "best": float(it.scores.max()), "elite_mean": float(it.scores[it.elite_indices].mean()),
+                "n_safe_pool": int(safe.sum()), "n_safe_elites": int(safe[e].sum()),
+                "elite_spread_m": float(pair[np.triu_indices(len(e), 1)].mean()) if len(e) > 1 else 0.0,
+                "n_distinct_elites": int(len(e)),
+            })
+    return pd.DataFrame(rows).set_index(["acquisition", "iter"])
+
+
+def plot_acquisition_compare(
+    traces: dict[str, ESTrace],
+    sim_state,
+    *,
+    ego_idx: int,
+    iterations: list[int] | None = None,
+    view_m: float = 35.0,
+    show_wm_top1: bool = True,
+    risk_threshold: float = 0.05,
+    size: float = 3.6,
+):
+    """Grid: one row per acquisition, one column per ES iteration (default: all). Same drawing as
+    ``plot_es_iterations``; the row label gives the chosen plan's terms."""
+    names = list(traces)
+    its = iterations if iterations is not None else [it.iteration for it in traces[names[0]].iterations]
+    fig, axes = plt.subplots(len(names), len(its), figsize=(size * len(its), size * len(names)), squeeze=False)
+    cmap = plt.get_cmap("viridis")
+    for r, name in enumerate(names):
+        tr = traces[name]
+        risky, _ = _risky_agents(tr, risk_threshold)
+        by_iter = {it.iteration: it for it in tr.iterations}
+        for c, k in enumerate(its):
+            ax = axes[r, c]
+            it = by_iter[k if k >= 0 else tr.iterations[k].iteration]
+            _draw_es_iteration(ax, tr, it, sim_state, ego_idx=ego_idx, view_m=view_m, show_wm_top1=show_wm_top1,
+                               risky=risky, cmap=cmap)
+            ax.set_title(f"iter {it.iteration}: max={it.scores.max():.2f} elites={len(np.unique(it.elite_indices))}",
+                         fontsize=8)
+        last = tr.iterations[-1]
+        terms = " ".join(f"{k[:5]}={float(v[tr.best_index]):.2f}" for k, v in last.breakdown.items())
+        axes[r, 0].set_ylabel(f"{name}\n{terms}", fontsize=8)
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(0, 1))
+    fig.colorbar(sm, ax=axes.ravel().tolist(), fraction=0.02, pad=0.01, label="score")
+    fig.suptitle(f"Acquisitions at t={traces[names[0]].timestep} (bold = elites, red = chosen plan)", fontsize=10)
     return fig
 
 
@@ -1737,13 +1909,14 @@ def plot_wm_forecast(
             ax.annotate(
                 f"p={risk[i]:.2f}", (float(log.x[i, t]), float(log.y[i, t])),
                 xytext=(6, 6), textcoords="offset points", fontsize=8, color=HIT_COLOR, zorder=9,
+                annotation_clip=True,
             )
     b = trace.best_trajectory
     ax.plot(b[:, 0], b[:, 1], color=EGO_COLOR, lw=2.5, zorder=6, label="chosen ego plan")
     _set_view(ax, _ego_xy(log, ego_idx, t), view_m)
     ax.set_title(
-        f"[{trace.label}] WM modes at t={t} (width/alpha ~ mode prob, black dashed = logged future, "
-        f"orange = agents with p_collision>0)",
+        f"[{trace.label}] WM modes at t={t}: width/alpha ~ mode prob, black dashed = logged future,\n"
+        f"orange = agents with p_collision > 0. Agents predicted to stay put show as a dot.",
         fontsize=9,
     )
     ax.legend(loc="lower right", fontsize=8)
