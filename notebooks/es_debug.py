@@ -691,7 +691,7 @@ class KinematicPrior:
     speed_degree: int = 4
     curvature_degree: int = 3
     pin_accel: bool = True  # w_1 from the current acceleration (C1 speed across replans)
-    accel_sigma: float = 1.5  # m/s^2: speed std grows as accel_sigma * t
+    accel_sigma: float = 2.0  # m/s^2: speed std grows as accel_sigma * t
     accel_min: float = -6.0  # m/s^2: hard braking
     accel_max: float = 3.0  # m/s^2
     lat_accel_sigma: float = 2.0  # m/s^2: curvature std = lat_accel_sigma / v0^2
@@ -712,7 +712,7 @@ class CostWeights:
     offroad: float = 4.0
     offroad_depth: float = 2.0
     progress: float = 0.0  # progress is ES's job (lexicographic_reward); MCMC only maps the safe region
-    comfort: float = 0.5
+    comfort: float = 0.2
     jerk_ref: float = 2.0  # m/s^3
     goal_step: int = 90  # the episode goal is the logged position at this step
 
@@ -786,13 +786,14 @@ class KinematicPlanSpace:
         z_w = (np.asarray(w[n_fixed:]) - self.mu[: self.n_w]) / self.sigma[: self.n_w]
         return np.concatenate([z_w, np.zeros(self.nk) if kappa_z is None else kappa_z])
 
-    def braking_anchors(self, decels=(2.0, 4.0, 6.0), kappa_z=(0.0, 0.7, -0.7)) -> np.ndarray:
-        """Feasible z for braking at each of ``decels`` (m/s^2, to a stop), each with a few curvature
-        offsets. Hard stops are ~3 sigma out in the speed prior, so random chains rarely start there."""
+    def braking_anchors(self, accels=(-6.0, -4.0, -2.0, 1.0, 2.0, 3.0), kappa_z=(0.0, 0.7, -0.7)) -> np.ndarray:
+        """Feasible z for constant-acceleration speed profiles (negative = brake to a stop, positive =
+        speed up to v_max), each with a few curvature offsets. Hard stops and hard speed-ups are
+        ~3 sigma out in the speed prior, so random chains rarely start there."""
         out = []
-        for dec in decels:
+        for acc in accels:
             # Fit the unclipped ramp (down to -v_undershoot); the rollout clip makes it a stop.
-            v = np.maximum(self.v0 - dec * self.t_fine, -self.prior.v_undershoot)
+            v = np.clip(self.v0 + acc * self.t_fine, -self.prior.v_undershoot, self.prior.v_max)
             for kz in kappa_z:
                 z = self.z_for_speed(v, np.full(self.nk, kz))
                 # The least-squares fit can overshoot below 0 m/s or past the accel bounds: shrink
@@ -888,7 +889,7 @@ def mcmc_pool(
     keep_frac: float = 0.25,
     select: str = "diverse_safe",
     safe_collision: float = 0.99,
-    max_jerk: float = 1.0,
+    max_jerk: float = 3.0,
     braking_anchors: bool = True,
     denoise: bool = False,
     denoise_steps: int | None = None,
@@ -900,7 +901,8 @@ def mcmc_pool(
     candidate; the pool is a farthest-point (diverse) subset of the safe ones (collision >=
     ``safe_collision``, on-road, jerk cost <= ``max_jerk``), topped up by the lowest-energy rest.
     ``select='final'``: the chain states after the last step. ``braking_anchors``: a few chains start
-    from smooth stops (2/4/6 m/s^2, straight and slightly curved) so emergency braking is explored.
+    from constant-acceleration profiles (-6..+3 m/s^2, straight and slightly curved) so emergency
+    braking and hard speed-ups are explored.
 
     Target: pi(z) ∝ N(z; 0, I) 1[feasible] exp(-lambda_k E(tau(z)) / temperature), lambda_k
     ramping 0 -> 1 over the first ``anneal_frac`` of the steps (step size adapts there too).
