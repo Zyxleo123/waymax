@@ -15,7 +15,9 @@ from __future__ import annotations
 import argparse
 import copy
 import dataclasses
+import os
 import sys
+import types
 from pathlib import Path
 from typing import Any, Callable
 
@@ -46,6 +48,16 @@ from simulation.evaluation_utils import (  # noqa: E402
 )
 from simulation.planning_utils import apply_ego_replacements_to_expanded_state  # noqa: E402
 from viz import viz as viz_module  # noqa: E402
+
+
+def enable_compilation_cache(cache_dir: str | os.PathLike | None = None, min_compile_secs: float = 0.2) -> str:
+    """Persist XLA compilations on disk so a restarted kernel / new job skips most of the ~2 min
+    warm-up. Call before the first jitted call. Default dir: ``$JAX_CACHE_DIR`` or ``<repo>/../jax_cache``."""
+    path = str(cache_dir or os.environ.get("JAX_CACHE_DIR") or REPO_ROOT.parent / "jax_cache")
+    jax.config.update("jax_compilation_cache_dir", path)
+    jax.config.update("jax_persistent_cache_min_compile_time_secs", float(min_compile_secs))
+    jax.config.update("jax_persistent_cache_min_entry_size_bytes", 0)
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -181,19 +193,18 @@ def build_reward_context(
     scorer,
     goal_xy,
     world_idx: int = 0,
+    forecast: tuple | None = None,
 ) -> RewardContext:
-    """Same preamble as ``Scorer.compute_score`` (forecast others, build ego boxes)."""
+    """Same preamble as ``Scorer.compute_score`` (forecast others, build ego boxes).
+
+    ``forecast``: the ``scores.helpers.forecast_other_agents`` output for this state, timestep and
+    horizon, if already computed (the planner reuses it across ES iterations)."""
     trajectories = jnp.asarray(trajectories)
     if scorer.lane_points is None:
         scorer_helpers.update_lane_points(scorer, sim_state, world_idx)
-    obj, obj_mask, col_obj, col_mask = scorer_helpers.forecast_other_agents(
-        sim_state,
-        timestep=int(timestep),
-        traj_length=int(trajectories.shape[1]),
-        world_idx=world_idx,
-        mode=scorer.other_agent_forecast,
-        world_model_forecaster=scorer.world_model_forecaster,
-    )
+    if forecast is None:
+        forecast = forecast_others(sim_state, timestep, int(trajectories.shape[1]), scorer, world_idx)
+    obj, obj_mask, col_obj, col_mask = forecast
     traj_length = int(obj.shape[1])
     ego_idx = scorer_helpers.get_ego_idx(sim_state, world_idx)
     length_nt = jnp.asarray(sim_state.log_trajectory.length[world_idx], dtype=jnp.float32)
@@ -223,6 +234,18 @@ def build_reward_context(
         scorer=scorer,
         world_model_forecaster=scorer.world_model_forecaster,
         goal_xy=np.asarray(goal_xy, dtype=np.float32).reshape(2),
+    )
+
+
+def forecast_others(sim_state, timestep: int, traj_length: int, scorer, world_idx: int = 0) -> tuple:
+    """Other-agent forecast (obj, obj_mask, col_obj, col_mask) as the scorer would compute it."""
+    return scorer_helpers.forecast_other_agents(
+        sim_state,
+        timestep=int(timestep),
+        traj_length=int(traj_length),
+        world_idx=world_idx,
+        mode=scorer.other_agent_forecast,
+        world_model_forecaster=scorer.world_model_forecaster,
     )
 
 
@@ -627,6 +650,25 @@ def _farthest_points(feat_md: np.ndarray, n: int) -> np.ndarray:
     return np.asarray(chosen, dtype=np.int32)
 
 
+def _sample_many(planner, m: int):
+    """Jitted: ``m`` i.i.d. diffusion samples for one scenario -> [1, m, T, D]."""
+    cache = planner.__dict__.setdefault("_sample_many_jit_cache", {})
+    if m not in cache:
+        policy = planner.policy
+
+        def f(cond_bf, inst_cond_bf, inst_cond_mask_bf, rng):
+            out = policy.sample_from_condition(
+                jnp.repeat(cond_bf, m, axis=0),
+                jnp.repeat(inst_cond_bf, m, axis=0),
+                jnp.repeat(inst_cond_mask_bf, m, axis=0),
+                rng=rng,
+            )
+            return out[None]
+
+        cache[m] = jax.jit(f)
+    return cache[m]
+
+
 def oversample_fps(factor: int = 4, num_waypoints: int = 4) -> InitialPool:
     """Draw ``factor * P`` samples and keep P by farthest-point sampling on world xy at
     ``num_waypoints`` evenly spaced horizon steps. Same samples as the model would give,
@@ -634,16 +676,9 @@ def oversample_fps(factor: int = 4, num_waypoints: int = 4) -> InitialPool:
 
     def pool(planner, *, cond_bf, inst_cond_bf, inst_cond_mask_bf, features, pre_batch, rng, **_):
         del features
-        keys = jax.random.split(rng, factor)
-        norm = jnp.concatenate(
-            [
-                planner._sample_population_jit(
-                    cond_bf=cond_bf, inst_cond_bf=inst_cond_bf, inst_cond_mask_bf=inst_cond_mask_bf, rng=k
-                )
-                for k in keys
-            ],
-            axis=1,
-        )  # [1, factor*P, T, D]
+        norm = _sample_many(planner, factor * planner.population_size)(
+            cond_bf, inst_cond_bf, inst_cond_mask_bf, rng
+        )  # [1, factor*P, T, D], one batched call (the GPU is latency-bound at P=64)
         world = np.asarray(planner._postprocess_population(norm, pre_batch)[0][0])  # [M, T, 5]
         t_idx = np.linspace(world.shape[1] // num_waypoints, world.shape[1] - 1, num_waypoints).astype(int)
         feat = world[:, t_idx, :2].reshape(world.shape[0], -1)
@@ -840,6 +875,17 @@ class DebugESPlanner(DiffusionESPlanner):
         self.label = label
         self.last_trace: ESTrace | None = None
         self._scenario: Scenario | None = None
+        self._forecast: dict[tuple, tuple] = {}  # (timestep, horizon) -> other-agent forecast, per replan
+        cfg = preprocess_cfg
+        # Preprocessing / postprocessing are pure JAX; jitted they take ~ms instead of ~300 / ~30 ms eager.
+        self._preprocess_jit = jax.jit(
+            lambda state, key, t, goal: preprocess_simulator_state(
+                state, key, cfg, anchor_step_override=t, goal_step_override=90, goal_xy_override=goal
+            )
+        )
+        self._postprocess_jit = jax.jit(
+            lambda norm, aux: DiffusionESPlanner._postprocess_population(self, norm, types.SimpleNamespace(aux=aux))
+        )
         # Kept so variant() can rebuild when jitted closures must change.
         self._init_kwargs = dict(
             population_size=population_size,
@@ -900,11 +946,20 @@ class DebugESPlanner(DiffusionESPlanner):
         new._init_kwargs = kwargs
         return new
 
-    def _score(self, traj_pt5, sim_state, timestep, goal_xy):
-        ctx = build_reward_context(
-            traj_pt5, sim_state=sim_state, timestep=timestep, scorer=self.scorer, goal_xy=goal_xy
+    def _postprocess_population(self, proposals_bktd, pre_batch):
+        return self._postprocess_jit(proposals_bktd, pre_batch.aux)
+
+    def _context(self, traj_pt5, sim_state, timestep, goal_xy) -> RewardContext:
+        key = (int(timestep), int(np.shape(traj_pt5)[1]))
+        if key not in self._forecast:
+            self._forecast[key] = forecast_others(sim_state, timestep, key[1], self.scorer)
+        return build_reward_context(
+            traj_pt5, sim_state=sim_state, timestep=timestep, scorer=self.scorer, goal_xy=goal_xy,
+            forecast=self._forecast[key],
         )
-        return self.reward(ctx)
+
+    def _score(self, traj_pt5, sim_state, timestep, goal_xy):
+        return self.reward(self._context(traj_pt5, sim_state, timestep, goal_xy))
 
     def plan_trajectory(
         self,
@@ -920,14 +975,8 @@ class DebugESPlanner(DiffusionESPlanner):
     ) -> PlannerResult:
         del instruction, instruction_mask, kwargs
         rng, key_pre, key_sample = jax.random.split(rng, 3)
-        pre_batch, _ = preprocess_simulator_state(
-            sim_state,
-            key_pre,
-            self.preprocess_cfg,
-            anchor_step_override=timestep,
-            goal_step_override=90,
-            goal_xy_override=goal,
-        )
+        self._forecast = {}  # new state: forecasts are reused only within this call
+        pre_batch, _ = self._preprocess_jit(sim_state, key_pre, jnp.int32(timestep), jnp.asarray(goal))
         features = pre_batch.features
         instruction_mask = jnp.zeros((1,), dtype=jnp.float32)
         features["inst_features"] = jnp.zeros((1, self.preprocess_cfg.inst_dim), dtype=jnp.float32)
@@ -1017,9 +1066,7 @@ class DebugESPlanner(DiffusionESPlanner):
                 sim_state, timestep=int(timestep), traj_length=int(best_world.shape[0]), world_idx=0
             )
             wm_forecast = {k: np.asarray(v) for k, v in wm_forecast.items()}
-            ctx = build_reward_context(
-                best_world[None], sim_state=sim_state, timestep=timestep, scorer=self.scorer, goal_xy=goal_xy
-            )
+            ctx = self._context(best_world[None], sim_state, timestep, goal_xy)
             _, best_debug = wm.score_independent_mode_collision(
                 np.asarray(ctx.ego_boxes, dtype=np.float32), world_idx=0
             )

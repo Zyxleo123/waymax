@@ -140,6 +140,13 @@ def ego_agent_mode_collisions(
     if masks.shape != (n, t):
         raise ValueError(f"agent_masks must be [N, T]=[{n}, {t}], got {masks.shape}")
 
+    return np.asarray(_mode_collisions(ego, traj, masks), dtype=bool)
+
+
+@jax.jit
+def _mode_collisions(ego: jax.Array, traj: jax.Array, masks: jax.Array) -> jax.Array:
+    """Jitted core of ``ego_agent_mode_collisions``: [E, T, 5], [N, K, T, 5], [N, T] -> [E, N, K]."""
+    n, k, t, _ = traj.shape
     # Flatten modes on object axis (agent-major); reshape back after SAT.
     obj = traj.reshape((n * k, t, 5))
     ego_poly = polygon_corners(ego)
@@ -154,7 +161,7 @@ def ego_agent_mode_collisions(
     valid_t = jnp.repeat(valid_t, k, axis=1)  # [T, N*K]
     hits_t = hits_t & valid_t[:, None, :]
     hits = jnp.any(hits_t, axis=0)  # [E, N*K]
-    return np.asarray(hits.reshape((-1, n, k)), dtype=bool)
+    return hits.reshape((-1, n, k))
 
 
 def combine_independent_agent_collision(

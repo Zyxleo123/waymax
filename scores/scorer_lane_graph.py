@@ -27,6 +27,66 @@ OFFROAD_TIEBREAK_DEPTH_M = 1.0
 OFFROAD_DT = 0.1
 
 
+# Road-edge arrays are padded to a multiple of this (fewer recompiles across scenarios); pad
+# points sit at _EDGE_FAR so they are never the nearest edge point.
+_EDGE_PAD = 1024
+_EDGE_FAR = 1.0e6
+
+
+@jax.jit
+def _corner_signed_distances(ego_trajectories, edge_xyz, edge_dir_xyz, edge_ids, ego_z):
+    """[P, T, 4] signed corner distance to the nearest road edge point (> 0 = offroad)."""
+    bbox_corners_xy = polygon_corners(ego_trajectories)
+    z = jnp.full_like(bbox_corners_xy[..., :1], ego_z)
+    bbox_corners = jnp.concatenate([bbox_corners_xy, z], axis=-1)
+    shape_prefix = bbox_corners.shape[:-3]
+    num_agents, num_points, dim = bbox_corners.shape[-3:]
+    bbox_corners = jnp.reshape(bbox_corners, [*shape_prefix, num_agents * num_points, dim])
+
+    differences = edge_xyz - jnp.expand_dims(bbox_corners, axis=-2)
+    z_stretched_differences = differences * jnp.asarray([1.0, 1.0, 2.0], dtype=jnp.float32)
+    square_distances = jnp.sum(z_stretched_differences**2, axis=-1)
+
+    nearest_indices = jnp.argmin(square_distances, axis=-1)
+    prior_indices = jnp.maximum(jnp.zeros_like(nearest_indices), nearest_indices - 1)
+
+    nearest_xys = edge_xyz[nearest_indices, :2]
+    nearest_vector_xys = edge_dir_xyz[nearest_indices, :2]
+    prior_vector_xys = edge_dir_xyz[prior_indices, :2]
+    points_to_edge = bbox_corners[..., :2] - nearest_xys
+
+    cross_product = points_to_edge[..., 0] * nearest_vector_xys[..., 1] - points_to_edge[..., 1] * nearest_vector_xys[..., 0]
+    cross_product_prior = points_to_edge[..., 0] * prior_vector_xys[..., 1] - points_to_edge[..., 1] * prior_vector_xys[..., 0]
+    prior_point_in_same_curve = edge_ids[nearest_indices] == edge_ids[prior_indices]
+    offroad_sign = jnp.sign(
+        jnp.where(
+            jnp.logical_and(prior_point_in_same_curve, cross_product_prior < cross_product),
+            cross_product_prior,
+            cross_product,
+        )
+    )
+    distances = jnp.linalg.norm(nearest_xys - bbox_corners[..., :2], axis=-1) * offroad_sign
+    return jnp.reshape(distances, [*shape_prefix, num_agents, num_points])
+
+
+@jax.jit
+def _margin_tiebreak_from_distances(distances):
+    worst_t = jnp.max(distances, axis=-1)  # [P, T]
+    off_t = worst_t > 0.0
+    is_off = jnp.any(off_t, axis=-1)
+    worst = jnp.max(worst_t, axis=-1)
+    margin = OFFROAD_MARGIN_FLOOR + (1.0 - OFFROAD_MARGIN_FLOOR) * jnp.clip(
+        -worst / OFFROAD_MARGIN_M, 0.0, 1.0
+    )
+    t_first = jnp.where(is_off, jnp.argmax(off_t, axis=-1), worst_t.shape[-1]) * OFFROAD_DT
+    graded = (1.0 - jnp.exp(-t_first / OFFROAD_TIEBREAK_TAU_S)) * jnp.exp(
+        -jnp.clip(worst, 0.0, None) / OFFROAD_TIEBREAK_DEPTH_M
+    )
+    score = jnp.where(is_off, 0.0, margin).astype(jnp.float32)
+    tiebreak = jnp.where(is_off, graded, 1.0).astype(jnp.float32)
+    return score, tiebreak
+
+
 class Scorer:
     """Scorer variant that supports fast lane queries from precomputed lane graph.
 
@@ -362,20 +422,7 @@ class Scorer:
         if distances is None:
             score = self.compute_offroad_score(ego_trajectories)
             return score, jnp.ones_like(score)
-        worst_t = jnp.max(distances, axis=-1)  # [P, T]
-        off_t = worst_t > 0.0
-        is_off = jnp.any(off_t, axis=-1)
-        worst = jnp.max(worst_t, axis=-1)
-        margin = OFFROAD_MARGIN_FLOOR + (1.0 - OFFROAD_MARGIN_FLOOR) * jnp.clip(
-            -worst / OFFROAD_MARGIN_M, 0.0, 1.0
-        )
-        t_first = jnp.where(is_off, jnp.argmax(off_t, axis=-1), worst_t.shape[-1]) * OFFROAD_DT
-        graded = (1.0 - jnp.exp(-t_first / OFFROAD_TIEBREAK_TAU_S)) * jnp.exp(
-            -jnp.clip(worst, 0.0, None) / OFFROAD_TIEBREAK_DEPTH_M
-        )
-        score = jnp.where(is_off, 0.0, margin).astype(jnp.float32)
-        tiebreak = jnp.where(is_off, graded, 1.0).astype(jnp.float32)
-        return score, tiebreak
+        return _margin_tiebreak_from_distances(distances)
 
     def _offroad_corner_distances(self, ego_trajectories, sim_state, timestep, world_idx=0):
         """Signed distance [P, T, 4] of ego box corners to the nearest road edge (> 0 = offroad),
@@ -386,10 +433,30 @@ class Scorer:
                 "ego_trajectories must have shape [num_ego_trajectories, num_time_steps, 5], "
                 f"got {ego_trajectories.shape}"
             )
+        edges = self._road_edges(sim_state, world_idx)
+        if edges is None:
+            return None
 
+        # Waymax is_offroad uses the agent's own elevation for the box corners; the
+        # nearest-edge lookup stretches z by 2x, so z=0 picks wrong edge points in
+        # scenes far from z=0 (e.g. z≈-72 m) and flags valid plans as offroad.
+        ego_idx = scorer_helpers.get_ego_idx(sim_state, world_idx)
+        log_z = jnp.asarray(sim_state.log_trajectory.z[world_idx], dtype=jnp.float32)
+        ego_z = log_z[ego_idx, int(np.clip(int(timestep), 0, int(log_z.shape[1]) - 1))]
+        return _corner_signed_distances(ego_trajectories, *edges, ego_z)
+
+    def _road_edges(self, sim_state, world_idx=0):
+        """Valid road-edge points (xyz, dir_xyz, ids) of the roadgraph, padded to a multiple of
+        ``_EDGE_PAD`` with far-away points (never nearest), or None. Cached per roadgraph so the
+        boolean filtering (a host sync) runs once per scenario instead of on every scoring call."""
         roadgraph_points = getattr(sim_state, "roadgraph_points", None)
         if roadgraph_points is None or not hasattr(roadgraph_points, "xyz"):
             return None
+        key = (id(roadgraph_points.xyz), int(world_idx))
+        cache = self.__dict__.setdefault("_road_edge_cache", {})
+        hit = cache.get(key)
+        if hit is not None and hit[0] is roadgraph_points.xyz:
+            return hit[1]
 
         roadgraph_xyz = jnp.asarray(roadgraph_points.xyz, dtype=jnp.float32)
         roadgraph_dir_xyz = jnp.asarray(roadgraph_points.dir_xyz, dtype=jnp.float32)
@@ -408,74 +475,28 @@ class Scorer:
         if roadgraph_ids.ndim >= 2:
             roadgraph_ids = roadgraph_ids[world_idx]
 
-        if roadgraph_xyz.ndim != 2 or roadgraph_xyz.shape[-1] != 3:
-            return None
-        if roadgraph_dir_xyz.ndim != 2 or roadgraph_dir_xyz.shape[-1] != 3:
-            return None
-        if roadgraph_types.shape[0] != roadgraph_xyz.shape[0]:
-            return None
-        if roadgraph_valid.shape[0] != roadgraph_xyz.shape[0]:
-            return None
-        if roadgraph_ids.shape[0] != roadgraph_xyz.shape[0]:
-            return None
-
-        roadgraph_xyz = roadgraph_xyz[roadgraph_valid]
-        roadgraph_dir_xyz = roadgraph_dir_xyz[roadgraph_valid]
-        roadgraph_types = roadgraph_types[roadgraph_valid]
-        roadgraph_ids = roadgraph_ids[roadgraph_valid]
-
-        road_edge_mask = datatypes.is_road_edge(roadgraph_types)
-        if not bool(jnp.any(road_edge_mask)):
-            return None
-
-        roadgraph_xyz = roadgraph_xyz[road_edge_mask]
-        roadgraph_dir_xyz = roadgraph_dir_xyz[road_edge_mask]
-        roadgraph_ids = roadgraph_ids[road_edge_mask]
-
-        # Waymax is_offroad uses the agent's own elevation for the box corners; the
-        # nearest-edge lookup stretches z by 2x, so z=0 picks wrong edge points in
-        # scenes far from z=0 (e.g. z≈-72 m) and flags valid plans as offroad.
-        ego_idx = scorer_helpers.get_ego_idx(sim_state, world_idx)
-        log_z = jnp.asarray(sim_state.log_trajectory.z[world_idx], dtype=jnp.float32)
-        ego_z = log_z[ego_idx, int(np.clip(int(timestep), 0, int(log_z.shape[1]) - 1))]
-
-        bbox_corners_xy = polygon_corners(ego_trajectories)
-        z = jnp.full_like(bbox_corners_xy[..., :1], ego_z)
-        bbox_corners = jnp.concatenate([bbox_corners_xy, z], axis=-1)
-        shape_prefix = bbox_corners.shape[:-3]
-        num_agents, num_points, dim = bbox_corners.shape[-3:]
-        bbox_corners = jnp.reshape(bbox_corners, [*shape_prefix, num_agents * num_points, dim])
-
-        sampled_points = roadgraph_xyz
-        nearest_vector_xyz = roadgraph_dir_xyz
-
-        differences = sampled_points - jnp.expand_dims(bbox_corners, axis=-2)
-        z_stretched_differences = differences * jnp.asarray([1.0, 1.0, 2.0], dtype=jnp.float32)
-        square_distances = jnp.sum(z_stretched_differences**2, axis=-1)
-
-        if sampled_points.shape[0] == 0:
-            return None
-
-        nearest_indices = jnp.argmin(square_distances, axis=-1)
-        prior_indices = jnp.maximum(jnp.zeros_like(nearest_indices), nearest_indices - 1)
-
-        nearest_xys = sampled_points[nearest_indices, :2]
-        nearest_vector_xys = nearest_vector_xyz[nearest_indices, :2]
-        prior_vector_xys = nearest_vector_xyz[prior_indices, :2]
-        points_to_edge = bbox_corners[..., :2] - nearest_xys
-
-        cross_product = points_to_edge[..., 0] * nearest_vector_xys[..., 1] - points_to_edge[..., 1] * nearest_vector_xys[..., 0]
-        cross_product_prior = points_to_edge[..., 0] * prior_vector_xys[..., 1] - points_to_edge[..., 1] * prior_vector_xys[..., 0]
-        prior_point_in_same_curve = roadgraph_ids[nearest_indices] == roadgraph_ids[prior_indices]
-        offroad_sign = jnp.sign(
-            jnp.where(
-                jnp.logical_and(prior_point_in_same_curve, cross_product_prior < cross_product),
-                cross_product_prior,
-                cross_product,
-            )
-        )
-        distances = jnp.linalg.norm(nearest_xys - bbox_corners[..., :2], axis=-1) * offroad_sign
-        return jnp.reshape(distances, [*shape_prefix, num_agents, num_points])
+        edges = None
+        if (
+            roadgraph_xyz.ndim == 2
+            and roadgraph_xyz.shape[-1] == 3
+            and roadgraph_dir_xyz.ndim == 2
+            and roadgraph_dir_xyz.shape[-1] == 3
+            and roadgraph_types.shape[0] == roadgraph_xyz.shape[0]
+            and roadgraph_valid.shape[0] == roadgraph_xyz.shape[0]
+            and roadgraph_ids.shape[0] == roadgraph_xyz.shape[0]
+        ):
+            keep = np.asarray(roadgraph_valid & datatypes.is_road_edge(roadgraph_types))
+            if keep.any():
+                n = int(keep.sum())
+                pad = (-n) % _EDGE_PAD
+                xyz = np.concatenate([np.asarray(roadgraph_xyz)[keep], np.full((pad, 3), _EDGE_FAR, np.float32)])
+                dxyz = np.concatenate([np.asarray(roadgraph_dir_xyz)[keep], np.zeros((pad, 3), np.float32)])
+                ids = np.concatenate([np.asarray(roadgraph_ids)[keep], np.full((pad,), -1, np.asarray(roadgraph_ids).dtype)])
+                edges = (jnp.asarray(xyz), jnp.asarray(dxyz), jnp.asarray(ids))
+        if len(cache) > 8:
+            cache.clear()
+        cache[key] = (roadgraph_points.xyz, edges)
+        return edges
 
     def compute_direction_score(self, ego_trajectories):
         ego_trajectories = jnp.asarray(ego_trajectories)

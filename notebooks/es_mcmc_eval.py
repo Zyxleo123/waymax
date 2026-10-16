@@ -36,6 +36,8 @@ import pandas as pd  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import es_debug as esd  # noqa: E402
 
+esd.enable_compilation_cache()
+
 SUBSET_DIR = "/zfsauton/scratch/sbellad/Diffusion_ES_sim/es_failure_subset_n1500_seed0"
 TFRECORD_DIR = f"{SUBSET_DIR}/tfrecords/training"
 LANE_GRAPH_DIR = "/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
