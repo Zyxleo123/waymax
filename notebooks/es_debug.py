@@ -568,7 +568,7 @@ def lexicographic_reward(bucket: float = 0.05, jerk_eps: float = 0.05, **kw) -> 
 
 
 def collision_risk(ctx: RewardContext, near_s: float = 3.0, decay_s: float = 3.0, dv_ref: float = 10.0,
-                   dt: float = 0.1) -> np.ndarray:
+                   dt: float = 0.1, severity: bool = True) -> np.ndarray:
     """[P] discounted, severity-weighted collision probability under independent WM modes:
         R = 1 - prod_a (1 - min(1, sum_k p_ak 1[hit_ak] w(t_ak) s(dv_ak)))
     w(t) = 1 for t <= near_s, then exp(-(t - near_s) / decay_s) (later contact leaves replans to react);
@@ -596,7 +596,7 @@ def collision_risk(ctx: RewardContext, near_s: float = 3.0, decay_s: float = 3.0
     obj_v = np.gradient(traj_k[..., :2], dt, axis=2)  # [N, K, T, 2]
     ev = np.take_along_axis(ego_v[:, None, None], first[..., None, None], axis=3)[:, :, :, 0]  # [P, N, K, 2]
     ov = np.take_along_axis(np.broadcast_to(obj_v[None], (p, n, k, t, 2)), first[..., None, None], axis=3)[:, :, :, 0]
-    sev = np.clip(0.25 + 0.75 * np.linalg.norm(ev - ov, axis=-1) / dv_ref, 0.25, 1.0)
+    sev = np.clip(0.25 + 0.75 * np.linalg.norm(ev - ov, axis=-1) / dv_ref, 0.25, 1.0) if severity else 1.0
     pn = probs / np.clip(probs.sum(-1, keepdims=True), 1e-8, None)
     r_a = np.clip((pn[None] * any_hit * w * sev).sum(-1), 0.0, 1.0)  # [P, N]
     return (1.0 - np.prod(1.0 - r_a, axis=-1)).astype(np.float32)
@@ -643,7 +643,8 @@ class SlackLexicographicReward:
     def __init__(self, risk_ok: float = 0.01, risk_slack: float = 0.02, margin_ok_m: float = 0.5,
                  margin_slack_m: float = 0.3, progress_slack: float = 0.05, lane_ok_m: float = 0.5,
                  lane_slack_m: float = 0.3, goal_step: int = 90, max_accel: float = 8.0,
-                 max_accel_step: float | None = 2.0, reach_m: float = 1.0) -> None:
+                 max_accel_step: float | None = 2.0, reach_m: float = 1.0, severity: bool = True) -> None:
+        self.severity = bool(severity)
         self.risk_ok, self.risk_slack = float(risk_ok), float(risk_slack)
         self.margin_ok_m, self.margin_slack_m = float(margin_ok_m), float(margin_slack_m)
         self.progress_slack = float(progress_slack)
@@ -665,7 +666,7 @@ class SlackLexicographicReward:
             "offroad": np.asarray(margin, np.float32),
             "feasible": kinematic_feasibility(traj, max_accel=self.max_accel, max_lat_accel=self.max_accel, a0=a0,
                                               max_accel_step=self.max_accel_step or 0.0),
-            "risk": collision_risk(ctx),
+            "risk": collision_risk(ctx, severity=self.severity),
             "margin_m": margin_m.astype(np.float32),
             "progress": goal_progress(ctx, goal_step=self.goal_step, reach_m=self.reach_m),
             "lane_cost_m": lane_keeping_cost(ctx),
