@@ -10,7 +10,7 @@
 #SBATCH --output=/zfsauton/scratch/ishanj/es_mcmc_eval/logs/%x_%j.log
 
 # Usage: sbatch slurm_es_mcmc_eval.sh <out_tag> [es_mcmc_eval.py args...]
-# e.g.   sbatch slurm_es_mcmc_eval.sh v1 --scenarios 00017:173 --variants baseline mcmc_lex
+# e.g.   sbatch slurm_es_mcmc_eval.sh v1 --scenarios 00017:173 --variants baseline fps_x4
 source ~/.bashrc
 conda activate waymax_rs
 cd /zfsauton/scratch/ishanj/waymax_rs

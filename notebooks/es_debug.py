@@ -477,7 +477,7 @@ def margin_tiebreak_reward(collision_eps: float = 0.0, progress_weight: float = 
 
 
 class LexicographicReward:
-    """Safety first, then goal progress (ES reward for the MCMC pool).
+    """Safety first, then goal progress.
 
     safety S = collision * 1[on-road] * 1[kinematically feasible] in [0, 1], quantized into ``1/bucket`` levels b = floor(S / bucket)
     (collision-probability differences below ``bucket`` count as equal). Within a level:
@@ -645,400 +645,6 @@ def denoise_proposals(
     return cache[key](cond_bf, inst_cond_bf, inst_cond_mask_bf, proposals_bktd, rng)
 
 
-# ---------------------------------------------------------------------------
-# MCMC proposal pool: sample smooth kinematic plans from p0(theta) * exp(-E(tau(theta)))
-# ---------------------------------------------------------------------------
-
-
-@dataclasses.dataclass(frozen=True)
-class KinematicPrior:
-    """Prior over Bernstein control points of speed v(t) (degree n_v) and curvature kappa(t) (degree n_k).
-
-    v(t) = sum_j w_j b_{j,n_v}(t/H): w_0 = v0, w_1 = v0 + a0 H / n_v (pinned, so speed AND acceleration
-         continue the current motion), free w_j ~ N(v0, (accel_sigma * t_j)^2)
-    k(t) = sum_j c_j b_{j,n_k}(t/H): c_0 = k0, free c_j ~ N(k0, (lat_accel_sigma / max(v0, v_floor)^2)^2)
-    Feasible set (convex-hull property makes the first three exact for all t):
-      -v_undershoot <= w_j <= v_max,  accel_min <= n_v (w_{j+1} - w_j) / H <= accel_max,  |c_j| <= kappa_max,
-      |k(t)| v(t)^2 <= lat_accel_max on a dense grid.
-    The executed speed is max(v(t), 0): a polynomial cannot reach 0 and stay there, so knots may
-    undershoot and the clip turns that into a stop-and-hold.
-    """
-
-    speed_degree: int = 4
-    curvature_degree: int = 3
-    pin_accel: bool = True  # w_1 from the current acceleration (C1 speed across replans)
-    accel_sigma: float = 2.0  # m/s^2: speed std grows as accel_sigma * t
-    accel_min: float = -6.0  # m/s^2: hard braking
-    accel_max: float = 3.0  # m/s^2
-    lat_accel_sigma: float = 2.0  # m/s^2: curvature std = lat_accel_sigma / v0^2
-    lat_accel_max: float = 5.0  # m/s^2
-    kappa_max: float = 0.2  # 1/m: ~5 m turning radius
-    v_floor: float = 3.0  # m/s: caps the curvature std at low speed
-    v_max: float = 25.0  # m/s
-    v_undershoot: float = 6.0  # m/s: speed knots may go this far below 0; the rollout clips v at 0 (stop and hold)
-
-
-@dataclasses.dataclass(frozen=True)
-class CostWeights:
-    """E = collision (1 - C) + contact_time (1 - T_hit) + offroad (1 - M) + offroad_depth (1 - R)
-         + progress (1 - G) + comfort * mean((j_lon^2 + j_lat^2) / jerk_ref^2)."""
-
-    collision: float = 4.0
-    contact_time: float = 2.0
-    offroad: float = 4.0
-    offroad_depth: float = 2.0
-    progress: float = 0.0  # progress is ES's job (lexicographic_reward); MCMC only maps the safe region
-    comfort: float = 0.2
-    jerk_ref: float = 2.0  # m/s^3
-    goal_step: int = 90  # the episode goal is the logged position at this step
-
-
-def _bernstein(n: int, u: np.ndarray) -> np.ndarray:
-    """[len(u), n + 1] Bernstein basis b_{j,n}(u)."""
-    from math import comb
-
-    j = np.arange(n + 1)
-    return np.asarray([comb(n, k) for k in j], np.float64)[None] * u[:, None] ** j * (1.0 - u[:, None]) ** (n - j)
-
-
-class KinematicPlanSpace:
-    """theta = (free speed knots, free curvature knots) <-> smooth ego-frame plans; whitened z ~ N(0, I) under the prior."""
-
-    def __init__(self, prior: KinematicPrior, *, v0: float, a0: float, kappa0: float, horizon_s: float, t_model: np.ndarray):
-        self.prior, self.horizon_s = prior, float(horizon_s)
-        self.nv, self.nk = prior.speed_degree, prior.curvature_degree
-        self.v0 = float(np.clip(v0, 0.0, prior.v_max))
-        # Pinned start values must themselves be feasible.
-        a_lo = max(prior.accel_min, -self.v0 * self.nv / self.horizon_s)
-        self.a0 = float(np.clip(a0, a_lo, prior.accel_max)) if prior.pin_accel else 0.0
-        k_lat = prior.lat_accel_max / max(self.v0, 1e-3) ** 2
-        self.kappa0 = float(np.clip(kappa0, -min(prior.kappa_max, k_lat), min(prior.kappa_max, k_lat)))
-        self.w_fixed = [self.v0] + ([self.v0 + self.a0 * self.horizon_s / self.nv] if prior.pin_accel else [])
-        j_free = np.arange(len(self.w_fixed), self.nv + 1)
-        self.n_w = len(j_free)
-        self.mu = np.concatenate([np.full(self.n_w, self.v0), np.full(self.nk, self.kappa0)])
-        self.sigma = np.concatenate([
-            prior.accel_sigma * j_free * self.horizon_s / self.nv,
-            np.full(self.nk, prior.lat_accel_sigma / max(self.v0, prior.v_floor) ** 2),
-        ])
-        self.dim = self.n_w + self.nk
-        # Fine grid for integration (0.05 s), sampled at the model timestamps.
-        self.t_fine = np.linspace(0.0, self.horizon_s, int(round(self.horizon_s / 0.05)) + 1)
-        self.basis_v = _bernstein(self.nv, self.t_fine / self.horizon_s)  # [F, nv+1]
-        self.basis_k = _bernstein(self.nk, self.t_fine / self.horizon_s)  # [F, nk+1]
-        self.t_model = np.asarray(t_model, np.float64)
-
-    def theta(self, z: np.ndarray) -> np.ndarray:
-        return self.mu + self.sigma * z
-
-    def z_for_speed(self, v_target: np.ndarray, kappa_z: np.ndarray | None = None) -> np.ndarray:
-        """z whose speed profile best fits ``v_target`` [F] (least squares on the free knots), curvature
-        knots at ``kappa_z`` (whitened, default 0 = keep the current curvature)."""
-        n_fixed = len(self.w_fixed)
-        a = self.basis_v[:, n_fixed:]
-        b = v_target - self.basis_v[:, :n_fixed] @ np.asarray(self.w_fixed)
-        w_free = np.linalg.lstsq(a, b, rcond=None)[0]
-        # Project onto the speed constraints: each knot step within the accel bounds, knots in range.
-        pr, step = self.prior, self.horizon_s / self.nv
-        w = list(self.w_fixed)
-        for wj in w_free:
-            w.append(float(np.clip(np.clip(wj, w[-1] + pr.accel_min * step, w[-1] + pr.accel_max * step),
-                                   -pr.v_undershoot, pr.v_max)))
-        z_w = (np.asarray(w[n_fixed:]) - self.mu[: self.n_w]) / self.sigma[: self.n_w]
-        return np.concatenate([z_w, np.zeros(self.nk) if kappa_z is None else kappa_z])
-
-    def braking_anchors(self, accels=(-6.0, -4.0, -2.0, 1.0, 2.0, 3.0), kappa_z=(0.0, 0.7, -0.7)) -> np.ndarray:
-        """Feasible z for constant-acceleration speed profiles (negative = brake to a stop, positive =
-        speed up to v_max), each with a few curvature offsets. Hard stops and hard speed-ups are
-        ~3 sigma out in the speed prior, so random chains rarely start there."""
-        out = []
-        for acc in accels:
-            # Fit the unclipped ramp (down to -v_undershoot); the rollout clip makes it a stop.
-            v = np.clip(self.v0 + acc * self.t_fine, -self.prior.v_undershoot, self.prior.v_max)
-            for kz in kappa_z:
-                z = self.z_for_speed(v, np.full(self.nk, kz))
-                # The least-squares fit can overshoot below 0 m/s or past the accel bounds: shrink
-                # toward the prior mean until feasible.
-                for scale in np.linspace(1.0, 0.3, 8):
-                    if self.feasible((scale * z)[None])[0]:
-                        out.append(scale * z)
-                        break
-        return np.asarray(out).reshape(-1, self.dim)
-
-    def controls(self, z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Control points: speed [P, nv+1], curvature [P, nk+1] (leading ones pinned to the current state)."""
-        th = self.theta(z)
-        p = th.shape[0]
-        w = np.concatenate([np.tile(self.w_fixed, (p, 1)), th[:, : self.n_w]], axis=1)
-        c = np.concatenate([np.full((p, 1), self.kappa0), th[:, self.n_w :]], axis=1)
-        return w, c
-
-    def profiles(self, z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        w, c = self.controls(z)
-        return np.maximum(w @ self.basis_v.T, 0.0), c @ self.basis_k.T  # [P, F] speed (clipped at 0), curvature
-
-    def feasible(self, z: np.ndarray) -> np.ndarray:
-        pr = self.prior
-        w, c = self.controls(z)
-        accel = self.nv * np.diff(w, axis=1) / self.horizon_s
-        v, kappa = self.profiles(z)
-        return (
-            (w >= -pr.v_undershoot).all(1) & (w <= pr.v_max).all(1)
-            & (accel >= pr.accel_min - 1e-6).all(1) & (accel <= pr.accel_max + 1e-6).all(1)
-            & (np.abs(c) <= pr.kappa_max).all(1)
-            & (np.abs(kappa) * v**2 <= pr.lat_accel_max + 1e-6).all(1)
-        )
-
-    def jerk_cost(self, z: np.ndarray, jerk_ref: float) -> np.ndarray:
-        """mean over the horizon of (j_lon^2 + j_lat^2) / jerk_ref^2; j_lon = v'', j_lat = d(kappa v^2)/dt."""
-        v, kappa = self.profiles(z)
-        dt = self.t_fine[1] - self.t_fine[0]
-        j_lon = np.gradient(np.gradient(v, dt, axis=1), dt, axis=1)
-        j_lat = np.gradient(kappa * v**2, dt, axis=1)
-        return ((j_lon**2 + j_lat**2) / jerk_ref**2).mean(axis=1)
-
-    def rollout(self, z: np.ndarray) -> dict[str, np.ndarray]:
-        """Integrate psi' = kappa v, x' = v cos psi, y' = v sin psi (trapezoid) -> ego-frame states at t_model."""
-        v, kappa = self.profiles(z)  # [P, F]
-        dt = np.diff(self.t_fine)[None]
-
-        def cumtrapz(f):
-            return np.concatenate([np.zeros_like(f[:, :1]), np.cumsum(0.5 * (f[:, 1:] + f[:, :-1]) * dt, axis=1)], 1)
-
-        psi = cumtrapz(kappa * v)
-        x, y = cumtrapz(v * np.cos(psi)), cumtrapz(v * np.sin(psi))
-        at = lambda f: np.stack([np.interp(self.t_model, self.t_fine, row) for row in f])  # noqa: E731
-        x_m, y_m, psi_m, v_m = at(x), at(y), at(psi), at(v)
-        return {"x": x_m, "y": y_m, "psi": psi_m, "v": v_m, "kappa": at(kappa),
-                "vx": v_m * np.cos(psi_m), "vy": v_m * np.sin(psi_m)}
-
-    def to_norm(self, z: np.ndarray, cfg, extra_ptd: np.ndarray) -> jax.Array:
-        """Diffusion-normalized [1, P, T, D]: [x, y]/ego_range, [vx, vy]/max_velocity, psi/pi, extra dims copied."""
-        r = self.rollout(z)
-        core = np.stack([r["x"] / cfg.ego_range, r["y"] / cfg.ego_range,
-                         r["vx"] / cfg.max_velocity, r["vy"] / cfg.max_velocity, r["psi"] / np.pi], axis=-1)
-        return jnp.asarray(np.concatenate([core, extra_ptd], axis=-1), dtype=jnp.float32)[None]
-
-
-def plan_energy(planner, norm_bktd, *, pre_batch, sim_state, timestep: int, goal_xy, weights: CostWeights):
-    """Scene part of E [P] and its terms for normalized plans, scored with the planner's WM / lane graph (as ES)."""
-    world = np.asarray(planner._postprocess_population(norm_bktd, pre_batch)[0][0])
-    ctx = build_reward_context(world, sim_state=sim_state, timestep=timestep, scorer=planner.scorer, goal_xy=goal_xy)
-    coll = np.asarray(collision(ctx), np.float32)
-    hit_t = collision_time_tiebreak(ctx)
-    margin, depth = ctx.scorer.compute_offroad_score_margin_tiebreak(
-        ctx.ego_boxes, sim_state=sim_state, timestep=timestep, world_idx=0
-    )
-    margin, depth = np.asarray(margin, np.float32), np.asarray(depth, np.float32)
-    prog = goal_progress(ctx, goal_step=weights.goal_step)
-    parts = {"collision": coll, "contact_time": hit_t, "offroad_margin": margin, "offroad_depth": depth,
-             "progress": prog}
-    energy = (weights.collision * (1 - coll) + weights.contact_time * (1 - hit_t)
-              + weights.offroad * (1 - margin) + weights.offroad_depth * (1 - depth)
-              + weights.progress * (1 - prog))
-    return energy.astype(np.float64), parts
-
-
-def mcmc_pool(
-    num_steps: int = 30,
-    prior: KinematicPrior = KinematicPrior(),
-    weights: CostWeights = CostWeights(),
-    temperature: float = 1.0,
-    anneal_frac: float = 0.5,
-    step_size: float = 0.3,
-    target_accept: float = 0.3,
-    keep_frac: float = 0.25,
-    select: str = "diverse_safe",
-    safe_collision: float = 0.99,
-    max_jerk: float = 3.0,
-    braking_anchors: bool = True,
-    denoise: bool = False,
-    denoise_steps: int | None = None,
-    noise_scale: float = 1.0,
-) -> InitialPool:
-    """Initial pool from P parallel pCN-MCMC chains over smooth kinematic plans.
-
-    ``select='diverse_safe'``: every scored, feasible plan (initial states + all proposals) is a
-    candidate; the pool is a farthest-point (diverse) subset of the safe ones (collision >=
-    ``safe_collision``, on-road, jerk cost <= ``max_jerk``), topped up by the lowest-energy rest.
-    ``select='final'``: the chain states after the last step. ``braking_anchors``: a few chains start
-    from constant-acceleration profiles (-6..+3 m/s^2, straight and slightly curved) so emergency
-    braking and hard speed-ups are explored.
-
-    Target: pi(z) ∝ N(z; 0, I) 1[feasible] exp(-lambda_k E(tau(z)) / temperature), lambda_k
-    ramping 0 -> 1 over the first ``anneal_frac`` of the steps (step size adapts there too).
-    Chains start from the prior (symmetrized: z and -z, so left/right and faster/slower come in
-    pairs). ``keep_frac`` of the pool are plain diffusion samples (pool slots 0..n_keep-1).
-    ``denoise`` = SDEdit the chain states. ``num_steps=0`` = prior samples only. Diagnostics go to
-    ``planner.last_pool_info``.
-    """
-
-    def pool(planner, *, cond_bf, inst_cond_bf, inst_cond_mask_bf, features, pre_batch, rng, sim_state, timestep,
-             goal_xy, **_):
-        del features
-        k_sample, k_denoise, k_mcmc = jax.random.split(rng, 3)
-        np_rng = np.random.default_rng(int(jax.random.randint(k_mcmc, (), 0, 2**31 - 1)))
-        base = planner._sample_population_jit(
-            cond_bf=cond_bf, inst_cond_bf=inst_cond_bf, inst_cond_mask_bf=inst_cond_mask_bf, rng=k_sample
-        )  # [1, P, T, D]
-        n_keep = int(round(keep_frac * planner.population_size))
-        n_chain = planner.population_size - n_keep
-        horizon = int(base.shape[2])
-        t_model = np.asarray(pre_batch.aux["model_t_seconds"][0], np.float64)
-        t_model = t_model[1:] if t_model.shape[0] == horizon + 1 else t_model[:horizon]
-        v0 = float(np.hypot(*np.asarray(pre_batch.aux["anchor_world_state"][0, 2:4])))
-        _, a0, kappa0 = vr.ego_kinematics(sim_state, timestep)
-        space = KinematicPlanSpace(
-            dataclasses.replace(prior, v_max=min(prior.v_max, planner.preprocess_cfg.max_velocity)),
-            v0=v0, a0=a0, kappa0=kappa0, horizon_s=float(t_model[-1]), t_model=t_model,
-        )
-        extra = np.asarray(base[0, n_keep:, :, 5:])
-
-        # Initial states: feasible draws from the prior, symmetrized.
-        half = np_rng.standard_normal((32 * n_chain, space.dim))
-        cand = np.stack([half, -half], axis=1).reshape(-1, space.dim)  # z, -z, z', -z', ...
-        cand = cand[space.feasible(cand)]
-        if braking_anchors:
-            cand = np.concatenate([space.braking_anchors(), cand])
-        z = np.zeros((n_chain, space.dim))  # theta = mu (keep speed and curvature) is always feasible
-        z[: min(len(cand), n_chain)] = cand[:n_chain]
-
-        def energy(z_):
-            e_scene, parts_ = plan_energy(
-                planner, space.to_norm(z_, planner.preprocess_cfg, extra), pre_batch=pre_batch,
-                sim_state=sim_state, timestep=timestep, goal_xy=goal_xy, weights=weights,
-            )
-            parts_["jerk"] = space.jerk_cost(z_, weights.jerk_ref)
-            return e_scene + weights.comfort * parts_["jerk"], parts_
-
-        e, parts = energy(z)
-        e_hist, acc_hist, lam_hist = [e.copy()], [], []
-        seen_z, seen_e, seen_parts = [z.copy()], [e.copy()], [parts]
-        beta = float(step_size)
-        n_anneal = max(1, int(round(anneal_frac * num_steps)))
-        for k in range(num_steps):
-            lam = min(1.0, (k + 1) / n_anneal) / temperature
-            prop = np.sqrt(1.0 - beta**2) * z + beta * np_rng.standard_normal(z.shape)
-            ok = space.feasible(prop)
-            e_prop, parts_prop = energy(prop)
-            accept = ok & (np.log(np_rng.uniform(size=n_chain)) < -lam * (e_prop - e))
-            z = np.where(accept[:, None], prop, z)
-            e = np.where(accept, e_prop, e)
-            parts = {name: np.where(accept, parts_prop[name], parts[name]) for name in parts}
-            rate = float(accept.mean())
-            if k < n_anneal:
-                beta = float(np.clip(beta * np.exp(rate - target_accept), 0.02, 0.95))
-            e_hist.append(e.copy()); acc_hist.append(rate); lam_hist.append(lam)
-            seen_z.append(prop[ok]); seen_e.append(e_prop[ok]); seen_parts.append({n: v[ok] for n, v in parts_prop.items()})
-
-        all_z, all_e = np.concatenate(seen_z), np.concatenate(seen_e)
-        all_parts = {n: np.concatenate([sp[n] for sp in seen_parts]) for n in parts}
-        safe_all = (all_parts["collision"] >= safe_collision) & (all_parts["offroad_margin"] > 0)
-        if select == "diverse_safe":
-            pick = _select_diverse_safe(space, all_z, all_e, all_parts, n_chain,
-                                        safe_collision=safe_collision, max_jerk=max_jerk)
-            z, e, parts = all_z[pick], all_e[pick], {n: v[pick] for n, v in all_parts.items()}
-        chains = space.to_norm(z, planner.preprocess_cfg, extra)
-        if denoise:
-            chains = denoise_proposals(
-                planner, cond_bf=cond_bf, inst_cond_bf=inst_cond_bf, inst_cond_mask_bf=inst_cond_mask_bf,
-                proposals_bktd=chains, rng=k_denoise,
-                steps=denoise_steps or planner.resample_timesteps, noise_scale=noise_scale,
-            )
-        planner.last_pool_info = {
-            "v0": space.v0, "a0": space.a0, "kappa0": space.kappa0, "n_keep": n_keep, "z": z,
-            "theta": space.theta(z), "rollout": space.rollout(z), "t_model": t_model, "energy": np.stack(e_hist),
-            "accept": np.asarray(acc_hist), "lambda": np.asarray(lam_hist), "step_size": beta, "parts": parts,
-            "n_feasible_init": int(min(len(cand), n_chain)),
-            "n_scored": int(len(all_e)), "n_safe_found": int(safe_all.sum()),
-            "n_safe_smooth_found": int((safe_all & (all_parts["jerk"] <= max_jerk)).sum()),
-            "space": space,  # lets ES mutate these plans in z (es_mutation='hybrid')
-        }
-        return jnp.concatenate([base[:, :n_keep], chains], axis=1)
-
-    pool.__name__ = (
-        f"mcmc_pool[{num_steps} steps, T={temperature:g}"
-        f"{'' if not denoise else f', dn{denoise_steps or 0}xσ{noise_scale:g}'}]"
-    )
-    return pool
-
-
-def _plan_features(space: KinematicPlanSpace, z: np.ndarray, times=(1.25, 2.5, 3.75, 5.0)) -> np.ndarray:
-    """Ego-frame (x, y) at a few horizon times: separates speed (along) and curvature (across)."""
-    r = space.rollout(z)
-    idx = [int(np.argmin(np.abs(space.t_model - t))) for t in times]
-    return np.concatenate([r["x"][:, idx], r["y"][:, idx]], axis=1)
-
-
-def _select_diverse_safe(space, z, e, parts, n, *, safe_collision, max_jerk) -> np.ndarray:
-    """Indices of n plans: diverse (farthest-point) among safe & smooth ones, lowest energy first;
-    if there are fewer than n of those, all of them plus the lowest-energy rest (also spread out)."""
-    safe = (parts["collision"] >= safe_collision) & (parts["offroad_margin"] > 0)
-    good = np.flatnonzero(safe & (parts["jerk"] <= max_jerk))
-    good = good[np.argsort(e[good])]
-    if len(good) >= n:
-        return good[_farthest_points(_plan_features(space, z[good]), n)]
-    rest = np.setdiff1d(np.arange(len(e)), good)
-    rest = rest[np.argsort(e[rest])][: max(3 * (n - len(good)), n - len(good))]
-    if len(good) == 0:
-        return rest[_farthest_points(_plan_features(space, z[rest]), min(n, len(rest)))] if len(rest) >= n else rest
-    feat = _plan_features(space, z[np.concatenate([good, rest])])
-    chosen = list(range(len(good)))
-    d = np.min(np.linalg.norm(feat[:, None] - feat[None, chosen], axis=-1), axis=1)
-    while len(chosen) < n:
-        i = int(np.argmax(d))
-        chosen.append(i)
-        d = np.minimum(d, np.linalg.norm(feat - feat[i], axis=-1))
-    return np.concatenate([good, rest])[chosen]
-
-
-def mcmc_summary(info: dict) -> dict[str, float]:
-    """Final chain states: is anything collision-free / on-road, and when do the colliding ones hit?"""
-    p, horizon = info["parts"], float(info["t_model"][-1])
-    return {
-        "E_min": float(info["energy"][-1].min()),
-        "E_median": float(np.median(info["energy"][-1])),
-        "frac_collision_free": float((p["collision"] >= 0.99).mean()),
-        "frac_onroad": float((p["offroad_margin"] > 0).mean()),
-        "latest_contact_s": float(p["contact_time"].max() * horizon),  # = horizon if some chain never hits
-        "progress_median": float(np.median(p["progress"])),
-        "jerk_median": float(np.median(p["jerk"])),
-        "accept_final": float(info["accept"][-1]) if len(info["accept"]) else float("nan"),
-        "n_scored": info.get("n_scored", 0),
-        "n_safe_found": info.get("n_safe_found", 0),
-        "n_safe_smooth_found": info.get("n_safe_smooth_found", 0),
-    }
-
-
-def plot_mcmc(info: dict, *, figsize=(15, 3.6)):
-    """MCMC diagnostics for ``planner.last_pool_info``: energy quantiles and acceptance per step,
-    speed and curvature profiles of the final chain states."""
-    fig, ax = plt.subplots(1, 4, figsize=figsize)
-    e = info["energy"]
-    steps = np.arange(len(e))
-    ax[0].fill_between(steps, *np.percentile(e, [10, 90], axis=1), alpha=0.3, label="10-90%")
-    ax[0].plot(steps, np.median(e, axis=1), label="median")
-    ax[0].plot(steps, e.min(axis=1), label="min")
-    ax[0].set(xlabel="MCMC step", ylabel="energy E", title="energy of the chains")
-    ax[0].legend(fontsize=8)
-    if len(info["accept"]):
-        ax[1].plot(np.arange(1, len(steps)), info["accept"], label="accept rate")
-        ax[1].plot(np.arange(1, len(steps)), info["lambda"], label="λ (anneal)")
-    ax[1].set(xlabel="MCMC step", ylim=(0, 1.05), title="acceptance / annealing")
-    ax[1].legend(fontsize=8)
-    r, t = info["rollout"], info["t_model"]
-    col = plt.cm.viridis((e[-1] - e[-1].min()) / max(np.ptp(e[-1]), 1e-6))
-    for i in range(len(r["v"])):
-        ax[2].plot(t, r["v"][i], color=col[i], lw=0.8)
-        ax[3].plot(t, r["kappa"][i], color=col[i], lw=0.8)
-    ax[2].set(xlabel="t [s]", ylabel="m/s", title=f"speed (v0={info['v0']:.1f}, a0={info.get('a0', 0.0):.1f})")
-    ax[3].set(xlabel="t [s]", ylabel="1/m", title=f"curvature (κ0={info['kappa0']:.3f})")
-    ax[3].axhline(0, color="k", lw=0.5)
-    fig.suptitle("color = final energy (dark = low)", fontsize=9)
-    fig.tight_layout()
-    return fig
-
-
 def topk(scores, trajectories, n_elite, rng) -> np.ndarray:
     """Production behaviour (``jax.lax.top_k``)."""
     del trajectories, rng
@@ -1119,7 +725,6 @@ class ESIteration:
     breakdown: dict[str, np.ndarray]  # term name -> [P]
     is_carried_elite: np.ndarray  # [P] True for elites carried over from the previous iteration
     elite_indices: np.ndarray  # [E] indices into this pool chosen by the acquisition
-    origin: np.ndarray | None = None  # [P] initial-pool slot each plan descends from (through elites)
 
 
 @dataclasses.dataclass
@@ -1132,16 +737,6 @@ class ESTrace:
     wm_forecast: dict[str, np.ndarray] | None  # traj_k [N,K,T,5], mode_probs [N,K], masks [N,T], top1_traj
     best_collision_debug: dict[str, Any] | None  # per-agent collision prob for the chosen plan
     label: str = ""
-    n_diffusion_slots: int | None = None  # initial slots < this are diffusion samples, the rest from the sampler
-    pool_info: dict[str, Any] | None = None  # initial-pool sampler diagnostics (mcmc_pool), if any
-
-    def source(self, k: int | None = None, iteration: int = -1) -> str:
-        """'diffusion' or 'sampler' (e.g. an MCMC chain) for plan ``k`` (default: the chosen plan)."""
-        it = self.iterations[iteration]
-        k = self.best_index if k is None else k
-        if it.origin is None or self.n_diffusion_slots is None:
-            return "diffusion"
-        return "diffusion" if it.origin[k] < self.n_diffusion_slots else "sampler"
 
     def summary(self) -> list[dict[str, Any]]:
         rows = []
@@ -1184,8 +779,6 @@ class DebugESPlanner(DiffusionESPlanner):
         acquisition: Acquisition = topk,
         initial_pool: InitialPool = standard_pool,
         resample_noise_scale: float | None = None,
-        es_mutation: str = "diffusion",
-        kinematic_step: float = 0.2,
         label: str = "baseline",
     ) -> None:
         super().__init__(
@@ -1205,13 +798,8 @@ class DebugESPlanner(DiffusionESPlanner):
         self.initial_pool = initial_pool
         # None = production (policy default noise_scale=2.0); e.g. 1.0 = the schedule's noise.
         self.resample_noise_scale = resample_noise_scale
-        # 'diffusion' = production (re-noise + denoise every elite); 'hybrid' = elites that come from a
-        # kinematic sampler (mcmc_pool) are mutated with a pCN step of size kinematic_step in its z-space.
-        self.es_mutation = es_mutation
-        self.kinematic_step = float(kinematic_step)
         self.label = label
         self.last_trace: ESTrace | None = None
-        self.last_pool_info: dict[str, Any] | None = None  # set by samplers that have diagnostics (mcmc_pool)
         self._scenario: Scenario | None = None
         # Kept so variant() can rebuild when jitted closures must change.
         self._init_kwargs = dict(
@@ -1225,8 +813,6 @@ class DebugESPlanner(DiffusionESPlanner):
             acquisition=acquisition,
             initial_pool=initial_pool,
             resample_noise_scale=resample_noise_scale,
-            es_mutation=es_mutation,
-            kinematic_step=kinematic_step,
             label=label,
         )
 
@@ -1270,27 +856,10 @@ class DebugESPlanner(DiffusionESPlanner):
         new.acquisition = kwargs["acquisition"]
         new.initial_pool = kwargs["initial_pool"]
         new.resample_noise_scale = kwargs["resample_noise_scale"]
-        new.es_mutation = kwargs["es_mutation"]
-        new.kinematic_step = float(kwargs["kinematic_step"])
         new.label = kwargs["label"]
         new.last_trace = None
         new._init_kwargs = kwargs
         return new
-
-    def _mutate_kinematic(self, space, z, np_rng, tries: int = 8):
-        """pCN step z' = sqrt(1 - b^2) z + b xi, redrawn until feasible (else keep z)."""
-        b = self.kinematic_step
-        out = z.copy()
-        todo = np.ones(len(z), dtype=bool)
-        for _ in range(tries):
-            prop = np.sqrt(1.0 - b**2) * z[todo] + b * np_rng.standard_normal((int(todo.sum()), z.shape[1]))
-            ok = space.feasible(prop)
-            idx = np.flatnonzero(todo)
-            out[idx[ok]] = prop[ok]
-            todo[idx[ok]] = False
-            if not todo.any():
-                break
-        return out
 
     def _score(self, traj_pt5, sim_state, timestep, goal_xy):
         ctx = build_reward_context(
@@ -1334,7 +903,6 @@ class DebugESPlanner(DiffusionESPlanner):
         goal_xy = np.asarray(goal).reshape(-1, 2)[0]
         np_rng = np.random.default_rng(int(timestep))
 
-        self.last_pool_info = None
         norm_bktd = self.initial_pool(
             self,
             cond_bf=cond_bf,
@@ -1352,15 +920,6 @@ class DebugESPlanner(DiffusionESPlanner):
         pool_world = np.asarray(world_bkt5[0])
         pool_scores, pool_breakdown = self._score(pool_world, sim_state, timestep, goal_xy)
         carried = np.zeros((len(pool_scores),), dtype=bool)
-        origin = np.arange(len(pool_scores))
-        info = self.last_pool_info or {}
-        space = info.get("space") if self.es_mutation == "hybrid" else None
-        if space is not None:  # z of every pool member, NaN for diffusion samples
-            pool_z = np.full((len(pool_scores), space.dim), np.nan)
-            pool_z[info["n_keep"]:] = info["z"]
-        # Same elite -> slot mapping as _replicate_elites.
-        n_el, n_pop = self.elite_size, self.population_size
-        replica_of = np.repeat(np.arange(n_el), [n_pop // n_el + (i < n_pop % n_el) for i in range(n_el)])
 
         iterations: list[ESIteration] = []
         for it in range(self.num_iterations + 1):
@@ -1375,7 +934,6 @@ class DebugESPlanner(DiffusionESPlanner):
                     breakdown=pool_breakdown,
                     is_carried_elite=carried,
                     elite_indices=elite_idx,
-                    origin=origin,
                 )
             )
             if it == self.num_iterations:
@@ -1394,14 +952,6 @@ class DebugESPlanner(DiffusionESPlanner):
                 new_norm = denoise_proposals(
                     self, **resample_kw, steps=self.resample_timesteps, noise_scale=self.resample_noise_scale
                 )
-            if space is not None:
-                child_z = pool_z[elite_idx][replica_of]
-                kin = ~np.isnan(child_z[:, 0])
-                if kin.any():
-                    child_z[kin] = self._mutate_kinematic(space, child_z[kin], np_rng)
-                    kin_norm = space.to_norm(child_z[kin], self.preprocess_cfg, np.asarray(replicated[0, kin, :, 5:]))
-                    new_norm = new_norm.at[0, np.flatnonzero(kin)].set(kin_norm[0])
-                pool_z = np.concatenate([pool_z[elite_idx], child_z], axis=0)
             new_world = np.asarray(self._postprocess_population(new_norm, pre_batch)[0][0])
             new_scores, new_breakdown = self._score(new_world, sim_state, timestep, goal_xy)
 
@@ -1417,7 +967,6 @@ class DebugESPlanner(DiffusionESPlanner):
             carried = np.concatenate(
                 [np.ones((len(elite_idx),), dtype=bool), np.zeros((len(new_scores),), dtype=bool)]
             )
-            origin = np.concatenate([origin[elite_idx], origin[elite_idx][replica_of]])
 
         best = int(np.argmax(pool_scores))
         best_world = pool_world[best]
@@ -1450,8 +999,6 @@ class DebugESPlanner(DiffusionESPlanner):
             wm_forecast=wm_forecast,
             best_collision_debug=best_debug,
             label=self.label,
-            n_diffusion_slots=(self.last_pool_info or {}).get("n_keep", self.population_size),
-            pool_info=self.last_pool_info,
         )
         return PlannerResult(
             start_t_b=pre_batch.aux["anchor_step"].astype(jnp.int32),
@@ -1810,7 +1357,7 @@ def animate_closed_loop(
 def plot_closed_loop_replans(result: ClosedLoopResult, *, view_m: float = 40.0, cols: int = 4, size: float = 4.0):
     """One panel per replan: agents (evaluation rollout) at the replan time, the ego's executed path
     over the next replan interval (green), the chosen plan (red), the last ES elites (blue) and
-    the goal (star). Title: speed, plan source, chosen plan's safety level / progress, failures in the interval."""
+    the goal (star). Title: speed, chosen plan's safety level / progress, failures in the interval."""
     steps = result.replan_steps
     rows = int(np.ceil(len(steps) / cols))
     fig, axes = plt.subplots(rows, cols, figsize=(size * cols, size * rows), squeeze=False)
@@ -1833,7 +1380,7 @@ def plot_closed_loop_replans(result: ClosedLoopResult, *, view_m: float = 40.0, 
         b = last.breakdown
         terms = " ".join(f"{k[:4]}={float(b[k][tr.best_index]):.2f}" for k in ("collision", "offroad", "progress", "safety_level") if k in b)
         flags = [f for f, a in (("OVERLAP", result.overlap_t), ("OFFROAD", result.offroad_t)) if a[s:nxt + 1].any()]
-        ax.set_title(f"t={s} v={v[s]:.1f} [{tr.source()}] {' '.join(flags)}\n{terms}", fontsize=8,
+        ax.set_title(f"t={s} v={v[s]:.1f} {' '.join(flags)}\n{terms}", fontsize=8,
                      color=HIT_COLOR if flags else "k")
     for ax in axes.ravel()[len(steps):]:
         ax.axis("off")
@@ -1844,8 +1391,7 @@ def plot_closed_loop_replans(result: ClosedLoopResult, *, view_m: float = 40.0, 
 
 def plot_speed_profile(results: list[ClosedLoopResult], *, t_range: tuple[int, int] | None = None, figsize=(12, 7)):
     """Executed ego speed / acceleration / jerk per run (0.1 s steps), with each replan's planned speed
-    (thin) and replan markers: o = chosen plan descends from a diffusion sample, ^ = from the sampler
-    (MCMC chain). A speed jump at a replan where the planned profile itself jumps = plan switch."""
+    (thin) and replan markers (o). A speed jump at a replan where the planned profile itself jumps = plan switch."""
     fig, axes = plt.subplots(3, 1, figsize=figsize, sharex=True)
     for n, r in enumerate(results):
         color = plt.cm.tab10(n % 10)
@@ -1863,12 +1409,11 @@ def plot_speed_profile(results: list[ClosedLoopResult], *, t_range: tuple[int, i
             plan = r.plans[s]
             pv = np.hypot(plan[:, 3], plan[:, 4])
             axes[0].plot(s + np.arange(len(pv)), pv, color=color, lw=0.6, alpha=0.5)
-            mk = "^" if r.traces[s].source() == "sampler" else "o"
-            axes[0].plot(s, v[s], mk, color=color, ms=6, mec="k", mew=0.5)
+            axes[0].plot(s, v[s], "o", color=color, ms=6, mec="k", mew=0.5)
         fail = r.overlap_t | r.offroad_t
         if fail.any():
             axes[0].axvline(int(np.flatnonzero(fail)[0]), color=color, ls="--", lw=1)
-    axes[0].set(ylabel="speed [m/s]", title="executed (thick) and planned at each replan (thin); o diffusion / ^ sampler; dashed = first failure")
+    axes[0].set(ylabel="speed [m/s]", title="executed (thick) and planned at each replan (thin); dashed = first failure")
     axes[1].set(ylabel="accel [m/s²]")
     axes[2].set(ylabel="jerk [m/s³]", xlabel="timestep (0.1 s)")
     for ax in axes:
@@ -1978,7 +1523,7 @@ def plot_es_iterations(
     risk = ", ".join(f"{i}:{p_hit[i]:.2f}" for i in sorted(risky, key=lambda i: -p_hit[i])[:4]) or "none"
     fig.suptitle(
         f"[{trace.label}] ES at t={t} (bold = elites, red = chosen plan, dotted = WM top-1)\n"
-        f"chosen ({trace.source()}): {terms} | P(hit) per agent: {risk}",
+        f"chosen: {terms} | P(hit) per agent: {risk}",
         fontsize=10,
     )
     return fig

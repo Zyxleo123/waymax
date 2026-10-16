@@ -3,12 +3,12 @@
 Same setup as ``es_diversity.ipynb`` (e450 WM, log agents, replan every 10 steps). For each
 scenario x variant writes, under ``--out``:
   summary.json             success / overlap / offroad / goal per run
-  <scen>_<variant>.csv     one row per replan (plan source, chosen plan terms, pool safety, MCMC stats)
+  <scen>_<variant>.csv     one row per replan (chosen plan terms, pool safety, risky agents)
   <scen>_<variant>.png     replan overview (plot_closed_loop_replans)
   <scen>_speed.png         speed / accel / jerk of all variants
 
 Usage:
-  python notebooks/es_mcmc_eval.py --scenarios 00017:173 --variants baseline mcmc_lex --out DIR
+  python notebooks/es_mcmc_eval.py --scenarios 00017:173 --variants baseline fps_x4 --out DIR
 """
 
 from __future__ import annotations
@@ -46,7 +46,6 @@ ES = dict(population_size=64, elite_size=8, num_iterations=4, resample_timesteps
 
 
 def build_variants(base: esd.DebugESPlanner) -> dict:
-    mcmc = esd.mcmc_pool()
     lex = esd.lexicographic_reward()
     return {
         "baseline": lambda: base,
@@ -54,14 +53,8 @@ def build_variants(base: esd.DebugESPlanner) -> dict:
         "lex": lambda: base.variant(label="lex", reward=lex, resample_noise_scale=1.0),
         # diffusion pool, rulebook violations (collision > off-road > goal > tiebreaks), slack on P(collision)
         "violation": lambda: base.variant(label="violation", reward=esd.violation_reward(), resample_noise_scale=1.0),
-        # MCMC safe-diverse pool + lexicographic reward
-        "mcmc_lex": lambda: base.variant(label="mcmc_lex", initial_pool=mcmc, reward=lex, resample_noise_scale=1.0),
-        # same, but ES only re-ranks (no diffusion re-noising of the MCMC plans)
-        "mcmc_lex_noes": lambda: base.variant(label="mcmc_lex_noes", initial_pool=mcmc, reward=lex, num_iterations=0),
-        # ES mutates MCMC-born elites in the kinematic space (smooth, stays near the safe region),
-        # diffusion-born elites with the diffusion model
-        "mcmc_lex_hybrid": lambda: base.variant(label="mcmc_lex_hybrid", initial_pool=mcmc, reward=lex,
-                                                resample_noise_scale=1.0, es_mutation="hybrid"),
+        # diffusion pool thinned to 64 by farthest-point sampling over 4x samples
+        "fps_x4": lambda: base.variant(label="fps_x4", initial_pool=esd.oversample_fps(4)),
     }
 
 
@@ -74,7 +67,7 @@ def replan_rows(result: esd.ClosedLoopResult) -> list[dict]:
         last = tr.iterations[-1]
         p0, pl = esd.pool_stats(tr, 0), esd.pool_stats(tr, -1)
         row = {
-            "t": s, "v": round(float(v[s]), 2), "source": tr.source(), "best_score": round(tr.best_score, 4),
+            "t": s, "v": round(float(v[s]), 2), "best_score": round(tr.best_score, 4),
             "n_safe_init": p0["n_safe"], "n_safe_final": pl["n_safe"],
             "plan_v_end": round(float(np.hypot(*result.plans[s][-1, 3:5])), 2),
             "plan_jerk": round(float(esd.plan_jerk(result.plans[s][None])[0]), 2),
@@ -109,9 +102,6 @@ def replan_rows(result: esd.ClosedLoopResult) -> list[dict]:
                 spd = float(np.hypot(np.asarray(st.vel_x)[i, s], np.asarray(st.vel_y)[i, s]))
                 parts.append(f"a{i}:p{p_hit[i]:.2f}@({fwd:+.0f},{left:+.0f})v{spd:.0f}")
             row["risky"] = " ".join(parts)
-        if tr.pool_info is not None:
-            row.update({f"mcmc_{k}": (round(x, 3) if isinstance(x, float) else x)
-                        for k, x in esd.mcmc_summary(tr.pool_info).items()})
         rows.append(row)
     return rows
 
@@ -125,7 +115,7 @@ def main() -> None:
     ap.add_argument("--num_chunks", type=int, default=1)
     ap.add_argument("--wm_ckpt", default=WM_CKPT)
     ap.add_argument("--no_plots", action="store_true", help="summary + csv only (large sweeps)")
-    ap.add_argument("--variants", nargs="+", default=["baseline", "mcmc_lex"])
+    ap.add_argument("--variants", nargs="+", default=["baseline", "fps_x4"])
     ap.add_argument("--sim_agents", default="log")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", required=True)
