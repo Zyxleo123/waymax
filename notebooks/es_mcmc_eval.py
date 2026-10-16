@@ -93,7 +93,8 @@ def replan_rows(result: esd.ClosedLoopResult) -> list[dict]:
             "v1s_max_init": round(float(v1(first.trajectories).max()), 2),
             "v1s_max_init_safe": round(float(v1(first.trajectories[safe0]).max()), 2) if safe0.any() else np.nan,
             "v1s_max_toplevel": round(float(v1(last_it.trajectories[top]).max()), 2),
-            "prog_max_toplevel": round(float(last_it.breakdown.get("progress", np.zeros(1))[top].max()), 3),
+            "prog_max_toplevel": (round(float(last_it.breakdown["progress"][top].max()), 3)
+                                  if "progress" in last_it.breakdown else np.nan),
         })
         dbg = tr.best_collision_debug or {}
         if "p_collision_i" in dbg:
