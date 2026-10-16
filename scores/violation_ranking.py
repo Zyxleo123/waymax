@@ -262,6 +262,10 @@ def compute_violations(
 def rank_violations(b: dict[str, np.ndarray], collision_slack: float = 0.02) -> tuple[np.ndarray, np.ndarray]:
     """(scores [P] in [0, 1), depth [P] = number of keys passed) for violations ``b`` (see module doc)."""
     keys = [np.asarray(b[k], np.float32) for k in VIOLATION_KEYS]
+    # A rule's tiebreak only applies while the rule is violated: plans within the collision slack count
+    # as collision-free and tie on contact time (else a 1% mode clipping a plan outranks off-road).
+    i_time = VIOLATION_KEYS.index("v_coll_time")
+    keys[i_time] = np.where(keys[VIOLATION_KEYS.index("v_coll_all")] <= collision_slack, np.float32(-1e9), keys[i_time])
     n = len(keys[0])
     alive = np.ones(n, dtype=bool)
     depth = np.zeros(n, dtype=np.int32)
