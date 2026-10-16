@@ -36,6 +36,8 @@ from lane_graph.lane_graph_utils import lane_graph_zip_path_for_tfrecord  # noqa
 from planner.abstract_planner import PlannerResult  # noqa: E402
 from planner.diffusion_es_planner import DiffusionESPlanner  # noqa: E402
 from scores import helpers as scorer_helpers  # noqa: E402
+from scores import violation_ranking as vr  # noqa: E402
+from scores.violation_ranking import kinematic_feasibility, plan_jerk  # noqa: E402,F401
 from scores.scorer_lane_graph import LaneGraphShardStore  # noqa: E402
 from simulation.evaluation_utils import (  # noqa: E402
     _build_rollout_env_and_actor,
@@ -420,53 +422,9 @@ def collision_time_tiebreak(ctx: RewardContext) -> np.ndarray:
 
 
 def goal_progress(ctx: RewardContext, goal_step: int = 90, dt: float = 0.1, reach_m: float = 2.0) -> np.ndarray:
-    """Pace adherence toward the episode goal, averaged over 1 s checkpoints up to ``goal_step``.
-
-    d_t = plan-to-goal distance, D_k = min_{t <= t_k} d_t at checkpoints t_k = 1 s, 2 s, ... (only up
-    to the deadline: the episode ends at ``goal_step``). The pace needed to arrive on time covers
-    d_0 t_k / (time left) by t_k, so
-        g_k = 1 if D_k <= reach_m else clip((d_0 - D_k) / (d_0 t_k / time left), 0, 1),   G = mean_k g_k.
-    Averaging over checkpoints rewards being on pace *now*: a plan that only speeds up late scores
-    lower, which matters because only its first second is executed before the next replan. Going
-    faster than needed earns nothing; when the deadline is inside the horizon the plan must get
-    within ``reach_m`` (lateral offset included) for the last checkpoints to score 1.
-    """
-    xy = np.asarray(ctx.trajectories[..., :2], dtype=np.float64)
-    d = np.linalg.norm(xy - np.asarray(ctx.goal_xy, np.float64)[None, None], axis=-1)  # [P, T]
-    steps_left = max(int(goal_step) - int(ctx.timestep), 1)
-    n = min(xy.shape[1] - 1, steps_left)
-    per = max(1, int(round(1.0 / dt)))
-    ks = list(range(per, n + 1, per)) or [n]
-    if ks[-1] != n:
-        ks.append(n)
-    d_cummin = np.minimum.accumulate(d, axis=1)
-    g = []
-    for k in ks:
-        need = d[:, 0] * k / steps_left
-        gk = np.clip((d[:, 0] - d_cummin[:, k]) / np.maximum(need, 1e-3), 0.0, 1.0)
-        g.append(np.where(d_cummin[:, k] <= reach_m, 1.0, gk))
-    return np.mean(g, axis=0).astype(np.float32)
-
-
-def kinematic_feasibility(
-    traj_pt5: np.ndarray, *, dt: float = 0.1, max_accel: float = 8.0, max_lat_accel: float = 8.0,
-    a0: float | None = None, max_accel_step: float = 2.0, window_s: float = 0.3,
-) -> np.ndarray:
-    """[P] 1 if the world-frame plan (index 0 = current state) never exceeds ``max_accel`` longitudinally
-    or ``max_lat_accel`` laterally (speed * yaw rate), else 0. Catches plans that start at a speed the
-    ego is not at (a velocity jump between index 0 and 1). With ``a0`` (current acceleration), the
-    plan's mean acceleration over the first ``window_s`` must also be within ``max_accel_step`` of it,
-    so consecutive plans join without an acceleration step (jerk spike) at the replan."""
-    speed = np.hypot(traj_pt5[..., 3], traj_pt5[..., 4])
-    lon = np.abs(np.diff(speed, axis=1)) / dt
-    yaw_rate = np.abs(np.angle(np.exp(1j * np.diff(traj_pt5[..., 2], axis=1)))) / dt
-    lat = 0.5 * (speed[:, 1:] + speed[:, :-1]) * yaw_rate
-    ok = (lon.max(axis=1) <= max_accel) & (lat.max(axis=1) <= max_lat_accel)
-    if a0 is not None:
-        k = max(1, int(round(window_s / dt)))
-        a_start = (speed[:, k] - speed[:, 0]) / (k * dt)
-        ok &= np.abs(a_start - a0) <= max_accel_step
-    return ok.astype(np.float32)
+    """``scores.violation_ranking.goal_progress`` for the context's plans and goal."""
+    return vr.goal_progress(np.asarray(ctx.trajectories), ctx.goal_xy, ctx.timestep, goal_step=goal_step, dt=dt,
+                            reach_m=reach_m)
 
 
 class MarginTiebreakReward:
@@ -544,7 +502,7 @@ class LexicographicReward:
         # reach_m below the 2 m success radius: aim at the goal, not its edge.
         prog = goal_progress(ctx, goal_step=self.goal_step, reach_m=self.reach_m)
         levels = int(round(1.0 / self.bucket))
-        a0 = None if self.max_accel_step is None else _ego_kinematics(ctx.sim_state, ctx.timestep, ctx.world_idx)[1]
+        a0 = None if self.max_accel_step is None else vr.ego_kinematics(ctx.sim_state, ctx.timestep, ctx.world_idx)[1]
         feasible = kinematic_feasibility(np.asarray(ctx.trajectories), max_accel=self.max_accel,
                                          max_lat_accel=self.max_accel, a0=a0, max_accel_step=self.max_accel_step or 0.0)
         level = np.clip(np.floor(coll * (margin > 0) * feasible * levels + 1e-6), 0, levels)
@@ -567,164 +525,30 @@ def lexicographic_reward(bucket: float = 0.05, jerk_eps: float = 0.05, **kw) -> 
     return LexicographicReward(bucket=bucket, jerk_eps=jerk_eps, **kw)
 
 
-def wm_mode_hits(ctx: RewardContext) -> tuple[np.ndarray, np.ndarray] | None:
-    """Ego-box overlap with every WM mode: hits [P, N, K, T] (bool) and mode probabilities [N, K]
-    (normalized per agent), or None when the forecaster has no modes."""
-    from scores.polygon import pairwise_intersections, polygon_corners
-
-    wm = ctx.world_model_forecaster
-    if wm is None or not hasattr(wm, "forecast_modes"):
-        return None
-    ego = jnp.asarray(ctx.ego_boxes, dtype=jnp.float32)  # [P, T, 5]
-    p, t = int(ego.shape[0]), int(ego.shape[1])
-    fc = wm.forecast_modes(ctx.sim_state, timestep=int(ctx.timestep), traj_length=t, world_idx=ctx.world_idx)
-    traj_k = jnp.asarray(fc["traj_k"], dtype=jnp.float32)  # [N, K, T, 5]
-    probs = np.asarray(fc["mode_probs"], dtype=np.float32)  # [N, K]
-    masks = np.asarray(fc["masks"]).astype(bool)  # [N, T]
-    n, k = int(traj_k.shape[0]), int(traj_k.shape[1])
-    hits = jax.vmap(pairwise_intersections, in_axes=(1, 1), out_axes=0)(
-        polygon_corners(ego), polygon_corners(traj_k.reshape((n * k, t, 5)))
-    )  # [T, P, N*K]
-    hits = np.asarray(hits).reshape(t, p, n, k) & masks.T[:, None, :, None]
-    probs = probs / np.clip(probs.sum(-1, keepdims=True), 1e-8, None)
-    return np.moveaxis(hits, 0, -1), probs
-
-
-def lane_keeping_cost(ctx: RewardContext, heading_w: float = 1.0, max_heading_rad: float = np.pi / 3,
-                      max_lat_m: float = 5.0, stride: int = 5) -> np.ndarray:
-    """[P] mean over time of |lateral offset| (m) to the nearest direction-consistent lane centreline
-    point + ``heading_w`` * |heading error| (rad). Offsets are capped at ``max_lat_m``."""
-    lanes = getattr(ctx.scorer, "lane_points", None)
-    traj = np.asarray(ctx.trajectories, dtype=np.float32)[:, ::stride]  # [P, T', 5]
-    if lanes is None or int(np.shape(lanes)[0]) == 0:
-        return np.zeros((traj.shape[0],), dtype=np.float32)
-    lanes = np.asarray(lanes, dtype=np.float32)
-    lxy, ldir = lanes[:, :2], lanes[:, 2:4] / np.maximum(np.linalg.norm(lanes[:, 2:4], axis=-1, keepdims=True), 1e-6)
-    lyaw = np.arctan2(ldir[:, 1], ldir[:, 0])
-    d = traj[:, :, None, :2] - lxy[None, None]  # [P, T', L, 2]
-    herr = np.abs(np.angle(np.exp(1j * (traj[:, :, None, 2] - lyaw[None, None]))))
-    dist2 = np.where(herr <= max_heading_rad, (d**2).sum(-1), np.inf)
-    j = dist2.argmin(-1)  # [P, T']
-    dj = np.take_along_axis(d, j[..., None, None], axis=2)[:, :, 0]
-    lat = np.abs(dj[..., 0] * ldir[j][..., 1] - dj[..., 1] * ldir[j][..., 0])
-    lat = np.where(np.isfinite(np.take_along_axis(dist2, j[..., None], axis=2)[..., 0]), lat, max_lat_m)
-    he = np.take_along_axis(herr, j[..., None], axis=2)[..., 0]
-    return (np.minimum(lat, max_lat_m) + heading_w * he).mean(-1).astype(np.float32)
-
-
 class ViolationReward:
-    """Rulebook-style ranking (Censi et al. 2019) with slack (Wray et al. 2015) on collision probability.
+    """``scores.violation_ranking``: rulebook violations (collision > off-road > goal > tiebreaks) with slack
+    on collision probability. Scores are set-relative, so the ES pool is re-ranked after each merge (``rank``)."""
 
-    Each rule is a violation >= 0 that is 0 when the rule holds, so plans satisfying a rule tie on it
-    and only magnitudes of real violations are compared. Rules are checked over the executed window
-    plus a lookahead (``near_s``) first, then over the whole horizon. Keys, in order (lower is better):
-      feasibility    1 - kinematically feasible
-      collision      P(overlap) within near_s, P(overlap) over the horizon     (slack ``collision_slack``)
-                     -expected first-contact time                             (later contact first)
-      off-road       depth past the road edge within near_s, over the horizon, -first off-road time
-      goal           1 - goal_progress (0 = on pace to reach the goal by the deadline)
-      tiebreak       -min(edge clearance, OFFROAD_MARGIN_M), lane-keeping cost, jerk
-    The pool is filtered key by key: survivors are within the key's slack (1e-6 if none) of the best
-    survivor. Score = (d + 0.99 r) / n_keys, d = keys passed, r = rank within the group by the key that
-    failed, so top-k elites are the deepest survivors, then the nearest misses. The score is relative
-    to the scored set, so the ES pool is re-ranked as a whole (``rank``) after each merge.
-    """
-
-    KEYS = ("v_infeasible", "v_coll_near", "v_coll_all", "v_coll_time", "v_off_near", "v_off_all",
-            "v_off_time", "v_goal", "v_clearance", "v_lane", "v_jerk")
-
-    def __init__(self, collision_slack: float = 0.02, near_s: float = 3.0, dt: float = 0.1, goal_step: int = 90,
-                 max_accel: float = 8.0, max_accel_step: float | None = 2.0, reach_m: float = 1.0) -> None:
-        self.collision_slack, self.near_s, self.dt = float(collision_slack), float(near_s), float(dt)
-        self.goal_step, self.max_accel, self.max_accel_step, self.reach_m = int(goal_step), float(max_accel), max_accel_step, float(reach_m)
+    def __init__(self, collision_slack: float = 0.02, **violation_kw) -> None:
+        self.collision_slack = float(collision_slack)
+        self.violation_kw = violation_kw
 
     def __call__(self, ctx: RewardContext) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-        from scores.scorer_lane_graph import OFFROAD_MARGIN_M
-
-        traj = np.asarray(ctx.trajectories)
-        p, t = traj.shape[0], traj.shape[1]
-        near = min(int(round(self.near_s / self.dt)) + 1, t)
-
-        res = wm_mode_hits(ctx)
-        if res is None:  # deterministic forecast: binary production collision term
-            no_coll = np.asarray(collision(ctx), np.float32)
-            p_near = p_all = 1.0 - no_coll
-            t_hit = np.full((p,), float(t))
-        else:
-            hits, probs = res  # [P, N, K, T], [N, K]
-
-            def p_overlap(h):  # h [P, N, K] -> P(any agent overlaps), modes independent across agents
-                return 1.0 - np.prod(1.0 - np.clip((probs[None] * h).sum(-1), 0.0, 1.0), axis=-1)
-
-            p_near, p_all = p_overlap(hits[..., :near].any(-1)), p_overlap(hits.any(-1))
-            hit_any = hits.any(-1)  # [P, N, K]
-            first = np.where(hit_any, hits.argmax(-1), t).astype(np.float32)
-            w = probs[None] * hit_any
-            per_agent = np.where(w.sum(-1) > 0, (w * first).sum(-1) / np.clip(w.sum(-1), 1e-8, None), t)
-            t_hit = per_agent.min(-1)  # earliest agent's expected first contact
-
-        dist = ctx.scorer._offroad_corner_distances(ctx.ego_boxes, ctx.sim_state, ctx.timestep, ctx.world_idx)
-        if dist is None:
-            off = 1.0 - np.asarray(ctx.scorer.compute_offroad_score(ctx.ego_boxes), np.float32)
-            worst_t = np.repeat(off[:, None], t, axis=1) - 0.5  # > 0 = off-road
-        else:
-            worst_t = np.asarray(dist, np.float32).max(-1)  # [P, T], > 0 = past the road edge
-        is_off = worst_t > 0
-        t_off = np.where(is_off.any(-1), is_off.argmax(-1), t).astype(np.float32)
-
-        a0 = None if self.max_accel_step is None else _ego_kinematics(ctx.sim_state, ctx.timestep, ctx.world_idx)[1]
-        feasible = kinematic_feasibility(traj, max_accel=self.max_accel, max_lat_accel=self.max_accel, a0=a0,
-                                         max_accel_step=self.max_accel_step or 0.0)
-        prog = goal_progress(ctx, goal_step=self.goal_step, reach_m=self.reach_m)
-        margin_m = -worst_t.max(-1)
-        b = {
-            "v_infeasible": 1.0 - feasible,
-            "v_coll_near": p_near, "v_coll_all": p_all, "v_coll_time": -t_hit,
-            "v_off_near": np.clip(worst_t[:, :near].max(-1), 0.0, None),
-            "v_off_all": np.clip(worst_t.max(-1), 0.0, None), "v_off_time": -t_off,
-            "v_goal": 1.0 - prog,
-            "v_clearance": -np.minimum(margin_m, OFFROAD_MARGIN_M),
-            "v_lane": lane_keeping_cost(ctx),
-            "v_jerk": plan_jerk(traj),
-        }
-        b = {k: np.asarray(v, np.float32) for k, v in b.items()}
-        # Same names as the other rewards, for the eval tables.
-        b.update(collision=1.0 - b["v_coll_all"], offroad=(b["v_off_all"] == 0).astype(np.float32),
-                 progress=prog.astype(np.float32), feasible=feasible.astype(np.float32))
+        b = vr.compute_violations(ctx.scorer, np.asarray(ctx.trajectories), ctx.sim_state, ctx.timestep, ctx.goal_xy,
+                                  ctx.world_idx, **self.violation_kw)
         return self.rank(b), b
 
     def rank(self, b: dict[str, np.ndarray]) -> np.ndarray:
-        keys = [b[k] for k in self.KEYS]
-        slack = {"v_coll_near": self.collision_slack, "v_coll_all": self.collision_slack}
-        n = len(keys[0])
-        alive = np.ones(n, dtype=bool)
-        depth = np.zeros(n, dtype=np.int32)
-        for name, v in zip(self.KEYS[:-1], keys[:-1]):
-            keep = alive & (v <= v[alive].min() + max(slack.get(name, 0.0), 1e-6))
-            depth[keep] += 1
-            alive = keep
-        within = np.zeros(n, dtype=np.float32)
-        for d in np.unique(depth):
-            g = np.flatnonzero(depth == d)
-            r = np.argsort(np.argsort(-keys[d][g], kind="stable"), kind="stable")  # lower violation -> higher
-            within[g] = r / max(len(g) - 1, 1)
-        b["rule_depth"] = depth.astype(np.float32)
-        return ((depth + 0.99 * within) / len(keys)).astype(np.float32)
+        scores, depth = vr.rank_violations(b, self.collision_slack)
+        b["rule_depth"] = depth
+        return scores
 
     def __repr__(self) -> str:
-        return f"ViolationReward(collision_slack={self.collision_slack:g}, near_s={self.near_s:g})"
+        return f"ViolationReward(collision_slack={self.collision_slack:g})"
 
 
 def violation_reward(**kw) -> ViolationReward:
     return ViolationReward(**kw)
-
-
-def plan_jerk(traj_pt5: np.ndarray, dt: float = 0.1) -> np.ndarray:
-    """[P] mean squared jerk (longitudinal + lateral, m^2/s^6) of world-frame plans [P, T, 5]."""
-    vel = traj_pt5[..., 3:5]
-    acc = np.gradient(vel, dt, axis=1)
-    jerk = np.gradient(acc, dt, axis=1)
-    return (jerk**2).sum(-1).mean(-1)
 
 
 # ---------------------------------------------------------------------------
@@ -875,21 +699,6 @@ def _bernstein(n: int, u: np.ndarray) -> np.ndarray:
 
     j = np.arange(n + 1)
     return np.asarray([comb(n, k) for k in j], np.float64)[None] * u[:, None] ** j * (1.0 - u[:, None]) ** (n - j)
-
-
-def _ego_kinematics(sim_state, timestep: int, world_idx: int = 0, lookback: int = 5) -> tuple[float, float, float]:
-    """(speed, acceleration, curvature) of the ego at ``timestep``, from the last ``lookback`` steps (0.1 s each)."""
-    ego = scorer_helpers.get_ego_idx(sim_state, world_idx)
-    tr = sim_state.sim_trajectory
-    t1 = int(timestep)
-    t0 = max(t1 - lookback, 0)
-    speed = np.hypot(np.asarray(tr.vel_x[world_idx, ego, t0 : t1 + 1]), np.asarray(tr.vel_y[world_idx, ego, t0 : t1 + 1]))
-    if t1 == t0:
-        return float(speed[-1]), 0.0, 0.0
-    accel = float(speed[-1] - speed[0]) / (0.1 * (t1 - t0))
-    dyaw = float(np.angle(np.exp(1j * (float(tr.yaw[world_idx, ego, t1]) - float(tr.yaw[world_idx, ego, t0])))))
-    dist = float(speed.mean()) * 0.1 * (t1 - t0)
-    return float(speed[-1]), accel, dyaw / dist if dist > 0.5 else 0.0
 
 
 class KinematicPlanSpace:
@@ -1078,7 +887,7 @@ def mcmc_pool(
         t_model = np.asarray(pre_batch.aux["model_t_seconds"][0], np.float64)
         t_model = t_model[1:] if t_model.shape[0] == horizon + 1 else t_model[:horizon]
         v0 = float(np.hypot(*np.asarray(pre_batch.aux["anchor_world_state"][0, 2:4])))
-        _, a0, kappa0 = _ego_kinematics(sim_state, timestep)
+        _, a0, kappa0 = vr.ego_kinematics(sim_state, timestep)
         space = KinematicPlanSpace(
             dataclasses.replace(prior, v_max=min(prior.v_max, planner.preprocess_cfg.max_velocity)),
             v0=v0, a0=a0, kappa0=kappa0, horizon_s=float(t_model[-1]), t_model=t_model,
