@@ -438,15 +438,25 @@ def goal_progress(ctx: RewardContext, goal_step: int = 90, dt: float = 0.1, reac
     return np.where(d_min <= reach_m, 1.0, g).astype(np.float32)
 
 
-def kinematic_feasibility(traj_pt5: np.ndarray, *, dt: float = 0.1, max_accel: float = 8.0, max_lat_accel: float = 8.0) -> np.ndarray:
+def kinematic_feasibility(
+    traj_pt5: np.ndarray, *, dt: float = 0.1, max_accel: float = 8.0, max_lat_accel: float = 8.0,
+    a0: float | None = None, max_accel_step: float = 2.0, window_s: float = 0.3,
+) -> np.ndarray:
     """[P] 1 if the world-frame plan (index 0 = current state) never exceeds ``max_accel`` longitudinally
     or ``max_lat_accel`` laterally (speed * yaw rate), else 0. Catches plans that start at a speed the
-    ego is not at (a velocity jump between index 0 and 1)."""
+    ego is not at (a velocity jump between index 0 and 1). With ``a0`` (current acceleration), the
+    plan's mean acceleration over the first ``window_s`` must also be within ``max_accel_step`` of it,
+    so consecutive plans join without an acceleration step (jerk spike) at the replan."""
     speed = np.hypot(traj_pt5[..., 3], traj_pt5[..., 4])
     lon = np.abs(np.diff(speed, axis=1)) / dt
     yaw_rate = np.abs(np.angle(np.exp(1j * np.diff(traj_pt5[..., 2], axis=1)))) / dt
     lat = 0.5 * (speed[:, 1:] + speed[:, :-1]) * yaw_rate
-    return ((lon.max(axis=1) <= max_accel) & (lat.max(axis=1) <= max_lat_accel)).astype(np.float32)
+    ok = (lon.max(axis=1) <= max_accel) & (lat.max(axis=1) <= max_lat_accel)
+    if a0 is not None:
+        k = max(1, int(round(window_s / dt)))
+        a_start = (speed[:, k] - speed[:, 0]) / (k * dt)
+        ok &= np.abs(a_start - a0) <= max_accel_step
+    return ok.astype(np.float32)
 
 
 class MarginTiebreakReward:
@@ -510,9 +520,9 @@ class LexicographicReward:
     """
 
     def __init__(self, bucket: float = 0.05, jerk_eps: float = 0.05, jerk_ref: float = 2.0, goal_step: int = 90,
-                 max_accel: float = 8.0) -> None:
+                 max_accel: float = 8.0, max_accel_step: float | None = 2.0, reach_m: float = 1.0) -> None:
         self.bucket, self.jerk_eps, self.jerk_ref, self.goal_step = float(bucket), float(jerk_eps), float(jerk_ref), int(goal_step)
-        self.max_accel = float(max_accel)
+        self.max_accel, self.max_accel_step, self.reach_m = float(max_accel), max_accel_step, float(reach_m)
 
     def __call__(self, ctx: RewardContext) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         coll = np.asarray(collision(ctx), dtype=np.float32)
@@ -521,9 +531,12 @@ class LexicographicReward:
         )
         margin, tiebreak = np.asarray(margin, np.float32), np.asarray(tiebreak, np.float32)
         ctb = collision_time_tiebreak(ctx)
-        prog = goal_progress(ctx, goal_step=self.goal_step)
+        # reach_m below the 2 m success radius: aim at the goal, not its edge.
+        prog = goal_progress(ctx, goal_step=self.goal_step, reach_m=self.reach_m)
         levels = int(round(1.0 / self.bucket))
-        feasible = kinematic_feasibility(np.asarray(ctx.trajectories), max_accel=self.max_accel, max_lat_accel=self.max_accel)
+        a0 = None if self.max_accel_step is None else _ego_kinematics(ctx.sim_state, ctx.timestep, ctx.world_idx)[1]
+        feasible = kinematic_feasibility(np.asarray(ctx.trajectories), max_accel=self.max_accel,
+                                         max_lat_accel=self.max_accel, a0=a0, max_accel_step=self.max_accel_step or 0.0)
         level = np.clip(np.floor(coll * (margin > 0) * feasible * levels + 1e-6), 0, levels)
         within = np.where(level == 0, (coll + ctb + tiebreak + feasible) / 4.0, prog)
         breakdown = {"collision": coll, "offroad": margin, "offroad_tiebreak": tiebreak,
@@ -540,8 +553,8 @@ class LexicographicReward:
         return f"LexicographicReward(bucket={self.bucket:g}, jerk_eps={self.jerk_eps:g})"
 
 
-def lexicographic_reward(bucket: float = 0.05, jerk_eps: float = 0.05) -> LexicographicReward:
-    return LexicographicReward(bucket=bucket, jerk_eps=jerk_eps)
+def lexicographic_reward(bucket: float = 0.05, jerk_eps: float = 0.05, **kw) -> LexicographicReward:
+    return LexicographicReward(bucket=bucket, jerk_eps=jerk_eps, **kw)
 
 
 def plan_jerk(traj_pt5: np.ndarray, dt: float = 0.1) -> np.ndarray:
