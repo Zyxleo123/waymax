@@ -419,6 +419,22 @@ def collision_time_tiebreak(ctx: RewardContext) -> np.ndarray:
     return (expected_first.min(-1) / t).astype(np.float32)
 
 
+def goal_progress(ctx: RewardContext, goal_step: int = 90, dt: float = 0.1, reach_m: float = 2.0) -> np.ndarray:
+    """Progress toward the episode goal relative to the pace needed to reach it in time.
+
+    G = clip((d_0 - min_t d_t) / (v_req H), 0, 1), v_req = d_0 / max(time left until ``goal_step``, H),
+    d_t = plan-to-goal distance, H = plan horizon. 1 = keeps (at least) the pace to reach the goal by
+    ``goal_step`` or gets within ``reach_m``; going faster than needed earns nothing.
+    """
+    xy = np.asarray(ctx.trajectories[..., :2], dtype=np.float64)
+    d = np.linalg.norm(xy - np.asarray(ctx.goal_xy, np.float64)[None, None], axis=-1)  # [P, T]
+    horizon = (xy.shape[1] - 1) * dt
+    t_left = max((goal_step - ctx.timestep) * dt, horizon)
+    need = d[:, 0] * horizon / t_left
+    g = np.clip((d[:, 0] - d.min(axis=1)) / np.maximum(need, 1e-3), 0.0, 1.0)
+    return np.where(d.min(axis=1) <= reach_m, 1.0, g).astype(np.float32)
+
+
 class MarginTiebreakReward:
     """``--offroad_mode margin_tiebreak``: collision * edge-margin + 1e-3 * offroad tiebreak.
 
@@ -428,10 +444,15 @@ class MarginTiebreakReward:
     ``collision_eps > 0`` adds ``collision_eps * collision_time_tiebreak`` (not in
     production): among plans that all collide, the one that hits later ranks higher, so ES
     still has a direction when no candidate is collision-free.
+
+    ``progress_weight = w > 0`` (not in production) multiplies the safety part by
+    ``(1 - w) + w * goal_progress``: among safe plans the one keeping pace to the goal wins, while
+    any collision-free plan (>= 0.5 (1 - w)) still beats a colliding one.
     """
 
-    def __init__(self, collision_eps: float = 0.0) -> None:
+    def __init__(self, collision_eps: float = 0.0, progress_weight: float = 0.0) -> None:
         self.collision_eps = float(collision_eps)
+        self.progress_weight = float(progress_weight)
 
     def __call__(self, ctx: RewardContext) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         from scores.scorer_lane_graph import OFFROAD_TIEBREAK_EPS
@@ -442,8 +463,13 @@ class MarginTiebreakReward:
         )
         margin = np.asarray(margin, dtype=np.float32)
         tiebreak = np.asarray(tiebreak, dtype=np.float32)
-        score = coll * margin + OFFROAD_TIEBREAK_EPS * tiebreak
+        safety = coll * margin
         breakdown = {"collision": coll, "offroad": margin, "offroad_tiebreak": tiebreak}
+        if self.progress_weight > 0:
+            prog = goal_progress(ctx)
+            safety = safety * ((1.0 - self.progress_weight) + self.progress_weight * prog)
+            breakdown["progress"] = prog
+        score = safety + OFFROAD_TIEBREAK_EPS * tiebreak
         if self.collision_eps > 0:
             ctb = collision_time_tiebreak(ctx)
             score = score + self.collision_eps * ctb
@@ -451,11 +477,11 @@ class MarginTiebreakReward:
         return score.astype(np.float32), breakdown
 
     def __repr__(self) -> str:
-        return f"MarginTiebreakReward(collision_eps={self.collision_eps:g})"
+        return f"MarginTiebreakReward(collision_eps={self.collision_eps:g}, progress_weight={self.progress_weight:g})"
 
 
-def margin_tiebreak_reward(collision_eps: float = 0.0) -> MarginTiebreakReward:
-    return MarginTiebreakReward(collision_eps=collision_eps)
+def margin_tiebreak_reward(collision_eps: float = 0.0, progress_weight: float = 0.0) -> MarginTiebreakReward:
+    return MarginTiebreakReward(collision_eps=collision_eps, progress_weight=progress_weight)
 
 
 # ---------------------------------------------------------------------------
@@ -559,16 +585,19 @@ def denoise_proposals(
 
 @dataclasses.dataclass(frozen=True)
 class KinematicPrior:
-    """Prior over Bernstein control points of speed v(t) and curvature kappa(t).
+    """Prior over Bernstein control points of speed v(t) (degree n_v) and curvature kappa(t) (degree n_k).
 
-    v(t) = sum_j w_j b_{j,n}(t/H), w_0 = v0, w_j ~ N(v0, (accel_sigma * t_j)^2)
-    k(t) = sum_j c_j b_{j,n}(t/H), c_0 = k0, c_j ~ N(k0, (lat_accel_sigma / max(v0, v_floor)^2)^2)
+    v(t) = sum_j w_j b_{j,n_v}(t/H): w_0 = v0, w_1 = v0 + a0 H / n_v (pinned, so speed AND acceleration
+         continue the current motion), free w_j ~ N(v0, (accel_sigma * t_j)^2)
+    k(t) = sum_j c_j b_{j,n_k}(t/H): c_0 = k0, free c_j ~ N(k0, (lat_accel_sigma / max(v0, v_floor)^2)^2)
     Feasible set (convex-hull property makes the first three exact for all t):
-      0 <= w_j <= v_max,  accel_min <= n (w_{j+1} - w_j) / H <= accel_max,  |c_j| <= kappa_max,
+      0 <= w_j <= v_max,  accel_min <= n_v (w_{j+1} - w_j) / H <= accel_max,  |c_j| <= kappa_max,
       |k(t)| v(t)^2 <= lat_accel_max on a dense grid.
     """
 
-    degree: int = 3
+    speed_degree: int = 4
+    curvature_degree: int = 3
+    pin_accel: bool = True  # w_1 from the current acceleration (C1 speed across replans)
     accel_sigma: float = 1.5  # m/s^2: speed std grows as accel_sigma * t
     accel_min: float = -6.0  # m/s^2: hard braking
     accel_max: float = 3.0  # m/s^2
@@ -581,12 +610,17 @@ class KinematicPrior:
 
 @dataclasses.dataclass(frozen=True)
 class CostWeights:
-    """E(tau) = collision * (1 - C) + contact_time * (1 - T_hit) + offroad * (1 - M) + offroad_depth * (1 - R)."""
+    """E = collision (1 - C) + contact_time (1 - T_hit) + offroad (1 - M) + offroad_depth (1 - R)
+         + progress (1 - G) + comfort * mean((j_lon^2 + j_lat^2) / jerk_ref^2)."""
 
     collision: float = 4.0
     contact_time: float = 2.0
     offroad: float = 4.0
     offroad_depth: float = 2.0
+    progress: float = 2.0
+    comfort: float = 0.5
+    jerk_ref: float = 2.0  # m/s^3
+    goal_step: int = 90  # the episode goal is the logged position at this step
 
 
 def _bernstein(n: int, u: np.ndarray) -> np.ndarray:
@@ -597,67 +631,86 @@ def _bernstein(n: int, u: np.ndarray) -> np.ndarray:
     return np.asarray([comb(n, k) for k in j], np.float64)[None] * u[:, None] ** j * (1.0 - u[:, None]) ** (n - j)
 
 
-def _ego_kinematics(sim_state, timestep: int, world_idx: int = 0, lookback: int = 5) -> tuple[float, float]:
-    """(speed, curvature) of the ego at ``timestep``; curvature from the yaw change over ``lookback`` steps."""
+def _ego_kinematics(sim_state, timestep: int, world_idx: int = 0, lookback: int = 5) -> tuple[float, float, float]:
+    """(speed, acceleration, curvature) of the ego at ``timestep``, from the last ``lookback`` steps (0.1 s each)."""
     ego = scorer_helpers.get_ego_idx(sim_state, world_idx)
     tr = sim_state.sim_trajectory
     t1 = int(timestep)
     t0 = max(t1 - lookback, 0)
     speed = np.hypot(np.asarray(tr.vel_x[world_idx, ego, t0 : t1 + 1]), np.asarray(tr.vel_y[world_idx, ego, t0 : t1 + 1]))
     if t1 == t0:
-        return float(speed[-1]), 0.0
+        return float(speed[-1]), 0.0, 0.0
+    accel = float(speed[-1] - speed[0]) / (0.1 * (t1 - t0))
     dyaw = float(np.angle(np.exp(1j * (float(tr.yaw[world_idx, ego, t1]) - float(tr.yaw[world_idx, ego, t0])))))
     dist = float(speed.mean()) * 0.1 * (t1 - t0)
-    return float(speed[-1]), dyaw / dist if dist > 0.5 else 0.0
+    return float(speed[-1]), accel, dyaw / dist if dist > 0.5 else 0.0
 
 
 class KinematicPlanSpace:
-    """theta = (w_1..w_n, c_1..c_n) <-> smooth ego-frame plans; whitened coords z ~ N(0, I) under the prior."""
+    """theta = (free speed knots, free curvature knots) <-> smooth ego-frame plans; whitened z ~ N(0, I) under the prior."""
 
-    def __init__(self, prior: KinematicPrior, *, v0: float, kappa0: float, horizon_s: float, t_model: np.ndarray):
-        self.prior, self.n, self.horizon_s = prior, prior.degree, float(horizon_s)
+    def __init__(self, prior: KinematicPrior, *, v0: float, a0: float, kappa0: float, horizon_s: float, t_model: np.ndarray):
+        self.prior, self.horizon_s = prior, float(horizon_s)
+        self.nv, self.nk = prior.speed_degree, prior.curvature_degree
         self.v0 = float(np.clip(v0, 0.0, prior.v_max))
-        # Start curvature must itself be feasible at the current speed.
+        # Pinned start values must themselves be feasible.
+        a_lo = max(prior.accel_min, -self.v0 * self.nv / self.horizon_s)
+        self.a0 = float(np.clip(a0, a_lo, prior.accel_max)) if prior.pin_accel else 0.0
         k_lat = prior.lat_accel_max / max(self.v0, 1e-3) ** 2
         self.kappa0 = float(np.clip(kappa0, -min(prior.kappa_max, k_lat), min(prior.kappa_max, k_lat)))
-        t_ctrl = np.arange(1, self.n + 1) * self.horizon_s / self.n
-        self.mu = np.concatenate([np.full(self.n, self.v0), np.full(self.n, self.kappa0)])
+        self.w_fixed = [self.v0] + ([self.v0 + self.a0 * self.horizon_s / self.nv] if prior.pin_accel else [])
+        j_free = np.arange(len(self.w_fixed), self.nv + 1)
+        self.n_w = len(j_free)
+        self.mu = np.concatenate([np.full(self.n_w, self.v0), np.full(self.nk, self.kappa0)])
         self.sigma = np.concatenate([
-            prior.accel_sigma * t_ctrl,
-            np.full(self.n, prior.lat_accel_sigma / max(self.v0, prior.v_floor) ** 2),
+            prior.accel_sigma * j_free * self.horizon_s / self.nv,
+            np.full(self.nk, prior.lat_accel_sigma / max(self.v0, prior.v_floor) ** 2),
         ])
+        self.dim = self.n_w + self.nk
         # Fine grid for integration (0.05 s), sampled at the model timestamps.
         self.t_fine = np.linspace(0.0, self.horizon_s, int(round(self.horizon_s / 0.05)) + 1)
-        self.basis = _bernstein(self.n, self.t_fine / self.horizon_s)  # [F, n+1]
+        self.basis_v = _bernstein(self.nv, self.t_fine / self.horizon_s)  # [F, nv+1]
+        self.basis_k = _bernstein(self.nk, self.t_fine / self.horizon_s)  # [F, nk+1]
         self.t_model = np.asarray(t_model, np.float64)
 
     def theta(self, z: np.ndarray) -> np.ndarray:
         return self.mu + self.sigma * z
 
     def controls(self, z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Control points [P, n+1] for speed and curvature (index 0 pinned to the current state)."""
+        """Control points: speed [P, nv+1], curvature [P, nk+1] (leading ones pinned to the current state)."""
         th = self.theta(z)
         p = th.shape[0]
-        w = np.concatenate([np.full((p, 1), self.v0), th[:, : self.n]], axis=1)
-        c = np.concatenate([np.full((p, 1), self.kappa0), th[:, self.n :]], axis=1)
+        w = np.concatenate([np.tile(self.w_fixed, (p, 1)), th[:, : self.n_w]], axis=1)
+        c = np.concatenate([np.full((p, 1), self.kappa0), th[:, self.n_w :]], axis=1)
         return w, c
+
+    def profiles(self, z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        w, c = self.controls(z)
+        return w @ self.basis_v.T, c @ self.basis_k.T  # [P, F] speed, curvature
 
     def feasible(self, z: np.ndarray) -> np.ndarray:
         pr = self.prior
         w, c = self.controls(z)
-        accel = self.n * np.diff(w, axis=1) / self.horizon_s
-        v, kappa = w @ self.basis.T, c @ self.basis.T
+        accel = self.nv * np.diff(w, axis=1) / self.horizon_s
+        v, kappa = self.profiles(z)
         return (
-            (w >= 0.0).all(1) & (w <= pr.v_max).all(1)
-            & (accel >= pr.accel_min).all(1) & (accel <= pr.accel_max).all(1)
+            (w >= -1e-9).all(1) & (w <= pr.v_max).all(1)
+            & (accel >= pr.accel_min - 1e-6).all(1) & (accel <= pr.accel_max + 1e-6).all(1)
             & (np.abs(c) <= pr.kappa_max).all(1)
             & (np.abs(kappa) * v**2 <= pr.lat_accel_max + 1e-6).all(1)
         )
 
+    def jerk_cost(self, z: np.ndarray, jerk_ref: float) -> np.ndarray:
+        """mean over the horizon of (j_lon^2 + j_lat^2) / jerk_ref^2; j_lon = v'', j_lat = d(kappa v^2)/dt."""
+        v, kappa = self.profiles(z)
+        dt = self.t_fine[1] - self.t_fine[0]
+        j_lon = np.gradient(np.gradient(v, dt, axis=1), dt, axis=1)
+        j_lat = np.gradient(kappa * v**2, dt, axis=1)
+        return ((j_lon**2 + j_lat**2) / jerk_ref**2).mean(axis=1)
+
     def rollout(self, z: np.ndarray) -> dict[str, np.ndarray]:
         """Integrate psi' = kappa v, x' = v cos psi, y' = v sin psi (trapezoid) -> ego-frame states at t_model."""
-        w, c = self.controls(z)
-        v, kappa = w @ self.basis.T, c @ self.basis.T  # [P, F]
+        v, kappa = self.profiles(z)  # [P, F]
         dt = np.diff(self.t_fine)[None]
 
         def cumtrapz(f):
@@ -665,7 +718,7 @@ class KinematicPlanSpace:
 
         psi = cumtrapz(kappa * v)
         x, y = cumtrapz(v * np.cos(psi)), cumtrapz(v * np.sin(psi))
-        at = lambda f: np.stack([np.interp(self.t_model, self.t_fine, row) for row in f])
+        at = lambda f: np.stack([np.interp(self.t_model, self.t_fine, row) for row in f])  # noqa: E731
         x_m, y_m, psi_m, v_m = at(x), at(y), at(psi), at(v)
         return {"x": x_m, "y": y_m, "psi": psi_m, "v": v_m, "kappa": at(kappa),
                 "vx": v_m * np.cos(psi_m), "vy": v_m * np.sin(psi_m)}
@@ -678,19 +731,22 @@ class KinematicPlanSpace:
         return jnp.asarray(np.concatenate([core, extra_ptd], axis=-1), dtype=jnp.float32)[None]
 
 
-def plan_energy(planner, norm_bktd, *, pre_batch, sim_state, timestep: int, weights: CostWeights):
-    """E [P] and its parts for normalized plans, scored with the planner's WM / lane graph (same as ES)."""
+def plan_energy(planner, norm_bktd, *, pre_batch, sim_state, timestep: int, goal_xy, weights: CostWeights):
+    """Scene part of E [P] and its terms for normalized plans, scored with the planner's WM / lane graph (as ES)."""
     world = np.asarray(planner._postprocess_population(norm_bktd, pre_batch)[0][0])
-    ctx = build_reward_context(world, sim_state=sim_state, timestep=timestep, scorer=planner.scorer, goal_xy=np.zeros(2))
+    ctx = build_reward_context(world, sim_state=sim_state, timestep=timestep, scorer=planner.scorer, goal_xy=goal_xy)
     coll = np.asarray(collision(ctx), np.float32)
     hit_t = collision_time_tiebreak(ctx)
     margin, depth = ctx.scorer.compute_offroad_score_margin_tiebreak(
         ctx.ego_boxes, sim_state=sim_state, timestep=timestep, world_idx=0
     )
     margin, depth = np.asarray(margin, np.float32), np.asarray(depth, np.float32)
-    parts = {"collision": coll, "contact_time": hit_t, "offroad_margin": margin, "offroad_depth": depth}
+    prog = goal_progress(ctx, goal_step=weights.goal_step)
+    parts = {"collision": coll, "contact_time": hit_t, "offroad_margin": margin, "offroad_depth": depth,
+             "progress": prog}
     energy = (weights.collision * (1 - coll) + weights.contact_time * (1 - hit_t)
-              + weights.offroad * (1 - margin) + weights.offroad_depth * (1 - depth))
+              + weights.offroad * (1 - margin) + weights.offroad_depth * (1 - depth)
+              + weights.progress * (1 - prog))
     return energy.astype(np.float64), parts
 
 
@@ -712,11 +768,13 @@ def mcmc_pool(
     Target: pi(z) ∝ N(z; 0, I) 1[feasible] exp(-lambda_k E(tau(z)) / temperature), lambda_k
     ramping 0 -> 1 over the first ``anneal_frac`` of the steps (step size adapts there too).
     Chains start from the prior (symmetrized: z and -z, so left/right and faster/slower come in
-    pairs). ``keep_frac`` of the pool are plain diffusion samples. ``denoise`` = SDEdit the chain
-    states. ``num_steps=0`` = prior samples only. Diagnostics go to ``planner.last_pool_info``.
+    pairs). ``keep_frac`` of the pool are plain diffusion samples (pool slots 0..n_keep-1).
+    ``denoise`` = SDEdit the chain states. ``num_steps=0`` = prior samples only. Diagnostics go to
+    ``planner.last_pool_info``.
     """
 
-    def pool(planner, *, cond_bf, inst_cond_bf, inst_cond_mask_bf, features, pre_batch, rng, sim_state, timestep):
+    def pool(planner, *, cond_bf, inst_cond_bf, inst_cond_mask_bf, features, pre_batch, rng, sim_state, timestep,
+             goal_xy, **_):
         del features
         k_sample, k_denoise, k_mcmc = jax.random.split(rng, 3)
         np_rng = np.random.default_rng(int(jax.random.randint(k_mcmc, (), 0, 2**31 - 1)))
@@ -729,24 +787,27 @@ def mcmc_pool(
         t_model = np.asarray(pre_batch.aux["model_t_seconds"][0], np.float64)
         t_model = t_model[1:] if t_model.shape[0] == horizon + 1 else t_model[:horizon]
         v0 = float(np.hypot(*np.asarray(pre_batch.aux["anchor_world_state"][0, 2:4])))
-        _, kappa0 = _ego_kinematics(sim_state, timestep)
+        _, a0, kappa0 = _ego_kinematics(sim_state, timestep)
         space = KinematicPlanSpace(
             dataclasses.replace(prior, v_max=min(prior.v_max, planner.preprocess_cfg.max_velocity)),
-            v0=v0, kappa0=kappa0, horizon_s=float(t_model[-1]), t_model=t_model,
+            v0=v0, a0=a0, kappa0=kappa0, horizon_s=float(t_model[-1]), t_model=t_model,
         )
         extra = np.asarray(base[0, n_keep:, :, 5:])
-        dim = 2 * space.n
 
         # Initial states: feasible draws from the prior, symmetrized.
-        half = np_rng.standard_normal((32 * n_chain, dim))
-        cand = np.stack([half, -half], axis=1).reshape(-1, dim)  # z, -z, z', -z', ...
+        half = np_rng.standard_normal((32 * n_chain, space.dim))
+        cand = np.stack([half, -half], axis=1).reshape(-1, space.dim)  # z, -z, z', -z', ...
         cand = cand[space.feasible(cand)]
-        z = np.zeros((n_chain, dim))  # theta = mu (keep speed and curvature) is always feasible
+        z = np.zeros((n_chain, space.dim))  # theta = mu (keep speed and curvature) is always feasible
         z[: min(len(cand), n_chain)] = cand[:n_chain]
 
         def energy(z_):
-            return plan_energy(planner, space.to_norm(z_, planner.preprocess_cfg, extra),
-                               pre_batch=pre_batch, sim_state=sim_state, timestep=timestep, weights=weights)
+            e_scene, parts_ = plan_energy(
+                planner, space.to_norm(z_, planner.preprocess_cfg, extra), pre_batch=pre_batch,
+                sim_state=sim_state, timestep=timestep, goal_xy=goal_xy, weights=weights,
+            )
+            parts_["jerk"] = space.jerk_cost(z_, weights.jerk_ref)
+            return e_scene + weights.comfort * parts_["jerk"], parts_
 
         e, parts = energy(z)
         e_hist, acc_hist, lam_hist = [e.copy()], [], []
@@ -774,8 +835,8 @@ def mcmc_pool(
                 steps=denoise_steps or planner.resample_timesteps, noise_scale=noise_scale,
             )
         planner.last_pool_info = {
-            "v0": space.v0, "kappa0": space.kappa0, "n_keep": n_keep, "z": z, "theta": space.theta(z),
-            "rollout": space.rollout(z), "t_model": t_model, "energy": np.stack(e_hist),
+            "v0": space.v0, "a0": space.a0, "kappa0": space.kappa0, "n_keep": n_keep, "z": z,
+            "theta": space.theta(z), "rollout": space.rollout(z), "t_model": t_model, "energy": np.stack(e_hist),
             "accept": np.asarray(acc_hist), "lambda": np.asarray(lam_hist), "step_size": beta, "parts": parts,
             "n_feasible_init": int(min(len(cand), n_chain)),
         }
@@ -786,6 +847,21 @@ def mcmc_pool(
         f"{'' if not denoise else f', dn{denoise_steps or 0}xσ{noise_scale:g}'}]"
     )
     return pool
+
+
+def mcmc_summary(info: dict) -> dict[str, float]:
+    """Final chain states: is anything collision-free / on-road, and when do the colliding ones hit?"""
+    p, horizon = info["parts"], float(info["t_model"][-1])
+    return {
+        "E_min": float(info["energy"][-1].min()),
+        "E_median": float(np.median(info["energy"][-1])),
+        "frac_collision_free": float((p["collision"] >= 0.99).mean()),
+        "frac_onroad": float((p["offroad_margin"] > 0).mean()),
+        "latest_contact_s": float(p["contact_time"].max() * horizon),  # = horizon if some chain never hits
+        "progress_median": float(np.median(p["progress"])),
+        "jerk_median": float(np.median(p["jerk"])),
+        "accept_final": float(info["accept"][-1]) if len(info["accept"]) else float("nan"),
+    }
 
 
 def plot_mcmc(info: dict, *, figsize=(15, 3.6)):
@@ -809,7 +885,7 @@ def plot_mcmc(info: dict, *, figsize=(15, 3.6)):
     for i in range(len(r["v"])):
         ax[2].plot(t, r["v"][i], color=col[i], lw=0.8)
         ax[3].plot(t, r["kappa"][i], color=col[i], lw=0.8)
-    ax[2].set(xlabel="t [s]", ylabel="m/s", title=f"speed (v0={info['v0']:.1f})")
+    ax[2].set(xlabel="t [s]", ylabel="m/s", title=f"speed (v0={info['v0']:.1f}, a0={info.get('a0', 0.0):.1f})")
     ax[3].set(xlabel="t [s]", ylabel="1/m", title=f"curvature (κ0={info['kappa0']:.3f})")
     ax[3].axhline(0, color="k", lw=0.5)
     fig.suptitle("color = final energy (dark = low)", fontsize=9)
@@ -897,6 +973,7 @@ class ESIteration:
     breakdown: dict[str, np.ndarray]  # term name -> [P]
     is_carried_elite: np.ndarray  # [P] True for elites carried over from the previous iteration
     elite_indices: np.ndarray  # [E] indices into this pool chosen by the acquisition
+    origin: np.ndarray | None = None  # [P] initial-pool slot each plan descends from (through elites)
 
 
 @dataclasses.dataclass
@@ -909,6 +986,15 @@ class ESTrace:
     wm_forecast: dict[str, np.ndarray] | None  # traj_k [N,K,T,5], mode_probs [N,K], masks [N,T], top1_traj
     best_collision_debug: dict[str, Any] | None  # per-agent collision prob for the chosen plan
     label: str = ""
+    n_diffusion_slots: int | None = None  # initial slots < this are diffusion samples, the rest from the sampler
+
+    def source(self, k: int | None = None, iteration: int = -1) -> str:
+        """'diffusion' or 'sampler' (e.g. an MCMC chain) for plan ``k`` (default: the chosen plan)."""
+        it = self.iterations[iteration]
+        k = self.best_index if k is None else k
+        if it.origin is None or self.n_diffusion_slots is None:
+            return "diffusion"
+        return "diffusion" if it.origin[k] < self.n_diffusion_slots else "sampler"
 
     def summary(self) -> list[dict[str, Any]]:
         rows = []
@@ -1076,6 +1162,7 @@ class DebugESPlanner(DiffusionESPlanner):
         goal_xy = np.asarray(goal).reshape(-1, 2)[0]
         np_rng = np.random.default_rng(int(timestep))
 
+        self.last_pool_info = None
         norm_bktd = self.initial_pool(
             self,
             cond_bf=cond_bf,
@@ -1086,12 +1173,17 @@ class DebugESPlanner(DiffusionESPlanner):
             rng=key_sample,
             sim_state=sim_state,
             timestep=int(timestep),
+            goal_xy=goal_xy,
         )
         world_bkt5, world_t_seconds_bt, world_t_valid_bt = self._postprocess_population(norm_bktd, pre_batch)
         pool_norm = norm_bktd[0]
         pool_world = np.asarray(world_bkt5[0])
         pool_scores, pool_breakdown = self._score(pool_world, sim_state, timestep, goal_xy)
         carried = np.zeros((len(pool_scores),), dtype=bool)
+        origin = np.arange(len(pool_scores))
+        # Same elite -> slot mapping as _replicate_elites.
+        n_el, n_pop = self.elite_size, self.population_size
+        replica_of = np.repeat(np.arange(n_el), [n_pop // n_el + (i < n_pop % n_el) for i in range(n_el)])
 
         iterations: list[ESIteration] = []
         for it in range(self.num_iterations + 1):
@@ -1106,6 +1198,7 @@ class DebugESPlanner(DiffusionESPlanner):
                     breakdown=pool_breakdown,
                     is_carried_elite=carried,
                     elite_indices=elite_idx,
+                    origin=origin,
                 )
             )
             if it == self.num_iterations:
@@ -1137,6 +1230,7 @@ class DebugESPlanner(DiffusionESPlanner):
             carried = np.concatenate(
                 [np.ones((len(elite_idx),), dtype=bool), np.zeros((len(new_scores),), dtype=bool)]
             )
+            origin = np.concatenate([origin[elite_idx], origin[elite_idx][replica_of]])
 
         best = int(np.argmax(pool_scores))
         best_world = pool_world[best]
@@ -1169,6 +1263,7 @@ class DebugESPlanner(DiffusionESPlanner):
             wm_forecast=wm_forecast,
             best_collision_debug=best_debug,
             label=self.label,
+            n_diffusion_slots=(self.last_pool_info or {}).get("n_keep", self.population_size),
         )
         return PlannerResult(
             start_t_b=pre_batch.aux["anchor_step"].astype(jnp.int32),
@@ -1524,6 +1619,46 @@ def animate_closed_loop(
     return html
 
 
+def plot_speed_profile(results: list[ClosedLoopResult], *, t_range: tuple[int, int] | None = None, figsize=(12, 7)):
+    """Executed ego speed / acceleration / jerk per run (0.1 s steps), with each replan's planned speed
+    (thin) and replan markers: o = chosen plan descends from a diffusion sample, ^ = from the sampler
+    (MCMC chain). A speed jump at a replan where the planned profile itself jumps = plan switch."""
+    fig, axes = plt.subplots(3, 1, figsize=figsize, sharex=True)
+    for n, r in enumerate(results):
+        color = plt.cm.tab10(n % 10)
+        ego = r.scenario.ego_idx
+        v = np.hypot(np.asarray(r.rollout_traj.vel_x[ego]), np.asarray(r.rollout_traj.vel_y[ego]))
+        valid = np.asarray(r.rollout_traj.valid[ego])
+        t = np.arange(len(v))
+        sel = valid & (t >= r.start_timestep)
+        a = np.gradient(v, 0.1)
+        j = np.gradient(a, 0.1)
+        axes[0].plot(t[sel], v[sel], color=color, lw=1.8, label=r.label)
+        axes[1].plot(t[sel], a[sel], color=color, lw=1.2)
+        axes[2].plot(t[sel], j[sel], color=color, lw=1.0)
+        for s in r.replan_steps:
+            plan = r.plans[s]
+            pv = np.hypot(plan[:, 3], plan[:, 4])
+            axes[0].plot(s + np.arange(len(pv)), pv, color=color, lw=0.6, alpha=0.5)
+            mk = "^" if r.traces[s].source() == "sampler" else "o"
+            axes[0].plot(s, v[s], mk, color=color, ms=6, mec="k", mew=0.5)
+        fail = r.overlap_t | r.offroad_t
+        if fail.any():
+            axes[0].axvline(int(np.flatnonzero(fail)[0]), color=color, ls="--", lw=1)
+    axes[0].set(ylabel="speed [m/s]", title="executed (thick) and planned at each replan (thin); o diffusion / ^ sampler; dashed = first failure")
+    axes[1].set(ylabel="accel [m/s²]")
+    axes[2].set(ylabel="jerk [m/s³]", xlabel="timestep (0.1 s)")
+    for ax in axes:
+        ax.grid(alpha=0.3)
+        for s in results[0].replan_steps:
+            ax.axvline(s, color="k", lw=0.3, alpha=0.4)
+        if t_range is not None:
+            ax.set_xlim(*t_range)
+    axes[0].legend(fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
 def plot_timeline(result: ClosedLoopResult, *, compare: list[ClosedLoopResult] = (), figsize=(11, 5.5)):
     """Ego speed, failure flags and ES best/mean score per replan step -- for picking an anchor."""
     results = [result, *compare]
@@ -1563,9 +1698,15 @@ def plot_es_iterations(
     ego_idx: int,
     view_m: float = 35.0,
     show_wm_top1: bool = True,
+    risk_threshold: float = 0.05,
     figsize_per=(4.2, 4.2),
 ):
-    """One panel per ES iteration: pool coloured by score, elites bold, final best red."""
+    """One panel per ES iteration: pool coloured by score, elites bold, final best red.
+
+    Agents shown at the replan time (the state the planner scored against). Orange = agents with
+    WM collision probability >= ``risk_threshold`` against the chosen plan; their WM top-1 future is
+    drawn solid orange, the dots on it and on the chosen plan mark the same instants (every 1 s).
+    """
     n = len(trace.iterations)
     cols = min(n, 3)
     rows = int(np.ceil(n / cols))
@@ -1573,14 +1714,21 @@ def plot_es_iterations(
     cmap = plt.get_cmap("viridis")
     traj = _single_state(sim_state).log_trajectory
     t = trace.timestep
+    dbg = trace.best_collision_debug or {}
+    p_hit = np.asarray(dbg.get("p_collision_i", np.zeros(0)))
+    risky = [int(i) for i in np.flatnonzero(p_hit >= risk_threshold)]
     for ax, it in zip(axes.ravel(), trace.iterations):
         _base_axes(ax, sim_state)
-        _draw_boxes(ax, traj, t, ego_idx)
+        _draw_boxes(ax, traj, t, ego_idx, highlight=risky)
         if show_wm_top1 and trace.wm_forecast is not None:
             top1 = trace.wm_forecast["top1_traj"]
             mask = trace.wm_forecast["masks"][:, 0]
             for i in np.flatnonzero(mask):
-                ax.plot(top1[i, :, 0], top1[i, :, 1], color=AGENT_COLOR, lw=0.8, ls=":", zorder=3)
+                if i in risky:
+                    ax.plot(top1[i, :, 0], top1[i, :, 1], color="#fc8d59", lw=1.5, zorder=7)
+                    ax.plot(top1[i, ::10, 0], top1[i, ::10, 1], "o", color="#fc8d59", ms=3, zorder=7)
+                else:
+                    ax.plot(top1[i, :, 0], top1[i, :, 1], color=AGENT_COLOR, lw=0.8, ls=":", zorder=3)
         order = np.argsort(it.scores)
         for k in order:
             xy = it.trajectories[k]
@@ -1591,6 +1739,7 @@ def plot_es_iterations(
         if it.iteration == trace.iterations[-1].iteration:
             b = trace.best_trajectory
             ax.plot(b[:, 0], b[:, 1], color=HIT_COLOR, lw=2.5, zorder=6)
+            ax.plot(b[::10, 0], b[::10, 1], "o", color=HIT_COLOR, ms=3, zorder=7)
         _set_view(ax, _ego_xy(traj, ego_idx, t), view_m)
         ax.set_title(
             f"iter {it.iteration}: max={it.scores.max():.2f} mean={it.scores.mean():.2f} "
@@ -1601,7 +1750,14 @@ def plot_es_iterations(
         ax.axis("off")
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(0, 1))
     fig.colorbar(sm, ax=axes.ravel().tolist(), fraction=0.02, pad=0.01, label="score")
-    fig.suptitle(f"[{trace.label}] ES at t={t} (bold = elites, red = chosen plan, dotted = WM top-1)")
+    last = trace.iterations[-1]
+    terms = " ".join(f"{k}={float(v[trace.best_index]):.2f}" for k, v in last.breakdown.items())
+    risk = ", ".join(f"{i}:{p_hit[i]:.2f}" for i in sorted(risky, key=lambda i: -p_hit[i])[:4]) or "none"
+    fig.suptitle(
+        f"[{trace.label}] ES at t={t} (bold = elites, red = chosen plan, dotted = WM top-1)\n"
+        f"chosen ({trace.source()}): {terms} | P(hit) per agent: {risk}",
+        fontsize=10,
+    )
     return fig
 
 
