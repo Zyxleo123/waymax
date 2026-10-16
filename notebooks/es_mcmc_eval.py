@@ -52,13 +52,8 @@ def build_variants(base: esd.DebugESPlanner) -> dict:
         "baseline": lambda: base,
         # diffusion pool, lexicographic reward: what does the reward alone do?
         "lex": lambda: base.variant(label="lex", reward=lex, resample_noise_scale=1.0),
-        # diffusion pool, lexicographic-with-slack reward (risk > road margin > progress > lane > jerk)
-        "slack_lex": lambda: base.variant(label="slack_lex", reward=esd.slack_lexicographic_reward(),
-                                          resample_noise_scale=1.0),
-        # same, collision risk not weighted by impact speed (eval overlap is binary)
-        "slack_lex_nosev": lambda: base.variant(label="slack_lex_nosev",
-                                                reward=esd.slack_lexicographic_reward(severity=False),
-                                                resample_noise_scale=1.0),
+        # diffusion pool, rulebook violations (collision > off-road > goal > tiebreaks), slack on P(collision)
+        "violation": lambda: base.variant(label="violation", reward=esd.violation_reward(), resample_noise_scale=1.0),
         # MCMC safe-diverse pool + lexicographic reward
         "mcmc_lex": lambda: base.variant(label="mcmc_lex", initial_pool=mcmc, reward=lex, resample_noise_scale=1.0),
         # same, but ES only re-ranks (no diffusion re-noising of the MCMC plans)
@@ -124,6 +119,12 @@ def replan_rows(result: esd.ClosedLoopResult) -> list[dict]:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--scenarios", nargs="+", default=["00017:173"], help="shard:idx")
+    ap.add_argument("--scenario_file", default=None, help="JSON list of 'shard:idx' (overrides --scenarios)")
+    ap.add_argument("--chunk", type=int, default=int(os.environ.get("SLURM_ARRAY_TASK_ID", 0)),
+                    help="run scenarios[chunk::num_chunks]; defaults to the slurm array task id")
+    ap.add_argument("--num_chunks", type=int, default=1)
+    ap.add_argument("--wm_ckpt", default=WM_CKPT)
+    ap.add_argument("--no_plots", action="store_true", help="summary + csv only (large sweeps)")
     ap.add_argument("--variants", nargs="+", default=["baseline", "mcmc_lex"])
     ap.add_argument("--sim_agents", default="log")
     ap.add_argument("--seed", type=int, default=0)
@@ -131,15 +132,19 @@ def main() -> None:
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    scenarios = json.load(open(args.scenario_file)) if args.scenario_file else args.scenarios
+    scenarios = scenarios[args.chunk::args.num_chunks]
+    summary_path = out / ("summary.json" if args.num_chunks == 1 else f"summary_{args.chunk:03d}.json")
+    print(f"wm={args.wm_ckpt}  {len(scenarios)} scenarios x {args.variants}", flush=True)
 
     policy, cfg = esd.load_diffusion_policy(DIFFUSION_CKPT, seed=args.seed)
-    wm = esd.load_world_model(WM_CKPT, backend="multifuture", planning_mode="expected_independent")
+    wm = esd.load_world_model(args.wm_ckpt, backend="multifuture", planning_mode="expected_independent")
     base = esd.DebugESPlanner(policy, cfg, other_agent_forecast="wm", world_model_forecaster=wm,
                               reward=esd.margin_tiebreak_reward(), label="baseline", **ES)
     factories = build_variants(base)
 
     summary = []
-    for spec in args.scenarios:
+    for spec in scenarios:
         shard, idx = spec.split(":")
         scen = esd.load_scenario(f"{TFRECORD_DIR}/training_tfexample.tfrecord-{shard}-of-01000", int(idx),
                                  lane_graph_dir=LANE_GRAPH_DIR)
@@ -153,6 +158,12 @@ def main() -> None:
             tag = f"{shard}_{idx}_{name}"
             df = pd.DataFrame(replan_rows(r))
             df.to_csv(out / f"{tag}.csv", index=False)
+            if args.no_plots:
+                summary.append({"scenario": f"{shard}#{idx}", "variant": name, "success": r.success,
+                                "goal_reached": r.goal_reached, "overlap": r.overlap, "offroad": r.offroad,
+                                "min_goal_dist_m": round(r.min_goal_distance_m, 2),
+                                "first_fail_t": esd.first_failure_t(r), "seconds": round(time.time() - t0)})
+                continue
             print(df.to_string(index=False), flush=True)
             fig = esd.plot_closed_loop_replans(r)
             fig.savefig(out / f"{tag}.png", dpi=80)
@@ -168,10 +179,11 @@ def main() -> None:
                             "goal_reached": r.goal_reached, "overlap": r.overlap, "offroad": r.offroad,
                             "min_goal_dist_m": round(r.min_goal_distance_m, 2),
                             "first_fail_t": esd.first_failure_t(r), "seconds": round(time.time() - t0)})
-        fig = esd.plot_speed_profile(list(runs.values()))
-        fig.savefig(out / f"{shard}_{idx}_speed.png", dpi=80)
-        plt.close(fig)
-        json.dump(summary, open(out / "summary.json", "w"), indent=1)
+        if not args.no_plots:
+            fig = esd.plot_speed_profile(list(runs.values()))
+            fig.savefig(out / f"{shard}_{idx}_speed.png", dpi=80)
+            plt.close(fig)
+        json.dump(summary, open(summary_path, "w"), indent=1)
     print(pd.DataFrame(summary).to_string(index=False))
 
 
