@@ -101,6 +101,15 @@ def parse_args() -> argparse.Namespace:
         help="Init norm of each mode embedding row. Default sqrt(hidden_dim); 1.0 = legacy init.",
     )
     p.add_argument(
+        "--mode_map_context",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="direct decoder: mode queries attend to the agent's nearest map/TL tokens before decoding.",
+    )
+    p.add_argument("--mode_context_keys", type=int, default=32, help="Nearest map/TL tokens per agent.")
+    p.add_argument("--mode_context_radius_m", type=float, default=30.0)
+    p.add_argument("--num_mode_context_layers", type=int, default=2)
+    p.add_argument(
         "--wta_strategy",
         type=str,
         default="hard",
@@ -169,6 +178,10 @@ def _make_config(args: argparse.Namespace) -> WorldModelConfig:
         agent_frame_decoding=args.agent_frame_decoding,
         decoder_type=args.decoder_type,
         mode_embed_scale=args.mode_embed_scale,
+        mode_map_context=args.mode_map_context,
+        mode_context_keys=args.mode_context_keys,
+        mode_context_radius_m=args.mode_context_radius_m,
+        num_mode_context_layers=args.num_mode_context_layers,
         yaw_loss_weight=args.yaw_loss_weight,
         mode_cls_weight=args.mode_cls_weight,
         collision_focus_radius_m=args.collision_focus_radius_m,

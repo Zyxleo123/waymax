@@ -93,6 +93,15 @@ class WorldModelConfig:
     # norm of the LayerNorm'd latent it is added to; 1.0 reproduces legacy init,
     # where modes were a ~6% perturbation and decoded near-identical trajectories.
     mode_embed_scale: float | None = None
+    # direct decoder only: before decoding, the K mode queries of each agent
+    # self-attend and cross-attend to that agent's mode_context_keys nearest
+    # map/TL tokens (within mode_context_radius_m), keyed by position and
+    # direction relative to the agent. Modes become scene-dependent instead of
+    # latent + fixed offset; the classifier sees the attended queries too.
+    mode_map_context: bool = False
+    mode_context_keys: int = 32
+    mode_context_radius_m: float = 30.0
+    num_mode_context_layers: int = 2
 
     yaw_loss_weight: float = 0.5
     mode_cls_weight: float = 1.0
@@ -132,6 +141,10 @@ class WorldModelConfig:
         self.planning_mode = mode
         if self.decoder_type not in DECODER_TYPES:
             raise ValueError(f"decoder_type must be one of {DECODER_TYPES}, got {self.decoder_type!r}")
+        if self.mode_map_context and self.decoder_type != "direct":
+            raise ValueError("mode_map_context requires decoder_type='direct'")
+        if self.mode_map_context and (int(self.mode_context_keys) < 1 or int(self.num_mode_context_layers) < 1):
+            raise ValueError("mode_context_keys and num_mode_context_layers must be >= 1")
         if self.wta_strategy not in WTA_STRATEGIES:
             raise ValueError(f"wta_strategy must be one of {WTA_STRATEGIES}, got {self.wta_strategy!r}")
         parse_ewta_schedule(self.ewta_schedule)

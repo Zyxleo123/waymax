@@ -33,6 +33,8 @@ fi
 # Each run saves to SAVE_DIR/<WANDB_NAME>_<timestamp>/; use distinct WANDB_NAMEs per variant.
 # Mode collapse knobs: WTA_STRATEGY=hard|ewta, EWTA_SCHEDULE="k:start_epoch,...",
 # STATIC_AGENTS=compete|all_modes|fixed_mode, MODE_EMBED_SCALE (unset = sqrt(hidden_dim), 1.0 = legacy).
+# MODE_MAP_CONTEXT=1: mode queries attend to the agent's nearest map/TL tokens
+# (MODE_CONTEXT_KEYS, MODE_CONTEXT_RADIUS_M, NUM_MODE_CONTEXT_LAYERS).
 DECODER_TYPE="${DECODER_TYPE:-direct}"
 if [[ "${AGENT_FRAME_DECODING:-1}" == "1" ]]; then
   AGENT_FRAME_FLAG="--agent_frame_decoding"
@@ -70,6 +72,10 @@ python train_world_model.py \
   --sigma_eps "${SIGMA_EPS:-1e-3}" \
   --decoder_type "${DECODER_TYPE}" \
   ${MODE_EMBED_SCALE:+--mode_embed_scale "${MODE_EMBED_SCALE}"} \
+  $([[ "${MODE_MAP_CONTEXT:-0}" == "1" ]] && echo --mode_map_context || echo --no-mode_map_context) \
+  --mode_context_keys "${MODE_CONTEXT_KEYS:-32}" \
+  --mode_context_radius_m "${MODE_CONTEXT_RADIUS_M:-30}" \
+  --num_mode_context_layers "${NUM_MODE_CONTEXT_LAYERS:-2}" \
   --wta_strategy "${WTA_STRATEGY:-hard}" \
   --ewta_schedule "${EWTA_SCHEDULE:-6:0,4:50,2:100,1:150}" \
   --static_agents "${STATIC_AGENTS:-compete}" \
