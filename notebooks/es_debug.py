@@ -46,6 +46,7 @@ from simulation.evaluation_utils import (  # noqa: E402
     check_goal_reaching,
     episode_failure_flags,
     infer_goals_from_sim_state,
+    road_tracked_offroad,
 )
 from simulation.planning_utils import apply_ego_replacements_to_expanded_state  # noqa: E402
 from viz import viz as viz_module  # noqa: E402
@@ -290,100 +291,13 @@ def wm_collision(planning_mode: str) -> RewardTerm:
     return term
 
 
-# Height of the ego box used by the offroad checks. The nearest road edge is found in 3D (height
-# counted twice), so a wrong height can pick the edge of a bridge / another level.
-#   "ground": per-step height of the road surface under the plan, tracked along it from the ego's
-#             current height (fixes slopes and under/overpasses; notebook only).
-#   "anchor": production -- the ego's height at the replan time for the whole plan; the evaluation
-#             rollout keeps Waymax's frozen ego height (StateDynamics never updates z).
-OFFROAD_Z = "ground"
-
-_GROUND_TYPES = tuple(range(1, 14))  # lane centres (1-3) and road lines (5-13): points on the driving surface
-_GROUND_PAD = 1024
-
-
-def _ground_points(sim_state, world_idx: int = 0) -> jax.Array:
-    """[M, 3] driving-surface roadgraph points, padded with far-away points; cached per roadgraph."""
-    rg = sim_state.roadgraph_points
-    key = id(rg.xyz)
-    hit = _GROUND_CACHE.get(key)
-    if hit is not None and hit[0] is rg.xyz:
-        return hit[1]
-    xyz = np.asarray(rg.xyz, dtype=np.float32)
-    types, valid = np.asarray(rg.types), np.asarray(rg.valid).astype(bool)
-    if xyz.ndim == 3:
-        xyz, types, valid = xyz[world_idx], types[world_idx], valid[world_idx]
-    pts = xyz[valid & np.isin(types, _GROUND_TYPES)]
-    pad = (-len(pts)) % _GROUND_PAD or (_GROUND_PAD if len(pts) == 0 else 0)
-    pts = jnp.asarray(np.concatenate([pts, np.full((pad, 3), 1.0e6, np.float32)]))
-    if len(_GROUND_CACHE) > 8:
-        _GROUND_CACHE.clear()
-    _GROUND_CACHE[key] = (rg.xyz, pts)
-    return pts
-
-
-_GROUND_CACHE: dict[int, tuple[Any, jax.Array]] = {}
-
-
-@jax.jit
-def _track_ground_z(xy_pt2: jax.Array, z0_p: jax.Array, pts_m3: jax.Array) -> jax.Array:
-    """[P, T] road height under each plan point: step by step, the height of the surface point nearest
-    in (x, y, 2 z) to (x_t, y_t, z_{t-1}). Following the surface keeps a plan that passes under a bridge
-    on its own level instead of jumping to the bridge."""
-
-    def step(z, xy):
-        d = jnp.sum((pts_m3[None, :, :2] - xy[:, None]) ** 2, axis=-1) + (2.0 * (pts_m3[None, :, 2] - z[:, None])) ** 2
-        z_new = pts_m3[jnp.argmin(d, axis=-1), 2]
-        return z_new, z_new
-
-    _, zs = jax.lax.scan(step, z0_p, jnp.swapaxes(xy_pt2, 0, 1))
-    return jnp.swapaxes(zs, 0, 1)
-
-
-def ground_z(xy_pt2, sim_state, z0: float, world_idx: int = 0) -> jax.Array:
-    """[P, T] road-surface height along world-frame paths ``xy_pt2`` starting at height ``z0``."""
-    xy = jnp.asarray(xy_pt2, dtype=jnp.float32)
-    return _track_ground_z(xy, jnp.full((xy.shape[0],), z0, jnp.float32), _ground_points(sim_state, world_idx))
-
-
-def _ego_z(sim_state, timestep: int, world_idx: int = 0) -> float:
-    ego = scorer_helpers.get_ego_idx(sim_state, world_idx)
-    z = np.asarray(sim_state.log_trajectory.z[world_idx])
-    return float(z[ego, int(np.clip(int(timestep), 0, z.shape[1] - 1))])
-
-
-def offroad_distances(ctx: RewardContext) -> jax.Array | None:
-    """[P, T, 4] signed corner distance to the nearest road edge (> 0 = offroad), or None without road
-    edges. Box height per ``OFFROAD_Z``."""
-    if OFFROAD_Z == "anchor":
-        return ctx.scorer._offroad_corner_distances(ctx.ego_boxes, ctx.sim_state, ctx.timestep, ctx.world_idx)
-    from scores.scorer_lane_graph import _corner_signed_distances
-
-    edges = ctx.scorer._road_edges(ctx.sim_state, ctx.world_idx)
-    if edges is None:
-        return None
-    boxes = jnp.asarray(ctx.ego_boxes, dtype=jnp.float32)
-    z = ground_z(boxes[..., :2], ctx.sim_state, _ego_z(ctx.sim_state, ctx.timestep, ctx.world_idx), ctx.world_idx)
-    return _corner_signed_distances(boxes, *edges, z[..., None, None])
-
-
-def offroad_margin_tiebreak(ctx: RewardContext) -> tuple[np.ndarray, np.ndarray]:
-    """``Scorer.compute_offroad_score_margin_tiebreak`` with the box height from ``OFFROAD_Z``."""
-    from scores.scorer_lane_graph import _margin_tiebreak_from_distances
-
-    d = offroad_distances(ctx)
-    if d is None:
-        ones = np.ones((int(np.shape(ctx.ego_boxes)[0]),), np.float32)
-        return ones, ones
-    margin, tiebreak = _margin_tiebreak_from_distances(d)
-    return np.asarray(margin, np.float32), np.asarray(tiebreak, np.float32)
-
-
 def offroad(ctx: RewardContext) -> np.ndarray:
-    d = offroad_distances(ctx)
-    if d is None:
-        return np.ones((int(np.shape(ctx.ego_boxes)[0]),), np.float32)
-    return np.where(np.asarray(jnp.any(d > 0.0, axis=(-1, -2))), 0.0, 1.0).astype(np.float32)
+    return np.asarray(
+        ctx.scorer.compute_offroad_score_v2(
+            ctx.ego_boxes, sim_state=ctx.sim_state, timestep=ctx.timestep, world_idx=ctx.world_idx
+        ),
+        dtype=np.float32,
+    )
 
 
 def direction(ctx: RewardContext) -> np.ndarray:
@@ -603,7 +517,9 @@ class MarginTiebreakReward:
         from scores.scorer_lane_graph import OFFROAD_TIEBREAK_EPS
 
         coll = np.asarray(collision(ctx), dtype=np.float32)
-        margin, tiebreak = offroad_margin_tiebreak(ctx)
+        margin, tiebreak = ctx.scorer.compute_offroad_score_margin_tiebreak(
+            ctx.ego_boxes, sim_state=ctx.sim_state, timestep=ctx.timestep, world_idx=ctx.world_idx
+        )
         margin = np.asarray(margin, dtype=np.float32)
         tiebreak = np.asarray(tiebreak, dtype=np.float32)
         safety = coll * margin
@@ -645,7 +561,9 @@ class LexicographicReward:
 
     def __call__(self, ctx: RewardContext) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         coll = np.asarray(collision(ctx), dtype=np.float32)
-        margin, tiebreak = offroad_margin_tiebreak(ctx)
+        margin, tiebreak = ctx.scorer.compute_offroad_score_margin_tiebreak(
+            ctx.ego_boxes, sim_state=ctx.sim_state, timestep=ctx.timestep, world_idx=ctx.world_idx
+        )
         margin, tiebreak = np.asarray(margin, np.float32), np.asarray(tiebreak, np.float32)
         ctb = collision_time_tiebreak(ctx)
         # reach_m below the 2 m success radius: aim at the goal, not its edge.
@@ -1263,7 +1181,7 @@ class ClosedLoopResult:
     planned_state: Any  # log with ego replaced by executed plans (B=1)
     rollout_traj: Any  # Waymax Trajectory [N, T] after the evaluation rollout (log or IDM agents)
     overlap_t: np.ndarray  # [T_total] bool, from rollout metrics
-    offroad_t: np.ndarray  # ego box height per OFFROAD_Z at the time of the run ("ground": road-tracked)
+    offroad_t: np.ndarray  # ego box height following the road (as in rollout_predicted_trajectories_with_metrics)
     goal_reached: bool
     reached_step: int
     min_goal_distance_m: float
@@ -1360,13 +1278,7 @@ def run_closed_loop(
     final_state = jax.tree_util.tree_map(lambda x: x[-1], rollout_out.state)
     rollout_traj = viz_module._index_pytree(final_state.sim_trajectory, 0)
     offroad_waymax_al = offroad_al
-    if OFFROAD_Z == "ground":
-        # Waymax keeps the ego at its height from the start of the rollout; re-check offroad with the
-        # road height tracked along the executed path instead (same check, same road edges).
-        offroad_abs = ego_offroad_ground(planner, rollout_traj, state, start_timestep)
-        if offroad_abs is not None:
-            in_rng = (rollout_t >= 0) & (rollout_t < len(offroad_abs))
-            offroad_al = np.where(in_rng, offroad_abs[np.clip(rollout_t, 0, len(offroad_abs) - 1)], False)
+    offroad_al = road_tracked_offroad(rollout_out, rollout_t)[:, 0]
 
     goal_eval = check_goal_reaching(state, goal_xy_b2, start_timestep=start_timestep)
     reached = bool(goal_eval["reached"][0])
@@ -1418,28 +1330,6 @@ def run_closed_loop(
     if verbose:
         print(out.report())
     return out
-
-
-def ego_offroad_ground(planner, traj, state, start_timestep: int) -> np.ndarray | None:
-    """[T] ego offroad flag per absolute timestep for the executed trajectory ``traj`` (Waymax
-    Trajectory [N, T]), with the box height tracked along the road from the ego's logged height at
-    ``start_timestep`` (where executed = logged). None without road edges."""
-    from scores.scorer_lane_graph import _corner_signed_distances
-
-    edges = planner.scorer._road_edges(state, 0)
-    if edges is None:
-        return None
-    ego = int(scorer_helpers.get_ego_idx(state, 0))
-    boxes = np.stack([np.asarray(a)[ego] for a in (traj.x, traj.y, traj.yaw, traj.length, traj.width)], axis=-1)
-    valid = np.asarray(traj.valid)[ego]
-    t0 = int(start_timestep)
-    z = np.full((len(valid),), _ego_z(state, t0))
-    z[t0:] = np.asarray(ground_z(boxes[None, t0:, :2], state, _ego_z(state, t0)))[0]
-    d = np.asarray(_corner_signed_distances(jnp.asarray(boxes[None], jnp.float32), *edges,
-                                            jnp.asarray(z, jnp.float32)[None, :, None, None]))[0]
-    off = (d > 0.0).any(-1) & valid
-    off[:t0] = False
-    return off
 
 
 def replan_at(planner: DebugESPlanner, result: ClosedLoopResult, anchor: int, *, seed: int = 0) -> ESTrace:
