@@ -480,27 +480,6 @@ def goal_progress(ctx: RewardContext, goal_step: int = 90, dt: float = 0.1, reac
     return np.mean(g, axis=0).astype(np.float32)
 
 
-def kinematic_feasibility(
-    traj_pt5: np.ndarray, *, dt: float = 0.1, max_accel: float = 8.0, max_lat_accel: float = 8.0,
-    a0: float | None = None, max_accel_step: float = 2.0, window_s: float = 0.3,
-) -> np.ndarray:
-    """[P] 1 if the world-frame plan (index 0 = current state) never exceeds ``max_accel`` longitudinally
-    or ``max_lat_accel`` laterally (speed * yaw rate), else 0. Catches plans that start at a speed the
-    ego is not at (a velocity jump between index 0 and 1). With ``a0`` (current acceleration), the
-    plan's mean acceleration over the first ``window_s`` must also be within ``max_accel_step`` of it,
-    so consecutive plans join without an acceleration step (jerk spike) at the replan."""
-    speed = np.hypot(traj_pt5[..., 3], traj_pt5[..., 4])
-    lon = np.abs(np.diff(speed, axis=1)) / dt
-    yaw_rate = np.abs(np.angle(np.exp(1j * np.diff(traj_pt5[..., 2], axis=1)))) / dt
-    lat = 0.5 * (speed[:, 1:] + speed[:, :-1]) * yaw_rate
-    ok = (lon.max(axis=1) <= max_accel) & (lat.max(axis=1) <= max_lat_accel)
-    if a0 is not None:
-        k = max(1, int(round(window_s / dt)))
-        a_start = (speed[:, k] - speed[:, 0]) / (k * dt)
-        ok &= np.abs(a_start - a0) <= max_accel_step
-    return ok.astype(np.float32)
-
-
 class MarginTiebreakReward:
     """``--offroad_mode margin_tiebreak``: collision * edge-margin + 1e-3 * offroad tiebreak.
 
@@ -550,76 +529,12 @@ def margin_tiebreak_reward(collision_eps: float = 0.0, progress_weight: float = 
     return MarginTiebreakReward(collision_eps=collision_eps, progress_weight=progress_weight)
 
 
-class LexicographicReward:
-    """Safety first, then goal progress.
-
-    safety S = collision * 1[on-road] * 1[kinematically feasible] in [0, 1], quantized into ``1/bucket`` levels b = floor(S / bucket)
-    (collision-probability differences below ``bucket`` count as equal). Within a level:
-      b = 0 (colliding or off-road): (collision + collision_time_tiebreak + offroad_tiebreak) / 3,
-             i.e. less likely / later contact, shallower / later off-road;
-      b > 0: goal_progress, + ``jerk_eps`` * smoothness.
-    score = (b + 0.99 * within) / (levels + 1), so a higher safety level always wins.
-    """
-
-    def __init__(self, bucket: float = 0.05, jerk_eps: float = 0.05, jerk_ref: float = 2.0, goal_step: int = 90,
-                 max_accel: float = 8.0, max_accel_step: float | None = 2.0, reach_m: float = 1.0) -> None:
-        self.bucket, self.jerk_eps, self.jerk_ref, self.goal_step = float(bucket), float(jerk_eps), float(jerk_ref), int(goal_step)
-        self.max_accel, self.max_accel_step, self.reach_m = float(max_accel), max_accel_step, float(reach_m)
-
-    def __call__(self, ctx: RewardContext) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-        coll = np.asarray(collision(ctx), dtype=np.float32)
-        margin, tiebreak = ctx.scorer.compute_offroad_score_margin_tiebreak(
-            ctx.ego_boxes, sim_state=ctx.sim_state, timestep=ctx.timestep, world_idx=ctx.world_idx
-        )
-        margin, tiebreak = np.asarray(margin, np.float32), np.asarray(tiebreak, np.float32)
-        ctb = collision_time_tiebreak(ctx)
-        # reach_m below the 2 m success radius: aim at the goal, not its edge.
-        prog = goal_progress(ctx, goal_step=self.goal_step, reach_m=self.reach_m)
-        levels = int(round(1.0 / self.bucket))
-        a0 = None if self.max_accel_step is None else _ego_kinematics(ctx.sim_state, ctx.timestep, ctx.world_idx)[1]
-        feasible = kinematic_feasibility(np.asarray(ctx.trajectories), max_accel=self.max_accel,
-                                         max_lat_accel=self.max_accel, a0=a0, max_accel_step=self.max_accel_step or 0.0)
-        level = np.clip(np.floor(coll * (margin > 0) * feasible * levels + 1e-6), 0, levels)
-        within = np.where(level == 0, (coll + ctb + tiebreak + feasible) / 4.0, prog)
-        breakdown = {"collision": coll, "offroad": margin, "offroad_tiebreak": tiebreak,
-                     "collision_tiebreak": ctb, "progress": prog, "feasible": feasible,
-                     "safety_level": level.astype(np.float32)}
-        if self.jerk_eps > 0:
-            smooth = np.exp(-plan_jerk(np.asarray(ctx.trajectories)) / self.jerk_ref**2)
-            within = np.where(level > 0, (1 - self.jerk_eps) * within + self.jerk_eps * smooth, within)
-            breakdown["smoothness"] = smooth.astype(np.float32)
-        score = (level + 0.99 * within) / (levels + 1)
-        return score.astype(np.float32), breakdown
-
-    def __repr__(self) -> str:
-        return f"LexicographicReward(bucket={self.bucket:g}, jerk_eps={self.jerk_eps:g})"
-
-
-def lexicographic_reward(bucket: float = 0.05, jerk_eps: float = 0.05, **kw) -> LexicographicReward:
-    return LexicographicReward(bucket=bucket, jerk_eps=jerk_eps, **kw)
-
-
 def plan_jerk(traj_pt5: np.ndarray, dt: float = 0.1) -> np.ndarray:
     """[P] mean squared jerk (longitudinal + lateral, m^2/s^6) of world-frame plans [P, T, 5]."""
     vel = traj_pt5[..., 3:5]
     acc = np.gradient(vel, dt, axis=1)
     jerk = np.gradient(acc, dt, axis=1)
     return (jerk**2).sum(-1).mean(-1)
-
-
-def _ego_kinematics(sim_state, timestep: int, world_idx: int = 0, lookback: int = 5) -> tuple[float, float, float]:
-    """(speed, acceleration, curvature) of the ego at ``timestep``, from the last ``lookback`` steps (0.1 s each)."""
-    ego = scorer_helpers.get_ego_idx(sim_state, world_idx)
-    tr = sim_state.sim_trajectory
-    t1 = int(timestep)
-    t0 = max(t1 - lookback, 0)
-    speed = np.hypot(np.asarray(tr.vel_x[world_idx, ego, t0 : t1 + 1]), np.asarray(tr.vel_y[world_idx, ego, t0 : t1 + 1]))
-    if t1 == t0:
-        return float(speed[-1]), 0.0, 0.0
-    accel = float(speed[-1] - speed[0]) / (0.1 * (t1 - t0))
-    dyaw = float(np.angle(np.exp(1j * (float(tr.yaw[world_idx, ego, t1]) - float(tr.yaw[world_idx, ego, t0])))))
-    dist = float(speed.mean()) * 0.1 * (t1 - t0)
-    return float(speed[-1]), accel, dyaw / dist if dist > 0.5 else 0.0
 
 
 # ---------------------------------------------------------------------------

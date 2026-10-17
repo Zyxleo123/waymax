@@ -48,11 +48,8 @@ ES = dict(population_size=64, elite_size=8, num_iterations=4, resample_timesteps
 
 
 def build_variants(base: esd.DebugESPlanner) -> dict:
-    lex = esd.lexicographic_reward()
     return {
         "baseline": lambda: base,
-        # diffusion pool, lexicographic reward: what does the reward alone do?
-        "lex": lambda: base.variant(label="lex", reward=lex, resample_noise_scale=1.0),
         # diffusion pool thinned to 64 by farthest-point sampling over 4x samples
         "fps_x4": lambda: base.variant(label="fps_x4", initial_pool=esd.oversample_fps(4)),
     }
@@ -78,15 +75,11 @@ def replan_rows(result: esd.ClosedLoopResult) -> list[dict]:
         # Speed after 1 s (what actually gets executed): chosen plan vs best available.
         v1 = lambda traj: np.hypot(traj[:, 10, 3], traj[:, 10, 4])  # noqa: E731
         first, last_it = tr.iterations[0], tr.iterations[-1]
-        top = last_it.scores >= last_it.scores.max() - 1.0 / 21  # same lexicographic safety level
         safe0 = (first.breakdown["collision"] >= 0.99) & (first.breakdown["offroad"] > 0)
         row.update({
             "v1s_chosen": round(float(v1(result.plans[s][None])[0]), 2),
             "v1s_max_init": round(float(v1(first.trajectories).max()), 2),
             "v1s_max_init_safe": round(float(v1(first.trajectories[safe0]).max()), 2) if safe0.any() else np.nan,
-            "v1s_max_toplevel": round(float(v1(last_it.trajectories[top]).max()), 2),
-            "prog_max_toplevel": (round(float(last_it.breakdown["progress"][top].max()), 3)
-                                  if "progress" in last_it.breakdown else np.nan),
         })
         dbg = tr.best_collision_debug or {}
         if "p_collision_i" in dbg:
