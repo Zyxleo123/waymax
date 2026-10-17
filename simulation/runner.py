@@ -130,6 +130,20 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
     else:
         target_scenario_indices = None
 
+    candidate_recorder = None
+    if getattr(args, "save_es_candidates", False) and not log_replay:
+        if not hasattr(planner, "candidate_recorder"):
+            raise ValueError("--save_es_candidates requires a DiffusionESPlanner (--planner es).")
+        from es_discriminator.es_candidate_recorder import ESCandidateRecorder
+
+        candidate_recorder = ESCandidateRecorder(
+            output_dir / "es_candidates",
+            population_size=int(args.population_size),
+            num_iterations=int(args.num_es_iterations),
+        )
+        candidate_recorder.write_metadata(args)
+        planner.candidate_recorder = candidate_recorder
+
     lane_graph_zip_path = None
     while tested_scenarios < int(args.num_scenarios):
         if target_scenarios is not None:
@@ -185,7 +199,9 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
             if not scenario_indices:
                 break
         try:
-            sim_state, _ = load_scenario_state_batch_fast(ds_cfg, scenario_indices)
+            sim_state, _, scenario_ids = load_scenario_state_batch_fast(
+                ds_cfg, scenario_indices, return_scenario_ids=True
+            )
         except Exception as e:
             print(f"Error loading scenarios {scenario_indices} from {os.path.basename(tfrecord_path)}: {e}")
             if not _advance_tfrecord():
@@ -226,6 +242,10 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                     scorer_helpers.update_lane_points(
                         planner.scorers[world_idx], sim_state, world_idx
                     )
+            if candidate_recorder is not None:
+                candidate_recorder.start_batch(
+                    sim_state, os.path.basename(tfrecord_path), scenario_indices, scenario_ids, goal_xy_b2
+                )
             pred, replaced_state, info = predict_planner_trajectories_with_periodic_replan(
                 args,
                 sim_state,
@@ -279,6 +299,16 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
         # tl_violation = tl_violation & (tl_violation_step < goal_reached_step)
 
         success = goal_reached & (~overlap) & (~offroad)
+        if candidate_recorder is not None:
+            candidate_recorder.finish_batch(replaced_state, {
+                "overlap": overlap,
+                "offroad": offroad,
+                "goal_reached": goal_reached,
+                "reached_step": goal_reached_step,
+                "success": success,
+                "min_goal_dist": np.asarray(goal_eval["min_goal_distance_m"]),
+                "final_goal_dist": np.asarray(goal_eval["final_goal_distance_m"]),
+            })
         reached_all += int(np.sum(goal_eval["reached"]))
         success_all += int(np.sum(success))
 
