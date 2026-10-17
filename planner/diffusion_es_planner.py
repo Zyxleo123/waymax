@@ -43,6 +43,11 @@ class DiffusionESPlanner(DiffusionPlanner):
         self.num_iterations = num_iterations
         self.other_agent_forecast = str(other_agent_forecast).strip().lower()
         self.world_model_forecaster = world_model_forecaster
+        # Optional es_discriminator.es_candidate_recorder.ESCandidateRecorder; read-only.
+        self.candidate_recorder = None
+        # Optional es_discriminator.real_es.closed_loop.LearnedESScorer; when set it replaces the
+        # handcrafted scorers for every population (hence every elite and the final selection).
+        self.learned_scorer = None
         self.scorers = [
             Scorer(
                 metrics=metrics,
@@ -112,21 +117,30 @@ class DiffusionESPlanner(DiffusionPlanner):
             current_norm_bktd,
             pre_batch,
         )
-        current_scores_bk = []
-        for world_idx in range(current_world_bkt5.shape[0]):
-            current_scores_bk.append(self.scorers[world_idx].compute_score(
-                trajectories=current_world_bkt5[world_idx, :, :],
-                sim_state=sim_state,
-                timestep=timestep,
-                world_idx=world_idx
-            ))
-        current_scores_bk = jnp.stack(current_scores_bk)
+        if self.learned_scorer is not None:
+            current_scores_bk = self.learned_scorer(sim_state, timestep, goal, current_world_bkt5)
+        else:
+            current_scores_bk = []
+            for world_idx in range(current_world_bkt5.shape[0]):
+                current_scores_bk.append(self.scorers[world_idx].compute_score(
+                    trajectories=current_world_bkt5[world_idx, :, :],
+                    sim_state=sim_state,
+                    timestep=timestep,
+                    world_idx=world_idx
+                ))
+            current_scores_bk = jnp.stack(current_scores_bk)
+        recorder = self.candidate_recorder
+        if recorder is not None:
+            recorder.begin_replan(sim_state, int(timestep), goal, self.world_model_forecaster)
+            recorder.record_stage(0, current_world_bkt5, [sc.last_components for sc in self.scorers], None)
         # print(f"Initial scores: {current_scores_bk} \n Shape: {current_scores_bk.shape} \n Mean: {jnp.mean(current_scores_bk)}, Std: {jnp.std(current_scores_bk)}")
         for iteration_index in range(self.num_iterations + 1):
             elite_indices_bk, elite_scores_bk = self._select_topk_per_scenario(
                 current_scores_bk,
                 top_k=self.elite_size,
             )
+            if recorder is not None:
+                recorder.record_elites(iteration_index, elite_indices_bk)
             if iteration_index == self.num_iterations:
                 break
 
@@ -155,16 +169,26 @@ class DiffusionESPlanner(DiffusionPlanner):
                 current_norm_bktd,
                 pre_batch,
             )
-            current_scores_bk = []
-            for world_idx in range(current_world_bkt5.shape[0]):
-                current_scores_k = self.scorers[world_idx].compute_score(
-                    trajectories=current_world_bkt5[world_idx, :, :],
-                    sim_state=sim_state,
-                    timestep=timestep,
-                    world_idx=world_idx
+            if self.learned_scorer is not None:
+                current_scores_bk = self.learned_scorer(sim_state, timestep, goal, current_world_bkt5)
+            else:
+                current_scores_bk = []
+                for world_idx in range(current_world_bkt5.shape[0]):
+                    current_scores_k = self.scorers[world_idx].compute_score(
+                        trajectories=current_world_bkt5[world_idx, :, :],
+                        sim_state=sim_state,
+                        timestep=timestep,
+                        world_idx=world_idx
+                    )
+                    current_scores_bk.append(current_scores_k)
+                current_scores_bk = jnp.stack(current_scores_bk)
+            if recorder is not None:
+                recorder.record_stage(
+                    iteration_index + 1,
+                    current_world_bkt5,
+                    [sc.last_components for sc in self.scorers],
+                    self._elite_selector(self.elite_size, self.population_size),
                 )
-                current_scores_bk.append(current_scores_k)
-            current_scores_bk = jnp.stack(current_scores_bk)
             current_norm_bktd = jnp.concat([elite_norm_betd, current_norm_bktd], axis=1)
             current_scores_bk = jnp.concat([elite_scores_bk, current_scores_bk], axis=1)
             current_world_bkt5 = jnp.concat([elite_world_bet5, current_world_bkt5], axis=1)
@@ -176,6 +200,8 @@ class DiffusionESPlanner(DiffusionPlanner):
         )
         best_norm_bt1d = self._gather_population(current_norm_bktd, best_indices_b1)
         best_world_bt15 = self._gather_population(current_world_bkt5, best_indices_b1)
+        if recorder is not None:
+            recorder.end_replan(best_indices_b1[:, 0])
 
         # these chnages are for plotting population only
         elite_indices_bk, elite_scores_bk = self._select_topk_per_scenario(
@@ -244,17 +270,22 @@ class DiffusionESPlanner(DiffusionPlanner):
         )
 
     @staticmethod
-    def _replicate_elites(elite_betd: jax.Array, *, population_size: int) -> jax.Array:
-        batch_size, elite_size, horizon, target_dim = elite_betd.shape
-        del batch_size, horizon, target_dim
-
+    def _elite_selector(elite_size: int, population_size: int) -> np.ndarray:
+        """Elite slot that each of the `population_size` resampled proposals starts from."""
         base = population_size // elite_size
         remainder = population_size % elite_size
-        selector = np.concatenate(
+        return np.concatenate(
             [
                 np.full((base + (1 if elite_idx < remainder else 0),), elite_idx, dtype=np.int32)
                 for elite_idx in range(elite_size)
             ],
             axis=0,
         )
+
+    @staticmethod
+    def _replicate_elites(elite_betd: jax.Array, *, population_size: int) -> jax.Array:
+        batch_size, elite_size, horizon, target_dim = elite_betd.shape
+        del batch_size, horizon, target_dim
+
+        selector = DiffusionESPlanner._elite_selector(elite_size, population_size)
         return jnp.take(elite_betd, jnp.asarray(selector, dtype=jnp.int32), axis=1)

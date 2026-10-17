@@ -12,7 +12,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_ES="${HERE}/run_es.sh"
-LIST_FLAGS=" --planner --forecast --mf_mode --mf_collision --M --it --pop --elite --rs --t_start --fm_steps --solver --resample_timesteps --wm_refresh --seed --tag_suffix "
+LIST_FLAGS=" --planner --forecast --other_agents --mf_mode --mf_collision --M --it --pop --elite --rs --t_start --fm_steps --solver --resample_timesteps --wm_refresh --seed --tag_suffix "
 BOOL_FLAGS=" --print_cmd --print_paths "
 
 DRY_RUN=0

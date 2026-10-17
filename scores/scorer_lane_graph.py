@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -385,7 +385,13 @@ class Scorer:
         roadgraph_ids = roadgraph_ids[road_edge_mask]
 
         bbox_corners_xy = polygon_corners(ego_trajectories)
-        z = jnp.zeros_like(bbox_corners_xy[..., :1])
+        # Waymax is_offroad uses the agent's own elevation for the box corners; the
+        # nearest-edge lookup stretches z by 2x, so z=0 picks wrong edge points in
+        # scenes far from z=0 (e.g. z≈-72 m) and flags valid plans as offroad.
+        ego_idx = scorer_helpers.get_ego_idx(sim_state, world_idx)
+        log_z = jnp.asarray(sim_state.log_trajectory.z[world_idx], dtype=jnp.float32)
+        ego_z = log_z[ego_idx, int(np.clip(int(timestep), 0, int(log_z.shape[1]) - 1))]
+        z = jnp.full_like(bbox_corners_xy[..., :1], ego_z)
         bbox_corners = jnp.concatenate([bbox_corners_xy, z], axis=-1)
         shape_prefix = bbox_corners.shape[:-3]
         num_agents, num_points, dim = bbox_corners.shape[-3:]
@@ -729,6 +735,9 @@ class Scorer:
             ],
             axis=-1,
         )
+        # Per-candidate factors of the last call (read by ES candidate recording).
+        components: dict[str, Any] = {"horizon": traj_length}
+        self.last_components = components
         score = jnp.ones((num_ego_trajectories,), dtype=jnp.float32)
         if len(self._weighted_metrics) > 0:
             score = jnp.zeros((num_ego_trajectories,), dtype=jnp.float32)
@@ -737,20 +746,25 @@ class Scorer:
                 if metric_name == "follow_lane":
                     lane_score = self.compute_lane_score(ego_trajectories)
                     score = score + weight * lane_score
+                    components["follow_lane"] = lane_score
                 elif metric_name == "progress":
                     progress_score = self.compute_progress_score(ego_trajectories)
                     score = score + weight * progress_score
+                    components["progress"] = progress_score
                 elif metric_name == "speed":
                     speed_score = self.compute_speed_score(ego_trajectories)
                     score = score + weight * speed_score
+                    components["speed"] = speed_score
                 elif metric_name == "overtake":
                     overtake_score = self.compute_overtake_score(
                         ego_trajectories, object_trajectories
                     )
                     score = score + weight * overtake_score
+                    components["overtake"] = overtake_score
                 elif metric_name == "goal":
                     goal_score = self.compute_goal_score(ego_trajectories)
                     score = score + weight * goal_score
+                    components["goal"] = goal_score
             score = score / total_weight
         if "collision" in self._multiplicative_metrics:
             if scorer_helpers.uses_occupancy_collision(self.world_model_forecaster):
@@ -762,11 +776,15 @@ class Scorer:
                 )
                 collision_score = jnp.asarray(occ_score, dtype=jnp.float32)
             elif scorer_helpers.uses_independent_mode_collision(self.world_model_forecaster):
-                ind_score, _ = self.world_model_forecaster.score_independent_mode_collision(
+                ind_score, ind_debug = self.world_model_forecaster.score_independent_mode_collision(
                     np.asarray(ego_trajectories, dtype=np.float32),
                     world_idx=int(world_idx),
                 )
                 collision_score = jnp.asarray(ind_score, dtype=jnp.float32)
+                if isinstance(ind_debug, dict):
+                    for key in ("max_agent_collision_prob", "argmax_risk_agent"):
+                        if key in ind_debug:
+                            components[f"wm_{key}"] = ind_debug[key]
             else:
                 collision_score = self.compute_collision_score(
                     ego_trajectories,
@@ -774,18 +792,23 @@ class Scorer:
                     collision_object_masks,
                 )
             score = score * collision_score
+            components["collision"] = collision_score
         if "offroad" in self._multiplicative_metrics:
             offroad_score = self.compute_offroad_score_v2(
                 ego_trajectories, sim_state=sim_state, timestep=timestep, world_idx=world_idx
             )
             score = score * offroad_score
+            components["offroad"] = offroad_score
         if "direction" in self._multiplicative_metrics:
             direction_score = self.compute_direction_score(ego_trajectories)
             score = score * direction_score
+            components["direction"] = direction_score
         if "tl_violation" in self._multiplicative_metrics:
             tl_score = self.compute_tl_violation_score(
                 ego_trajectories, sim_state=sim_state, timestep=timestep, world_idx=world_idx
             )
             score = score * tl_score
+            components["tl_violation"] = tl_score
+        components["total"] = score
 
         return score

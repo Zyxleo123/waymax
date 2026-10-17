@@ -183,8 +183,40 @@ def _parse_args() -> argparse.Namespace:
         help="RNG seed offset for Gaussian collision sampling (plus timestep).",
     )
     parser.add_argument("--save_cache", type=str, default="none", choices=["none", "all", "success", "failure"])
+    parser.add_argument(
+        "--save_es_candidates",
+        action="store_true",
+        default=False,
+        help="Diffusion-ES only: save every evaluated ES candidate per replan to <output_dir>/es_candidates "
+        "(es_discriminator.es_candidate_recorder). Planning is unchanged.",
+    )
+    parser.add_argument(
+        "--discriminator_ckpt",
+        type=str,
+        default=None,
+        help="Diffusion-ES only: replace the handcrafted reward at every ES iteration (elites and final "
+        "selection) with this WM-conditioned discriminator (es_discriminator.real_es.closed_loop). "
+        "Unset = handcrafted reward, unchanged.",
+    )
+    parser.add_argument(
+        "--discriminator_wm_ckpt",
+        type=str,
+        default="/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/"
+        "multiFuture_GaussianWorldModel_20260916_200620/epoch_0450.pt",
+        help="Frozen multi-future Gaussian WM feeding the discriminator (reused from the planner when "
+        "--other_agent_forecast wm loads the same checkpoint).",
+    )
+    parser.add_argument("--discriminator_device", type=str, default="auto")
     parser.add_argument("--start_from", type=str, default=None)
     parser.add_argument("--target_scenario_path", type=str, default=None)
+    parser.add_argument(
+        "--other_agents",
+        type=str,
+        default="log",
+        choices=["log", "idm"],
+        help="Non-ego agents: 'log' replays the log; 'idm' runs Waymax's default IDMRoutePolicy "
+        "on every non-SDC object in a closed loop with the planner (simulation/idm_closed_loop.py).",
+    )
     return parser.parse_args()
 
 
@@ -641,9 +673,45 @@ def main(args: argparse.Namespace) -> None:
         )
     elif args.planner == "log-replay":
         planner = None
+    if getattr(args, "discriminator_ckpt", None):
+        _attach_learned_reward(args, planner)
     if getattr(args, "mf_collision_method", None):
         _write_mf_experiment_config(args)
     run(args, planner, log_replay=(args.planner == "log-replay"))
+
+
+def _attach_learned_reward(args: argparse.Namespace, planner) -> None:
+    import atexit
+
+    if args.planner != "es" or not hasattr(planner, "learned_scorer"):
+        raise ValueError("--discriminator_ckpt requires --planner es (Diffusion-ES).")
+    if getattr(args, "save_es_candidates", False):
+        raise ValueError("--save_es_candidates records handcrafted components; not with --discriminator_ckpt.")
+    from es_discriminator.real_es.closed_loop import LearnedESScorer
+
+    forecaster = getattr(planner, "world_model_forecaster", None)
+    scorer = LearnedESScorer(
+        args.discriminator_ckpt,
+        wm_checkpoint=args.discriminator_wm_ckpt,
+        planner_forecaster=forecaster,
+        planner_wm_checkpoint=args.world_model_ckpt if forecaster is not None else None,
+        device=_resolve_world_model_device(args.discriminator_device),
+        expected_calls_per_replan=int(args.num_es_iterations) + 1,
+        stats_path=os.path.join(args.output_dir, "discriminator_stats.json"),
+    )
+    planner.learned_scorer = scorer
+    atexit.register(scorer.close)
+    info = {**scorer.describe(), "other_agent_forecast": args.other_agent_forecast,
+            "planner_world_model_ckpt": args.world_model_ckpt, "wm_backend": args.wm_backend,
+            "wm_planning_mode": getattr(args, "wm_planning_mode", None),
+            "handcrafted_scorer_used": False, "seed": int(args.seed),
+            "es": {"population_size": args.population_size, "elite_size": args.elite_size,
+                   "num_es_iterations": args.num_es_iterations, "resample_timesteps": args.resample_timesteps},
+            "timestamp": datetime.now().isoformat(timespec="seconds")}
+    with open(os.path.join(args.output_dir, "discriminator_config.json"), "w") as f:
+        json.dump(info, f, indent=2)
+    print(f"[discriminator] learned reward {args.discriminator_ckpt} ({scorer.scorer.variant}); "
+          f"WM source={scorer.wm_source}; forecast={args.other_agent_forecast}")
 
 
 def _write_mf_experiment_config(args: argparse.Namespace) -> None:
@@ -688,6 +756,7 @@ def _write_mf_experiment_config(args: argparse.Namespace) -> None:
         "number_of_scenes": num_scenes,
         "target_scenario_path": args.target_scenario_path,
         "num_worlds": args.num_worlds,
+        "other_agents": args.other_agents,
         "replan_interval_steps": args.replan_interval_steps,
         "output_dir": args.output_dir,
         "timestamp": datetime.now().isoformat(timespec="seconds"),

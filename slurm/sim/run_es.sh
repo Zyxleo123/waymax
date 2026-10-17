@@ -27,10 +27,12 @@ SCRATCH="/zfsauton/scratch/sbellad"
 IMMEDIATE_ROOT="${SCRATCH}/immediate_exp"
 WM_SIM_ROOT="${SCRATCH}/world_model_sim"
 FM_SIM_ROOT="${SCRATCH}/Flow_matching_sim"
+DIFF_ES_SIM_ROOT="${SCRATCH}/Diffusion_ES_sim"
 WOMD_TF_ROOT="/zfsauton/datasets/womd/tf_example"
 LANE_GRAPH_DIR="/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
-FAIL1500_SUBSET_DIR="${IMMEDIATE_ROOT}/es_failure_subset_n1500_seed0"
-DIFFUSION_CKPT="${SCRATCH}/diffusion/diffusion_baseline_baseline_20260810_144559/epoch_0500"
+FAIL1500_SUBSET_DIR="${DIFF_ES_SIM_ROOT}/es_failure_subset_n1500_seed0"
+VAL10_TFRECORD_DIR="${SCRATCH}/womd_val_shards00_09"
+DIFFUSION_CKPT="${SCRATCH}/train_diffusion/diffusion_baseline_baseline_20260810_144559/epoch_0500"
 FM_CKPT="/zfsauton/scratch/mineuih/waymax_rs/checkpoints/pretrain_flow_matching/pretrain_fm_policy_20260828_011255/epoch_0500"
 DET_WM_CKPT="${SCRATCH}/world_model/ckpts/world_model_20260912_170741/epoch_0500.pt"
 MF_WM_CKPT="${SCRATCH}/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20260916_200620/epoch_0450.pt"
@@ -40,9 +42,15 @@ WAYMAX_ENV="${SCRATCH}/conda_envs/waymax_rs"
 
 usage() {
   cat <<'EOF'
-Usage: run_es.sh --subset {trainval|fail1500|probe250} --planner {diffusion|fm} --forecast F [options]
+Usage: run_es.sh --subset {trainval|fail1500|probe250|val10} --planner {diffusion|fm} --forecast F [options]
+
+  val10 = WOMD validation shards 00000-00009 (2916 scenes; 2895 run, since each
+          shard's leftover partial batch of num_worlds is skipped)
 
   --forecast F          cv | gt | wm_det | wm_mf | wm_gau | wm_gau_mean   (wm = wm_det)
+  --other_agents A      log (default, log replay) | idm (closed loop, Waymax default IDM on all
+                        non-SDC objects; names get "IDM_"; fail1500 IDM runs go to
+                        Diffusion_ES_sim / Flow_matching_sim)
   --mf_mode M           wm_mf scoring: expected_independent (default) | top1 | worst_case_independent
   --mf_collision C      wm_mf collision ablation: mean_uniform | mean_learned | gaussian_uniform | gaussian_learned
   --M N                 samples per mode for gaussian_* (default 8)
@@ -63,6 +71,12 @@ Usage: run_es.sh --subset {trainval|fail1500|probe250} --planner {diffusion|fm} 
   --num_collision_worlds N  wm_gau Monte-Carlo samples (default 8)
   --tag_suffix S        probe250: appended to the run tag (Phase-2 config name)
   --run_suffix S        appended to the run name
+  --disc_ckpt PATH      Diffusion-ES with the learned WM-conditioned discriminator as the complete ES
+                        reward (handcrafted scorer bypassed). Run name is es_diffusion_[IDM_]discriminator
+                        (+ _fail1500 / _val10); outputs go to es_discriminator/closed_loop/ unless --exp_root.
+  --disc_name N         unused for paths (kept for older scripts); checkpoint path is what matters
+  --exp_root PATH       put EXP_DIR and logs under PATH/<run_name> (overrides Diffusion_ES_sim /
+                        es_discriminator/closed_loop / etc.)
   --probe_n N / --probe_seed S   probe250 subset (default 250 / 0)
   --print_cmd           print run name, dirs and simulation command(s); run nothing
   --print_paths         print run name and dirs only (used by the submit scripts)
@@ -77,12 +91,17 @@ RESAMPLE_NUM_STEPS=20 RESAMPLE_T_START=0.2 FM_NUM_STEPS=50 FM_SOLVER=euler RESAM
 WM_REFRESH_STEPS=10 WM_CKPT_OVERRIDE="" NUM_COLLISION_WORLDS_OVERRIDE="" TAG_SUFFIX="" RUN_SUFFIX=""
 PROBE_N=250 PROBE_SEED=0 PRINT_MODE=""
 REPLAN_INTERVAL_STEPS=10 COLLISION_SAMPLE_SEED=0 WORLD_MODEL_DEVICE=auto MAX_RETRIES=3
+OTHER_AGENTS=log
+DISC_CKPT="" DISC_NAME=safety_progress_full_gaussian_wm
+EXP_ROOT_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --subset) need "$@"; SUBSET="$2"; shift 2 ;;
     --planner) need "$@"; PLANNER="$2"; shift 2 ;;
     --forecast) need "$@"; FORECAST="$2"; shift 2 ;;
+    --other_agents) need "$@"; OTHER_AGENTS="$2"; shift 2 ;;
+    --exp_root) need "$@"; EXP_ROOT_OVERRIDE="$2"; shift 2 ;;
     --mf_mode) need "$@"; MF_MODE="$2"; shift 2 ;;
     --mf_collision) need "$@"; MF_COLLISION="$2"; shift 2 ;;
     --M) need "$@"; MF_M="$2"; shift 2 ;;
@@ -104,6 +123,8 @@ while [[ $# -gt 0 ]]; do
     --num_collision_worlds) need "$@"; NUM_COLLISION_WORLDS_OVERRIDE="$2"; shift 2 ;;
     --tag_suffix) need "$@"; TAG_SUFFIX="$2"; shift 2 ;;
     --run_suffix) need "$@"; RUN_SUFFIX="$2"; shift 2 ;;
+    --disc_ckpt) need "$@"; DISC_CKPT="$2"; shift 2 ;;
+    --disc_name) need "$@"; DISC_NAME="$2"; shift 2 ;;
     --probe_n) need "$@"; PROBE_N="$2"; shift 2 ;;
     --probe_seed) need "$@"; PROBE_SEED="$2"; shift 2 ;;
     --print_cmd) PRINT_MODE=cmd; shift ;;
@@ -116,8 +137,8 @@ done
 set --
 
 case "${SUBSET}" in
-  trainval|fail1500|probe250) ;;
-  *) echo "ERROR: --subset must be trainval|fail1500|probe250 (got '${SUBSET}')" >&2; exit 1 ;;
+  trainval|fail1500|probe250|val10) ;;
+  *) echo "ERROR: --subset must be trainval|fail1500|probe250|val10 (got '${SUBSET}')" >&2; exit 1 ;;
 esac
 case "${PLANNER}" in
   diffusion|diff|es) PLANNER=es ;;
@@ -125,6 +146,10 @@ case "${PLANNER}" in
   *) echo "ERROR: --planner must be diffusion|fm (got '${PLANNER}')" >&2; exit 1 ;;
 esac
 [[ "${FORECAST}" == "wm" ]] && FORECAST=wm_det
+case "${OTHER_AGENTS}" in
+  log|idm) ;;
+  *) echo "ERROR: --other_agents must be log|idm (got '${OTHER_AGENTS}')" >&2; exit 1 ;;
+esac
 
 # ---- forecast / world model --------------------------------------------------
 WM_BACKEND=production WORLD_MODEL_CKPT="" NUM_COLLISION_WORLDS=1 COLLISION_REDUCE=mean WM_PLANNING_MODE=""
@@ -173,6 +198,7 @@ esac
 if [[ "${OTHER_AGENT_FORECAST}" == "wm" ]] && [[ "${SUBSET}" == "trainval" || "${WM_REFRESH_STEPS}" != "10" ]]; then
   FORECAST_TAG="${FORECAST_TAG}_r${WM_REFRESH_STEPS}"
 fi
+[[ "${OTHER_AGENTS}" == "idm" ]] && FORECAST_TAG="IDM_${FORECAST_TAG}"
 
 # Budget tag appended to trainval/fail1500 names only when it differs from the
 # defaults those runs were made with (FM fail1500 names always carry it).
@@ -189,6 +215,11 @@ fm_budget_tag() {
   echo "${tag}"
 }
 
+if [[ -n "${DISC_CKPT}" ]]; then
+  [[ "${PLANNER}" == "es" ]] || { echo "ERROR: --disc_ckpt requires --planner diffusion" >&2; exit 1; }
+  [[ -z "${MF_COLLISION}" ]] || { echo "ERROR: --disc_ckpt replaces the reward; drop --mf_collision" >&2; exit 1; }
+fi
+
 RUN_STAMP="${RUN_STAMP:-$(date +%Y%m%d_%H%M%S)}"
 TARGET_JSON=""
 SPLITS=(training)
@@ -197,7 +228,10 @@ SPLITS=(training)
 case "${SUBSET}" in
   trainval)
     NUM_WORLDS="${NUM_WORLDS:-5}"
-    if [[ "${PLANNER}" == "es" ]]; then
+    if [[ -n "${DISC_CKPT}" ]]; then
+      RUN_NAME="es_diffusion_discriminator"
+      [[ "${OTHER_AGENTS}" == "idm" ]] && RUN_NAME="es_diffusion_IDM_discriminator"
+    elif [[ "${PLANNER}" == "es" ]]; then
       RUN_NAME="es_diffusion_${FORECAST_TAG}$(diff_budget_tag)"
     else
       RUN_NAME="es_fm_${FORECAST_TAG}"
@@ -213,17 +247,22 @@ case "${SUBSET}" in
     ;;
   fail1500)
     NUM_WORLDS="${NUM_WORLDS:-5}"
-    if [[ "${PLANNER}" == "es" ]]; then
+    if [[ -n "${DISC_CKPT}" ]]; then
+      RUN_NAME="es_diffusion_discriminator_fail1500"
+      [[ "${OTHER_AGENTS}" == "idm" ]] && RUN_NAME="es_diffusion_IDM_discriminator_fail1500"
+    elif [[ "${PLANNER}" == "es" ]]; then
       RUN_NAME="es_diffusion_${FORECAST_TAG}_fail1500$(diff_budget_tag)"
     else
       RUN_NAME="es_fm_${FORECAST_TAG}_fail1500$(fm_budget_tag)"
     fi
     [[ -n "${RUN_SUFFIX}" ]] && RUN_NAME="${RUN_NAME}_${RUN_SUFFIX}"
     if [[ "${PLANNER}" == "es_fm" ]]; then EXP_ROOT="${FM_SIM_ROOT}"
+    elif [[ "${OTHER_AGENTS}" == "idm" ]]; then EXP_ROOT="${DIFF_ES_SIM_ROOT}"
     elif [[ "${OTHER_AGENT_FORECAST}" == "wm" ]]; then EXP_ROOT="${WM_SIM_ROOT}"
     else EXP_ROOT="${IMMEDIATE_ROOT}"; fi
     EXP_DIR="${EXP_ROOT}/${RUN_NAME}"
     LOG_DIR="${EXP_ROOT}/logs"
+    [[ "${OTHER_AGENTS}" == "idm" ]] && LOG_DIR="${EXP_ROOT}/logs_IDM"
     if [[ -n "${MF_COLLISION}" ]]; then
       case "${MF_COLLISION}" in
         mean_uniform|mean_learned) MF_VARIANT="${MF_COLLISION}" MF_M=8 ;;
@@ -242,10 +281,34 @@ case "${SUBSET}" in
     TFRECORD_DIR="${FAIL1500_SUBSET_DIR}/tfrecords"
     TARGET_JSON="${FAIL1500_SUBSET_DIR}/target_scenarios.json"
     ;;
+  val10)
+    NUM_WORLDS="${NUM_WORLDS:-5}"
+    if [[ -n "${DISC_CKPT}" ]]; then
+      RUN_NAME="es_diffusion_discriminator_val10"
+      [[ "${OTHER_AGENTS}" == "idm" ]] && RUN_NAME="es_diffusion_IDM_discriminator_val10"
+      EXP_ROOT="${DIFF_ES_SIM_ROOT}"
+    elif [[ "${PLANNER}" == "es" ]]; then
+      RUN_NAME="es_diffusion_${FORECAST_TAG}_val10$(diff_budget_tag)"
+      EXP_ROOT="${DIFF_ES_SIM_ROOT}"
+    else
+      RUN_NAME="es_fm_${FORECAST_TAG}_val10$(fm_budget_tag)"
+      EXP_ROOT="${FM_SIM_ROOT}"
+    fi
+    [[ -n "${RUN_SUFFIX}" ]] && RUN_NAME="${RUN_NAME}_${RUN_SUFFIX}"
+    EXP_DIR="${EXP_ROOT}/${RUN_NAME}"
+    LOG_DIR="${EXP_ROOT}/logs_val10"
+    [[ "${OTHER_AGENTS}" == "idm" ]] && LOG_DIR="${EXP_ROOT}/logs_val10_IDM"
+    LOG_FILE="${LOG_DIR}/${RUN_NAME}_${RUN_STAMP}.log"
+    TFRECORD_DIR="${VAL10_TFRECORD_DIR}"
+    SPLITS=(validation)
+    ;;
   probe250)
     NUM_WORLDS="${NUM_WORLDS:-1}"
     PROBE_SUBSET_DIR="${FM_SIM_ROOT}/fm_hparam_probe_n${PROBE_N}_seed${PROBE_SEED}"
-    if [[ "${PLANNER}" == "es" ]]; then
+    if [[ -n "${DISC_CKPT}" ]]; then
+      RUN_NAME="es_diffusion_discriminator_probe250"
+      [[ "${OTHER_AGENTS}" == "idm" ]] && RUN_NAME="es_diffusion_IDM_discriminator_probe250"
+    elif [[ "${PLANNER}" == "es" ]]; then
       RUN_NAME="diff_${FORECAST_TAG}_baseline_pop${POPULATION_SIZE}_it${NUM_ES_ITERATIONS}_rs${RESAMPLE_TIMESTEPS}"
     else
       RUN_NAME="fm_${FORECAST_TAG}_t${RESAMPLE_T_START}_pop${POPULATION_SIZE}_it${NUM_ES_ITERATIONS}_rs${RESAMPLE_NUM_STEPS}_n${FM_NUM_STEPS}_${FM_SOLVER}"
@@ -259,6 +322,27 @@ case "${SUBSET}" in
     TARGET_JSON="${PROBE_SUBSET_DIR}/target_scenarios.json"
     ;;
 esac
+if [[ -n "${DISC_CKPT}" ]]; then
+  DISC_ROOT="${SCRATCH}/es_discriminator/closed_loop"
+  EXP_DIR="${DISC_ROOT}/${RUN_NAME}"
+  LOG_DIR="${DISC_ROOT}/logs"
+  if [[ "${SUBSET}" == "trainval" ]]; then
+    LOG_FILE="${LOG_DIR}/${RUN_NAME}_train_val_shards00_01_${RUN_STAMP}.log"
+    TFRECORD_DIR="${DISC_ROOT}/tfrecord_shards_00_01_${RUN_NAME}_${RUN_STAMP}"
+  else
+    LOG_FILE="${LOG_DIR}/${RUN_NAME}_${RUN_STAMP}.log"
+  fi
+fi
+if [[ -n "${EXP_ROOT_OVERRIDE}" ]]; then
+  EXP_DIR="${EXP_ROOT_OVERRIDE}/${RUN_NAME}"
+  LOG_DIR="${EXP_ROOT_OVERRIDE}/logs"
+  [[ "${OTHER_AGENTS}" == "idm" ]] && LOG_DIR="${EXP_ROOT_OVERRIDE}/logs_IDM"
+  if [[ "${SUBSET}" == "trainval" ]]; then
+    LOG_FILE="${LOG_DIR}/${RUN_NAME}_train_val_shards00_01_${RUN_STAMP}.log"
+  else
+    LOG_FILE="${LOG_DIR}/${RUN_NAME}_${RUN_STAMP}.log"
+  fi
+fi
 if [[ -n "${MF_COLLISION}" && "${SUBSET}" != "fail1500" ]]; then
   echo "ERROR: --mf_collision is only wired for --subset fail1500" >&2
   exit 1
@@ -291,10 +375,12 @@ build_cmd() {
     --num_es_iterations "${NUM_ES_ITERATIONS}"
     --replan_interval_steps "${REPLAN_INTERVAL_STEPS}"
     --other_agent_forecast "${OTHER_AGENT_FORECAST}"
+    --other_agents "${OTHER_AGENTS}"
     --visualize_mode none
     --tag "$(split_tag "${split}")"
   )
   [[ -n "${TARGET_JSON}" ]] && CMD+=(--target_scenario_path "${TARGET_JSON}")
+  [[ -n "${DISC_CKPT}" ]] && CMD+=(--discriminator_ckpt "${DISC_CKPT}")
   if [[ "${PLANNER}" == "es" ]]; then
     CMD+=(--diffusion_ckpt_path "${DIFFUSION_CKPT}" --resample_timesteps "${RESAMPLE_TIMESTEPS}")
   else
@@ -350,9 +436,17 @@ if [[ "${SUBSET}" == "trainval" ]]; then
                validation/validation_tfexample.tfrecord-00000-of-00150 validation/validation_tfexample.tfrecord-00001-of-00150; do
     ln -sfn "${WOMD_TF_ROOT}/${shard}" "${TFRECORD_DIR}/${shard}"
   done
+elif [[ "${SUBSET}" == "val10" ]]; then
+  # Shared by concurrent jobs: only create links that are missing.
+  mkdir -p "${TFRECORD_DIR}/validation"
+  for i in $(seq -f '%05g' 0 9); do
+    shard="validation/validation_tfexample.tfrecord-${i}-of-00150"
+    [[ -L "${TFRECORD_DIR}/${shard}" ]] || ln -s "${WOMD_TF_ROOT}/${shard}" "${TFRECORD_DIR}/${shard}" 2>/dev/null || true
+  done
 fi
 
-required=("${LANE_GRAPH_DIR}" "${TFRECORD_DIR}/training")
+required=("${LANE_GRAPH_DIR}" "${TFRECORD_DIR}/${SPLITS[0]}")
+[[ -n "${DISC_CKPT}" ]] && required+=("${DISC_CKPT}")
 [[ -n "${TARGET_JSON}" ]] && required+=("${TARGET_JSON}")
 if [[ "${PLANNER}" == "es" ]]; then required+=("${DIFFUSION_CKPT}"); else required+=("${FM_CKPT}"); fi
 [[ "${OTHER_AGENT_FORECAST}" == "wm" ]] && required+=("${WORLD_MODEL_CKPT}")
@@ -388,6 +482,8 @@ fi
   echo " tfrecord_dir=${TFRECORD_DIR}"
   [[ -n "${TARGET_JSON}" ]] && echo " target_json=${TARGET_JSON}"
   echo " es: pop=${POPULATION_SIZE} elite=${ELITE_SIZE} iters=${NUM_ES_ITERATIONS} num_worlds=${NUM_WORLDS} seed=${SEED} num_scenarios=${NUM_SCENARIOS}"
+  echo " other_agents=${OTHER_AGENTS}"
+  [[ -n "${DISC_CKPT}" ]] && echo " reward: learned discriminator ${DISC_CKPT} (handcrafted scorer bypassed)"
   if [[ "${PLANNER}" == "es_fm" ]]; then
     echo " fm: t_start=${RESAMPLE_T_START} resample_num_steps=${RESAMPLE_NUM_STEPS} fm_num_steps=${FM_NUM_STEPS} solver=${FM_SOLVER}"
   else
@@ -408,6 +504,14 @@ for split in "${SPLITS[@]}"; do
   tag="$(split_tag "${split}")"
   log "# START split=${split} tag=${tag} time=$(date -Is)"
   resume_args=()
+  # val10 jobs can outlast one 2-day allocation: a resubmitted job continues the latest run.
+  if [[ "${SUBSET}" == "val10" ]]; then
+    prev_dir="$(ls -1dt "${EXP_DIR}/simulation_${PLANNER}_${split}_${tag}_"* 2>/dev/null | head -1 || true)"
+    if [[ -n "${prev_dir}" ]]; then
+      log "RESUME: continuing ${prev_dir}"
+      resume_args=(--start_from "${prev_dir}")
+    fi
+  fi
   attempt=0
   while true; do
     set +e
@@ -416,7 +520,7 @@ for split in "${SPLITS[@]}"; do
     set -e
     [[ "${py_rc}" -eq 0 ]] && break
     attempt=$((attempt + 1))
-    resume_dir="$(ls -1dt "${EXP_DIR}/simulation_${PLANNER}_${split}_${tag}_"* 2>/dev/null | head -1)"
+    resume_dir="$(ls -1dt "${EXP_DIR}/simulation_${PLANNER}_${split}_${tag}_"* 2>/dev/null | head -1 || true)"
     if (( attempt > MAX_RETRIES )) || [[ -z "${resume_dir}" ]]; then
       log "ERROR: python exited ${py_rc} (split=${split})"
       exit "${py_rc}"
