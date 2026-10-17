@@ -16,6 +16,58 @@ from .network import LatentMultiAgentWorldModel
 from .planning import pack_collision_worlds, score_independent_agent_collision
 
 
+class ModeProbStats:
+    """Running mean / std of the per-agent mode probabilities the planner scores with.
+
+    Counted over agents whose future is predicted (valid now, dynamic, not the
+    ego), once per WM forward pass. ``by_mode`` is per mode index k (the k-th
+    learned mode query); ``by_rank`` sorts each agent's probabilities first, so
+    rank 0 is the top-1 probability. ``raw`` is the classifier's own softmax
+    (temperature 1), ``tempered`` is what scoring uses.
+    """
+
+    def __init__(self) -> None:
+        self.num_forecasts = 0
+        self.num_agents = 0
+        self._sums: dict[str, np.ndarray] = {}
+
+    def _add(self, name: str, x: np.ndarray) -> None:
+        x = np.asarray(x, dtype=np.float64)
+        moments = np.stack([x.sum(axis=0), (x * x).sum(axis=0)])
+        if name in self._sums:
+            self._sums[name] += moments
+        else:
+            self._sums[name] = moments
+
+    def update(self, probs: dict[str, np.ndarray], rows: np.ndarray) -> None:
+        """probs: name -> [B, N, K]; rows: [B, N] bool, the agents to count."""
+        self.num_forecasts += 1
+        n = int(rows.sum())
+        if n == 0:
+            return
+        self.num_agents += n
+        for name, p in probs.items():
+            p = np.asarray(p, dtype=np.float64)[rows]                      # [n, K]
+            entropy = -(p * np.log(np.clip(p, 1e-12, None))).sum(axis=-1)  # nats
+            self._add(f"{name}/by_mode", p)
+            self._add(f"{name}/by_rank", -np.sort(-p, axis=-1))
+            self._add(f"{name}/entropy", entropy[:, None])
+            self._add(f"{name}/effective_modes", np.exp(entropy)[:, None])
+
+    def summary(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"num_forecasts": self.num_forecasts, "num_agents": self.num_agents}
+        n = max(self.num_agents, 1)
+        for key, (s1, s2) in sorted(self._sums.items()):
+            name, stat = key.split("/")
+            mean = s1 / n
+            std = np.sqrt(np.maximum(s2 / n - mean * mean, 0.0))
+            entry = {"mean": mean.tolist(), "std": std.tolist()}
+            if stat in ("entropy", "effective_modes"):
+                entry = {"mean": float(mean[0]), "std": float(std[0])}
+            out.setdefault(name, {})[stat] = entry
+        return out
+
+
 _DYNAMIC_TYPES = np.asarray(
     [
         int(ObjectTypeIds.VEHICLE.value),
@@ -65,6 +117,7 @@ class WorldModelForecaster:
         *,
         device: str | torch.device = "cpu",
         planning_mode: str | None = None,
+        mode_temperature: float = 1.0,
     ) -> None:
         self.config = config
         self.device = torch.device(device)
@@ -73,6 +126,20 @@ class WorldModelForecaster:
         self.planning_mode = canonicalize_planning_mode(planning_mode or config.planning_mode)
         self._cache: dict[tuple[int, int, int, float], dict[str, np.ndarray]] = {}
         self._last_collision_debug: dict[str, Any] | None = None
+        # Scoring uses softmax(mode_logits / mode_temperature); 1.0 = the classifier as trained.
+        self.mode_temperature = float(mode_temperature)
+        self.mode_stats = ModeProbStats()
+
+    @property
+    def mode_temperature(self) -> float:
+        return self._mode_temperature
+
+    @mode_temperature.setter
+    def mode_temperature(self, value: float) -> None:
+        if not float(value) > 0.0:
+            raise ValueError(f"mode_temperature must be > 0, got {value}")
+        self._mode_temperature = float(value)
+        self._cache.clear()  # cached probabilities were computed at the old temperature
 
     @classmethod
     def from_checkpoint(
@@ -105,6 +172,10 @@ class WorldModelForecaster:
 
     def clear_cache(self) -> None:
         self._cache.clear()
+
+    def mode_prob_stats(self) -> dict[str, Any]:
+        """Mode-probability statistics accumulated since construction (see ModeProbStats)."""
+        return {"mode_temperature": self.mode_temperature, **self.mode_stats.summary()}
 
     def _prepare_features(self, sim_state: Any, timestep: int) -> tuple[dict[str, torch.Tensor], dict[str, np.ndarray]]:
         cfg = self.config
@@ -370,8 +441,28 @@ class WorldModelForecaster:
             traj_length=traj_length,
             dt=dt,
         )
-        mode_probs = pred["mode_probs"].detach().float().cpu().numpy()
+        raw_probs = pred["mode_probs"].detach().float()
+        if self.mode_temperature == 1.0:
+            mode_probs_t = raw_probs
+        else:
+            # Invalid agents have all-zero probabilities; keep them zero.
+            valid = (raw_probs.sum(dim=-1, keepdim=True) > 0).to(raw_probs.dtype)
+            mode_probs_t = torch.softmax(pred["mode_logits"].detach().float() / self.mode_temperature, dim=-1) * valid
+        mode_probs = mode_probs_t.cpu().numpy()
+        raw_probs = raw_probs.cpu().numpy()
+        # Temperature does not change the argmax, so top-1 mode and top1_traj are unchanged.
         top1_mode = pred["top1_mode"].detach().cpu().numpy().astype(np.int32)
+        modeled_n = min(int(meta["modeled_agents"]), mode_probs.shape[1])
+        t_now = int(meta["timestep"])
+        rows = (
+            meta["valid"][:, :modeled_n, t_now]
+            & np.isin(meta["object_types"][:, :modeled_n], _DYNAMIC_TYPES)
+            & ~meta["is_sdc"][:, :modeled_n]
+            & (raw_probs[:, :modeled_n].sum(axis=-1) > 0)
+        )
+        self.mode_stats.update(
+            {"raw": raw_probs[:, :modeled_n], "tempered": mode_probs[:, :modeled_n]}, rows
+        )
         out = {
             "top1_traj": top1_traj,
             "masks": masks,
@@ -503,4 +594,4 @@ class WorldModelForecaster:
         }
 
 
-__all__ = ["WorldModelForecaster"]
+__all__ = ["ModeProbStats", "WorldModelForecaster"]

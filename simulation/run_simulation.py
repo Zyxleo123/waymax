@@ -162,6 +162,14 @@ def _parse_args() -> argparse.Namespace:
         "Only used by the production ScheduledWorldModelForecaster.",
     )
     parser.add_argument(
+        "--wm_mode_temperature",
+        type=float,
+        default=1.0,
+        help="multifuture WM only: mode probabilities used for collision scoring are "
+        "softmax(mode_logits / T). 1.0 = as trained; <1 sharpens towards the top mode, >1 flattens. "
+        "Mode-probability statistics are written to <output_dir>/wm_mode_prob_stats.json.",
+    )
+    parser.add_argument(
         "--num_collision_worlds",
         type=int,
         default=8,
@@ -287,6 +295,7 @@ def _load_world_model_forecaster(args: argparse.Namespace):
         os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
     backend = str(getattr(args, "wm_backend", "production")).strip().lower()
+    mode_temperature = float(getattr(args, "wm_mode_temperature", 1.0))
     repo_root = Path(__file__).resolve().parents[1]
     backend_roots = {
         "production": None,
@@ -324,12 +333,17 @@ def _load_world_model_forecaster(args: argparse.Namespace):
             forecaster.num_collision_worlds = 1
         if not hasattr(forecaster, "collision_reduce"):
             forecaster.collision_reduce = "any"
+        if backend == "multifuture":
+            forecaster.mode_temperature = mode_temperature
+    if mode_temperature != 1.0 and backend != "multifuture":
+        raise ValueError("--wm_mode_temperature is only supported with --wm_backend multifuture")
 
     print(
         f"[wm] backend={backend} loaded {args.world_model_ckpt} on {device}; "
         f"wm_refresh_steps={int(args.wm_refresh_steps)}; "
         f"num_collision_worlds={int(getattr(forecaster, 'num_collision_worlds', 1))}; "
-        f"collision_reduce={getattr(forecaster, 'collision_reduce', 'any')}"
+        f"collision_reduce={getattr(forecaster, 'collision_reduce', 'any')}; "
+        f"mode_temperature={getattr(forecaster, 'mode_temperature', 1.0)}"
     )
     return forecaster
 
@@ -628,6 +642,13 @@ def main(args: argparse.Namespace) -> None:
     elif args.planner == "log-replay":
         planner = None
     run(args, planner, log_replay=(args.planner == "log-replay"))
+
+    forecaster = getattr(planner, "world_model_forecaster", None)
+    if forecaster is not None and hasattr(forecaster, "mode_prob_stats"):
+        stats = forecaster.mode_prob_stats()
+        with open(os.path.join(args.output_dir, "wm_mode_prob_stats.json"), "w") as f:
+            json.dump(stats, f, indent=2)
+        print("[wm] mode probability stats:", json.dumps(stats))
 
 
 if __name__ == "__main__":

@@ -26,6 +26,8 @@
 #   sbatch --export=ALL,OFFROAD_MODE=margin_tiebreak slurm_es_fail1500_wm_mf.sh es_fm log "${CKPT}"
 #   # Diffusion ES: plans within PROGRESS_SLACK of the best score ranked by goal pace (adds _progslack<v>):
 #   sbatch --export=ALL,OFFROAD_MODE=margin_tiebreak,PROGRESS_SLACK=0.05 slurm_es_fail1500_wm_mf.sh es log "${CKPT}"
+#   # WM mode-classifier temperature (default 1 = as trained); non-default adds _T<v> to the run name:
+#   sbatch --export=ALL,WM_MODE_TEMPERATURE=0.1 slurm_es_fail1500_wm_mf.sh es log "${CKPT}"
 #   # Only part of the targets (e.g. one chunk per GPU; merge the summaries afterwards):
 #   sbatch --export=ALL,TARGET_JSON=/path/chunk0.json,RUN_SUFFIX=_c0 slurm_es_fail1500_wm_mf.sh es log "${CKPT}"
 set -euo pipefail
@@ -63,6 +65,12 @@ if [[ "${PROGRESS_SLACK}" != "0" ]]; then
   PROG_TAG="_progslack${PROGRESS_SLACK}"
 fi
 
+WM_MODE_TEMPERATURE="${WM_MODE_TEMPERATURE:-1}"
+TEMP_TAG=""
+if [[ "${WM_MODE_TEMPERATURE}" != "1" ]]; then
+  TEMP_TAG="_T${WM_MODE_TEMPERATURE}"
+fi
+
 ROOT="/zfsauton/scratch/ishanj/waymax_rs"
 EXP_ROOT="/zfsauton/scratch/ishanj/world_model_sim"
 
@@ -83,7 +91,7 @@ export PYTHONPATH="${ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 # Tag runs with the checkpoint folder + file, e.g. 20261005_092950_latest.
 WM_RUN="$(basename "$(dirname "${WORLD_MODEL_CKPT}")")"
 WM_TAG="${WM_RUN#multiFuture_GaussianWorldModel_}_$(basename "${WORLD_MODEL_CKPT}" .pt)"
-RUN_NAME="${PLANNER_TAG}_wm_mf_${WM_TAG}_expected_independent_${SIM_AGENTS}${ES_TAG}${OFF_TAG}${PROG_TAG}_fail1500${RUN_SUFFIX:-}"
+RUN_NAME="${PLANNER_TAG}_wm_mf_${WM_TAG}_expected_independent_${SIM_AGENTS}${ES_TAG}${OFF_TAG}${PROG_TAG}${TEMP_TAG}_fail1500${RUN_SUFFIX:-}"
 EXP_DIR="${EXP_ROOT}/${RUN_NAME}"
 LOG_FILE="${EXP_ROOT}/logs/${RUN_NAME}_$(date +%Y%m%d_%H%M%S).log"
 mkdir -p "${EXP_DIR}" "${EXP_ROOT}/logs"
@@ -95,7 +103,7 @@ for p in "${TARGET_JSON}" "${TFRECORD_DIR}/training" "${LANE_GRAPH_DIR}" "${WORL
   fi
 done
 
-echo "RUN_NAME=${RUN_NAME}  planner=${PLANNER}  sim_agents=${SIM_AGENTS}  es_iterations=${NUM_ES_ITERATIONS}  replan_interval=${REPLAN_INTERVAL_STEPS}  offroad_mode=${OFFROAD_MODE}  progress_slack=${PROGRESS_SLACK}  targets=${TARGET_JSON}  ckpt=${WORLD_MODEL_CKPT}" | tee -a "${LOG_FILE}"
+echo "RUN_NAME=${RUN_NAME}  planner=${PLANNER}  sim_agents=${SIM_AGENTS}  es_iterations=${NUM_ES_ITERATIONS}  replan_interval=${REPLAN_INTERVAL_STEPS}  offroad_mode=${OFFROAD_MODE}  progress_slack=${PROGRESS_SLACK}  wm_mode_temperature=${WM_MODE_TEMPERATURE}  targets=${TARGET_JSON}  ckpt=${WORLD_MODEL_CKPT}" | tee -a "${LOG_FILE}"
 
 CMD=(
   python "${ROOT}/simulation/run_simulation.py"
@@ -124,6 +132,7 @@ CMD=(
   --collision_sample_seed 0
   --wm_planning_mode expected_independent
   --offroad_mode "${OFFROAD_MODE}"
+  --wm_mode_temperature "${WM_MODE_TEMPERATURE}"
 )
 if [[ "${PLANNER}" == "es" ]]; then
   CMD+=(--es_progress_slack "${PROGRESS_SLACK}")
