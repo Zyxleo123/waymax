@@ -160,7 +160,7 @@ def _parse_args() -> argparse.Namespace:
         default=1.0,
         help="multifuture WM only: mode probabilities used for collision scoring are "
         "softmax(mode_logits / T). 1.0 = as trained; <1 sharpens towards the top mode, >1 flattens. "
-        "Mode-probability statistics are written to <output_dir>/wm_mode_prob_stats.json.",
+        "Mode-probability and ADE / FDE statistics are written to <output_dir>/wm_forecast_stats.json.",
     )
     parser.add_argument(
         "--num_collision_worlds",
@@ -328,6 +328,8 @@ def _load_world_model_forecaster(args: argparse.Namespace):
             forecaster.collision_reduce = "any"
         if backend == "multifuture":
             forecaster.mode_temperature = mode_temperature
+            if getattr(args, "output_dir", None):
+                forecaster.stats_path = os.path.join(args.output_dir, "wm_forecast_stats.json")
     if mode_temperature != 1.0 and backend != "multifuture":
         raise ValueError("--wm_mode_temperature is only supported with --wm_backend multifuture")
 
@@ -636,11 +638,9 @@ def main(args: argparse.Namespace) -> None:
     run(args, planner, log_replay=(args.planner == "log-replay"))
 
     forecaster = getattr(planner, "world_model_forecaster", None)
-    if forecaster is not None and hasattr(forecaster, "mode_prob_stats"):
-        stats = forecaster.mode_prob_stats()
-        with open(os.path.join(args.output_dir, "wm_mode_prob_stats.json"), "w") as f:
-            json.dump(stats, f, indent=2)
-        print("[wm] mode probability stats:", json.dumps(stats))
+    if forecaster is not None and hasattr(forecaster, "write_forecast_stats"):
+        forecaster.write_forecast_stats(os.path.join(args.output_dir, "wm_forecast_stats.json"))
+        print("[wm] forecast stats:", json.dumps(forecaster.forecast_stats_summary()))
 
 
 if __name__ == "__main__":

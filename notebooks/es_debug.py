@@ -99,8 +99,8 @@ def load_world_model(
     """Loads the WM forecaster through the same code path as ``run_simulation.py``.
 
     ``mode_temperature``: scoring uses softmax(mode_logits / T) (multifuture only). It can
-    also be changed later with ``wm.mode_temperature = T``; ``wm.mode_prob_stats()`` gives
-    the mean / std of the mode probabilities seen so far.
+    also be changed later with ``wm.mode_temperature = T``; ``wm.forecast_stats_summary()``
+    gives the mean / std of the mode probabilities and ADE / FDE seen so far.
     """
     from simulation.run_simulation import _load_world_model_forecaster
 

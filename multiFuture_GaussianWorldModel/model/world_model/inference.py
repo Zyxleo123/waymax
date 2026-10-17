@@ -16,31 +16,62 @@ from .network import LatentMultiAgentWorldModel
 from .planning import pack_collision_worlds, score_independent_agent_collision
 
 
-class ModeProbStats:
-    """Running mean / std of the per-agent mode probabilities the planner scores with.
+class ForecastStats:
+    """Running mean / std of what the planner gets from the WM, once per forward pass.
 
-    Counted over agents whose future is predicted (valid now, dynamic, not the
-    ego), once per WM forward pass. ``by_mode`` is per mode index k (the k-th
-    learned mode query); ``by_rank`` sorts each agent's probabilities first, so
-    rank 0 is the top-1 probability. ``raw`` is the classifier's own softmax
-    (temperature 1), ``tempered`` is what scoring uses.
+    Counted over agents whose future is predicted (valid now, dynamic, not the ego).
+
+    Mode probabilities, for ``raw`` (the classifier's own softmax, temperature 1) and
+    ``tempered`` (what collision scoring uses): ``by_mode`` per mode index k (the k-th
+    learned mode query); ``by_rank`` with each agent's probabilities sorted, so rank 0 is
+    the top-1 probability; ``entropy`` (nats) and ``effective_modes`` = exp(entropy).
+
+    Displacement errors (m) against the logged future, which is the agents' real future
+    under log-replay sim agents (not under IDM). Per agent, ADE averages the valid future
+    steps of the decoded horizon and FDE is taken at the last valid one: ``min_ade`` /
+    ``min_fde`` over modes, ``top1_*`` for the most probable mode (temperature does not
+    change it), ``expected_*`` = sum_k p_k * error_k, and ``p_best`` / ``nll_best`` = the
+    probability (and -log) given to the min-ADE mode. The last two depend on temperature.
+    ``error`` / ``<name>`` cover every agent; ``error_moving`` / ``<name>_moving`` only agents
+    whose logged position moves more than MOVING_DISP_M over the horizon (parked cars are
+    predicted near-perfectly and dominate the all-agent means).
     """
+
+    MOVING_DISP_M = 1.0
 
     def __init__(self) -> None:
         self.num_forecasts = 0
         self.num_agents = 0
+        self.num_agents_with_future = 0
+        self.horizon_s = 0.0
         self._sums: dict[str, np.ndarray] = {}
+        self._counts: dict[str, int] = {}
 
-    def _add(self, name: str, x: np.ndarray) -> None:
+    def _add(self, key: str, x: np.ndarray) -> None:
         x = np.asarray(x, dtype=np.float64)
+        if x.ndim == 1:
+            x = x[:, None]
+        if x.shape[0] == 0:
+            return
         moments = np.stack([x.sum(axis=0), (x * x).sum(axis=0)])
-        if name in self._sums:
-            self._sums[name] += moments
+        if key in self._sums:
+            self._sums[key] += moments
+            self._counts[key] += x.shape[0]
         else:
-            self._sums[name] = moments
+            self._sums[key] = moments
+            self._counts[key] = x.shape[0]
 
-    def update(self, probs: dict[str, np.ndarray], rows: np.ndarray) -> None:
-        """probs: name -> [B, N, K]; rows: [B, N] bool, the agents to count."""
+    def update(
+        self,
+        probs: dict[str, np.ndarray],
+        rows: np.ndarray,
+        traj_k: np.ndarray | None = None,
+        gt_xy: np.ndarray | None = None,
+        gt_valid: np.ndarray | None = None,
+        horizon_s: float = 0.0,
+    ) -> None:
+        """probs: name -> [B, N, K]; rows: [B, N] agents to count; traj_k [B, N, K, H, 2+]
+        decoded futures with index h <-> gt_xy [B, N, H, 2] / gt_valid [B, N, H] (h = 0 is now)."""
         self.num_forecasts += 1
         n = int(rows.sum())
         if n == 0:
@@ -51,20 +82,61 @@ class ModeProbStats:
             entropy = -(p * np.log(np.clip(p, 1e-12, None))).sum(axis=-1)  # nats
             self._add(f"{name}/by_mode", p)
             self._add(f"{name}/by_rank", -np.sort(-p, axis=-1))
-            self._add(f"{name}/entropy", entropy[:, None])
-            self._add(f"{name}/effective_modes", np.exp(entropy)[:, None])
+            self._add(f"{name}/entropy", entropy)
+            self._add(f"{name}/effective_modes", np.exp(entropy))
+        if traj_k is None or gt_xy is None:
+            return
+        pred = np.asarray(traj_k, dtype=np.float64)[rows][..., 1:, :2]    # [n, K, H-1, 2]
+        gt = np.asarray(gt_xy, dtype=np.float64)[rows][:, None, 1:]       # [n, 1, H-1, 2]
+        ok = np.asarray(gt_valid, dtype=bool)[rows][:, 1:]                # [n, H-1]
+        has = ok.any(axis=-1)
+        if not has.any():
+            return
+        pred, gt, ok = pred[has], gt[has], ok[has]
+        self.num_agents_with_future += int(has.sum())
+        self.horizon_s = max(self.horizon_s, float(horizon_s))
+        err = np.linalg.norm(pred - gt, axis=-1)                           # [m, K, H-1]
+        ade_k = (err * ok[:, None]).sum(-1) / ok.sum(-1)[:, None]          # [m, K]
+        last = (ok.shape[1] - 1) - np.argmax(ok[:, ::-1], axis=-1)         # last valid step
+        fde_k = np.take_along_axis(err, last[:, None, None], axis=-1)[..., 0]
+        best = ade_k.argmin(-1)
+        p_raw = np.asarray(probs["raw"], dtype=np.float64)[rows][has]
+        top1 = p_raw.argmax(-1)
+        start = np.asarray(gt_xy, dtype=np.float64)[rows][has][:, 0]                       # [m, 2] now
+        disp = np.where(ok, np.linalg.norm(gt[:, 0] - start[:, None], axis=-1), 0.0).max(-1)
+        moving = disp > self.MOVING_DISP_M
+        pick = lambda a, idx: np.take_along_axis(a, idx[:, None], axis=-1)[:, 0]  # noqa: E731
+        for suffix, sel in (("", slice(None)), ("_moving", moving)):
+            self._add(f"error{suffix}/min_ade", ade_k.min(-1)[sel])
+            self._add(f"error{suffix}/min_fde", fde_k.min(-1)[sel])
+            self._add(f"error{suffix}/top1_ade", pick(ade_k, top1)[sel])
+            self._add(f"error{suffix}/top1_fde", pick(fde_k, top1)[sel])
+            self._add(f"error{suffix}/ade_by_mode", ade_k[sel])
+            for name, p in probs.items():
+                p = np.asarray(p, dtype=np.float64)[rows][has]
+                w = p / np.clip(p.sum(-1, keepdims=True), 1e-12, None)
+                self._add(f"{name}{suffix}/expected_ade", (w * ade_k).sum(-1)[sel])
+                self._add(f"{name}{suffix}/expected_fde", (w * fde_k).sum(-1)[sel])
+                self._add(f"{name}{suffix}/p_best", pick(w, best)[sel])
+                self._add(f"{name}{suffix}/nll_best", -np.log(np.clip(pick(w, best), 1e-12, None))[sel])
 
     def summary(self) -> dict[str, Any]:
-        out: dict[str, Any] = {"num_forecasts": self.num_forecasts, "num_agents": self.num_agents}
-        n = max(self.num_agents, 1)
+        out: dict[str, Any] = {
+            "num_forecasts": self.num_forecasts,
+            "num_agents": self.num_agents,
+            "num_agents_with_future": self.num_agents_with_future,
+            "error_horizon_s": self.horizon_s,
+        }
         for key, (s1, s2) in sorted(self._sums.items()):
-            name, stat = key.split("/")
+            group, stat = key.split("/")
+            n = max(self._counts[key], 1)
             mean = s1 / n
             std = np.sqrt(np.maximum(s2 / n - mean * mean, 0.0))
-            entry = {"mean": mean.tolist(), "std": std.tolist()}
-            if stat in ("entropy", "effective_modes"):
-                entry = {"mean": float(mean[0]), "std": float(std[0])}
-            out.setdefault(name, {})[stat] = entry
+            if stat in ("by_mode", "by_rank", "ade_by_mode"):
+                entry = {"mean": mean.tolist(), "std": std.tolist(), "n": self._counts[key]}
+            else:
+                entry = {"mean": float(mean[0]), "std": float(std[0]), "n": self._counts[key]}
+            out.setdefault(group, {})[stat] = entry
         return out
 
 
@@ -128,7 +200,10 @@ class WorldModelForecaster:
         self._last_collision_debug: dict[str, Any] | None = None
         # Scoring uses softmax(mode_logits / mode_temperature); 1.0 = the classifier as trained.
         self.mode_temperature = float(mode_temperature)
-        self.mode_stats = ModeProbStats()
+        self.forecast_stats = ForecastStats()
+        # If set, forecast_stats_summary() is also written here every stats_every forward passes.
+        self.stats_path: str | Path | None = None
+        self.stats_every = 50
 
     @property
     def mode_temperature(self) -> float:
@@ -173,9 +248,9 @@ class WorldModelForecaster:
     def clear_cache(self) -> None:
         self._cache.clear()
 
-    def mode_prob_stats(self) -> dict[str, Any]:
-        """Mode-probability statistics accumulated since construction (see ModeProbStats)."""
-        return {"mode_temperature": self.mode_temperature, **self.mode_stats.summary()}
+    def forecast_stats_summary(self) -> dict[str, Any]:
+        """Mode-probability and ADE / FDE statistics accumulated so far (see ForecastStats)."""
+        return {"mode_temperature": self.mode_temperature, **self.forecast_stats.summary()}
 
     def _prepare_features(self, sim_state: Any, timestep: int) -> tuple[dict[str, torch.Tensor], dict[str, np.ndarray]]:
         cfg = self.config
@@ -460,9 +535,6 @@ class WorldModelForecaster:
             & ~meta["is_sdc"][:, :modeled_n]
             & (raw_probs[:, :modeled_n].sum(axis=-1) > 0)
         )
-        self.mode_stats.update(
-            {"raw": raw_probs[:, :modeled_n], "tempered": mode_probs[:, :modeled_n]}, rows
-        )
         out = {
             "top1_traj": top1_traj,
             "masks": masks,
@@ -484,7 +556,34 @@ class WorldModelForecaster:
                 )
                 trajs.append(traj_i)
             out["traj_k"] = np.stack(trajs, axis=2).astype(np.float32)
+
+        # Logged future at the decoded times (h * dt after now), for ADE / FDE.
+        stats_kw: dict[str, Any] = {}
+        if "traj_k" in out:
+            num_steps = meta["x"].shape[-1]
+            steps = t_now + np.rint(np.arange(int(traj_length)) * float(dt) / float(self.config.world_dt)).astype(int)
+            in_log = steps < num_steps
+            steps = np.minimum(steps, num_steps - 1)
+            stats_kw = dict(
+                traj_k=out["traj_k"][:, :modeled_n],
+                gt_xy=np.stack([meta["x"][:, :modeled_n][..., steps], meta["y"][:, :modeled_n][..., steps]], axis=-1),
+                gt_valid=meta["valid"][:, :modeled_n][..., steps] & in_log,
+                horizon_s=(int(traj_length) - 1) * float(dt),
+            )
+        self.forecast_stats.update(
+            {"raw": raw_probs[:, :modeled_n], "tempered": mode_probs[:, :modeled_n]}, rows, **stats_kw
+        )
+        if self.stats_path is not None and self.forecast_stats.num_forecasts % int(self.stats_every) == 0:
+            self.write_forecast_stats(self.stats_path)
         return out
+
+    def write_forecast_stats(self, path: str | Path) -> None:
+        import json
+
+        path = Path(path)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(self.forecast_stats_summary(), indent=2))
+        tmp.replace(path)
 
     def forecast(
         self,
@@ -594,4 +693,4 @@ class WorldModelForecaster:
         }
 
 
-__all__ = ["ModeProbStats", "WorldModelForecaster"]
+__all__ = ["ForecastStats", "WorldModelForecaster"]
