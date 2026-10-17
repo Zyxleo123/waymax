@@ -100,39 +100,6 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Init norm of each mode embedding row. Default sqrt(hidden_dim); 1.0 = legacy init.",
     )
-    p.add_argument(
-        "--mode_map_context",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="direct decoder: mode queries attend to the agent's nearest map/TL tokens before decoding.",
-    )
-    p.add_argument("--mode_context_keys", type=int, default=32, help="Nearest map/TL tokens per agent.")
-    p.add_argument("--mode_context_radius_m", type=float, default=30.0)
-    p.add_argument("--num_mode_context_layers", type=int, default=2)
-    p.add_argument(
-        "--wta_strategy",
-        type=str,
-        default="hard",
-        choices=["hard", "ewta"],
-        help="hard = regress only the min-ADE mode; ewta = regress the top-k modes per --ewta_schedule.",
-    )
-    p.add_argument(
-        "--ewta_schedule",
-        type=str,
-        default="6:0,4:50,2:100,1:150",
-        help="Evolving-WTA stages 'k:start_epoch,...'; k is clamped to num_modes. Used with --wta_strategy ewta.",
-    )
-    p.add_argument(
-        "--static_agents",
-        type=str,
-        default="compete",
-        choices=["compete", "all_modes", "fixed_mode"],
-        help="Static agents: compete = like any agent (legacy); all_modes = regress every mode, "
-        "no classifier loss; fixed_mode = always assign to --static_mode_index.",
-    )
-    p.add_argument("--static_speed_thresh", type=float, default=0.5, help="m/s, current speed.")
-    p.add_argument("--static_disp_thresh", type=float, default=1.0, help="m, max future displacement.")
-    p.add_argument("--static_mode_index", type=int, default=0)
     p.add_argument("--yaw_loss_weight", type=float, default=0.5)
     p.add_argument("--mode_cls_weight", type=float, default=1.0)
     p.add_argument("--collision_focus_radius_m", type=float, default=20.0)
@@ -178,21 +145,11 @@ def _make_config(args: argparse.Namespace) -> WorldModelConfig:
         agent_frame_decoding=args.agent_frame_decoding,
         decoder_type=args.decoder_type,
         mode_embed_scale=args.mode_embed_scale,
-        mode_map_context=args.mode_map_context,
-        mode_context_keys=args.mode_context_keys,
-        mode_context_radius_m=args.mode_context_radius_m,
-        num_mode_context_layers=args.num_mode_context_layers,
         yaw_loss_weight=args.yaw_loss_weight,
         mode_cls_weight=args.mode_cls_weight,
         collision_focus_radius_m=args.collision_focus_radius_m,
         collision_focus_weight=args.collision_focus_weight,
         planning_mode=args.planning_mode,
-        wta_strategy=args.wta_strategy,
-        ewta_schedule=args.ewta_schedule,
-        static_agents=args.static_agents,
-        static_speed_thresh=args.static_speed_thresh,
-        static_disp_thresh=args.static_disp_thresh,
-        static_mode_index=args.static_mode_index,
     )
 
 
@@ -249,33 +206,11 @@ def _per_mode_ade_fde_m(
     return ade_k, fde_k, has_future
 
 
-def _static_agent_mask(
-    batch: dict[str, torch.Tensor],
-    target_xy: torch.Tensor,
-    valid: torch.Tensor,
-    has_future: torch.Tensor,
-    config: WorldModelConfig,
-) -> torch.Tensor:
-    """[B, N] agents that are slow now and stay put over the supervised future."""
-    # agent_history features 2:4 = velocity / max_velocity at each history step.
-    speed = torch.linalg.vector_norm(batch["agent_history"][:, :, -1, 2:4].float(), dim=-1)
-    speed = speed * float(config.max_velocity)
-    disp = torch.linalg.vector_norm(target_xy, dim=-1) * float(config.max_range)
-    max_disp = torch.where(valid, disp, torch.zeros_like(disp)).amax(dim=-1)
-    return (
-        has_future
-        & (speed < float(config.static_speed_thresh))
-        & (max_disp < float(config.static_disp_thresh))
-    )
-
-
 def _loss_and_metrics(
     model: LatentMultiAgentWorldModel,
     batch: dict[str, torch.Tensor],
     config: WorldModelConfig,
-    wta_k: int = 1,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    """``wta_k`` = number of closest modes regressed per agent (1 = hard WTA)."""
     out = model(batch)
     pred_xy_k = out["pred_delta_xy_norm_k"]
     pred_yaw_k = out["pred_yaw_vec_k"]
@@ -297,48 +232,24 @@ def _loss_and_metrics(
     )
     best_mode = ade_k.argmin(dim=-1)
     pred_yaw = gather_mode(pred_yaw_k, best_mode)
-    num_modes = ade_k.shape[-1]
-
-    # Per-mode regression weights [B, N, K]; each agent's row sums to 1.
-    top_k = max(1, min(int(wta_k), num_modes))
-    if top_k > 1:
-        top_idx = ade_k.argsort(dim=-1)[..., :top_k]
-        mode_w = torch.zeros_like(ade_k).scatter_(-1, top_idx, 1.0 / top_k)
-    else:
-        mode_w = F.one_hot(best_mode, num_modes).to(ade_k.dtype)
-    cls_target = best_mode
-    agent_w = has_future.float() * agent_weight
-
-    static = _static_agent_mask(batch, target_xy, valid, has_future, config)
-    if config.static_agents == "all_modes":
-        mode_w = torch.where(static[..., None], torch.full_like(mode_w, 1.0 / num_modes), mode_w)
-        agent_w = agent_w * (~static).float()
-    elif config.static_agents == "fixed_mode":
-        cls_target = torch.where(static, torch.full_like(best_mode, int(config.static_mode_index)), best_mode)
-        mode_w = torch.where(static[..., None], F.one_hot(cls_target, num_modes).to(mode_w.dtype), mode_w)
+    sigma_xy = gather_mode(sigma_k, best_mode)
 
     # NLL in the frame sigma lives in (agent frame when agent_frame_decoding).
-    # fp32 + masking: losing modes with small sigma overflow fp16, and inf * 0 = nan.
-    heading_sc = out["agent_heading_sc"].float()
+    heading_sc = out["agent_heading_sc"]
     target_xy_agent = rotate_xy(target_xy, -heading_sc[:, :, None, 0], heading_sc[:, :, None, 1])
-    xy_loss_k = _gaussian_nll_xy(
-        out["pred_delta_xy_agent_norm_k"].float(),
-        target_xy_agent[:, :, None],
-        sigma_k.float(),
-    )
-    yaw_loss_k = 1.0 - (pred_yaw_k.float() * target_yaw[:, :, None]).sum(dim=-1).clamp(-1.0, 1.0)
-    use_mode = (mode_w > 0)[..., None]
-    xy_loss = torch.where(use_mode, xy_loss_k * mode_w[..., None], 0.0).sum(dim=2)
-    yaw_loss = torch.where(use_mode, yaw_loss_k * mode_w[..., None], 0.0).sum(dim=2)
+    pred_xy_agent = gather_mode(out["pred_delta_xy_agent_norm_k"], best_mode)
+    xy_loss = _gaussian_nll_xy(pred_xy_agent, target_xy_agent, sigma_xy)
+    yaw_loss = 1.0 - (pred_yaw * target_yaw).sum(dim=-1).clamp(-1.0, 1.0)
     xy_term = (xy_loss * time_weights).sum() / time_denom
     yaw_term = (yaw_loss * time_weights).sum() / time_denom
 
+    agent_w = has_future.float() * agent_weight
     agent_denom = agent_w.sum().clamp_min(1.0)
     ce = F.cross_entropy(
-        mode_logits.reshape(-1, mode_logits.shape[-1]).float(),
-        cls_target.reshape(-1),
+        mode_logits.reshape(-1, mode_logits.shape[-1]),
+        best_mode.reshape(-1),
         reduction="none",
-    ).reshape(cls_target.shape)
+    ).reshape(best_mode.shape)
     cls_term = (ce * agent_w).sum() / agent_denom
 
     loss = xy_term + float(config.yaw_loss_weight) * yaw_term + float(config.mode_cls_weight) * cls_term
@@ -385,8 +296,6 @@ def _loss_and_metrics(
         "sigma_x_m": sigma_x_m,
         "sigma_y_m": sigma_y_m,
         **sigma_horizon,
-        "static_frac": float(_masked_mean(static.float(), has_future.float()).detach().cpu()),
-        "wta_k": float(top_k),
     }
     return loss, metrics
 
@@ -412,8 +321,6 @@ METRIC_KEYS = (
     "sigma_y_m_3s",
     "sigma_x_m_5s",
     "sigma_y_m_5s",
-    "static_frac",
-    "wta_k",
 )
 
 
@@ -549,7 +456,6 @@ def main() -> None:
             drop_last=False,
         )
         model.train()
-        wta_k = config.ewta_k(epoch)
         running = {k: 0.0 for k in METRIC_KEYS}
         running_count = 0
         epoch_totals = {k: 0.0 for k in METRIC_KEYS}
@@ -569,7 +475,7 @@ def main() -> None:
             batch = _move_batch(batch, device)
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=use_amp):
-                loss, metrics = _loss_and_metrics(model, batch, config, wta_k=wta_k)
+                loss, metrics = _loss_and_metrics(model, batch, config)
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -607,8 +513,6 @@ def main() -> None:
                         "train/top1_conf": avg["top1_conf"],
                         "train/sigma_x_m": avg["sigma_x_m"],
                         "train/sigma_y_m": avg["sigma_y_m"],
-                        "train/static_frac": avg["static_frac"],
-                        "train/wta_k": avg["wta_k"],
                         "train/grad_norm": grad_norm,
                         "train/lr": float(optimizer.param_groups[0]["lr"]),
                     },
@@ -668,7 +572,6 @@ def main() -> None:
                 "val/sigma_y_m_3s": val_metrics["sigma_y_m_3s"],
                 "val/sigma_x_m_5s": val_metrics["sigma_x_m_5s"],
                 "val/sigma_y_m_5s": val_metrics["sigma_y_m_5s"],
-                "val/static_frac": val_metrics["static_frac"],
             },
             step=global_step,
         )
