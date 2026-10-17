@@ -46,7 +46,6 @@ from simulation.evaluation_utils import (  # noqa: E402
     check_goal_reaching,
     episode_failure_flags,
     infer_goals_from_sim_state,
-    road_tracked_offroad,
 )
 from simulation.planning_utils import apply_ego_replacements_to_expanded_state  # noqa: E402
 from viz import viz as viz_module  # noqa: E402
@@ -1200,8 +1199,7 @@ def run_closed_loop(
     rollout_t, overlap_al, offroad_al = rollout_t[:n_aligned], overlap_full[:n_aligned], offroad_full[:n_aligned]
     final_state = jax.tree_util.tree_map(lambda x: x[-1], rollout_out.state)
     rollout_traj = viz_module._index_pytree(final_state.sim_trajectory, 0)
-    offroad_waymax_al = offroad_al
-    offroad_al = road_tracked_offroad(rollout_out, rollout_t)[:, 0]
+    offroad_waymax_al = offroad_al  # offroad is Waymax's own metric (as in the simulation)
 
     goal_eval = check_goal_reaching(state, goal_xy_b2, start_timestep=start_timestep)
     reached = bool(goal_eval["reached"][0])

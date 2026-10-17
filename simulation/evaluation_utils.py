@@ -96,10 +96,6 @@ def rollout_predicted_trajectories_with_metrics(
     rollout_t = np.asarray(rollout_out.state.timestep)
     rollout_timestep = rollout_t.reshape(rollout_t.shape[0], -1)[:, 0]
 
-    if "offroad" in metric_timeseries:
-        metric_timeseries["offroad_waymax"] = metric_timeseries["offroad"]
-        metric_timeseries["offroad"] = road_tracked_offroad(rollout_out, rollout_timestep)
-
     return {
         "metric_timeseries": metric_timeseries,
         "metric_valid": metric_valid,
@@ -111,7 +107,8 @@ def rollout_predicted_trajectories_with_metrics(
 
 def road_tracked_offroad(rollout_out, rollout_timestep) -> np.ndarray:
     """[T_rollout, B] SDC offroad per rollout row, like Waymax's "offroad" metric but with the box height
-    following the road along the executed path.
+    following the road along the executed path. Diagnostic only: the reported "offroad" metric is
+    Waymax's own.
 
     Waymax's StateDynamics never updates z, so the ego keeps its height from the rollout start; on
     slopes and under bridges the nearest-edge lookup (which uses z) then picks the edges of another

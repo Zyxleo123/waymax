@@ -522,18 +522,13 @@ class Scorer:
         if edges is None:
             return None
 
-        # Box height per plan step: the road surface followed from the ego's height at the replan
-        # time (track_ground_z). A single height for the whole plan (as Waymax is_offroad assumes for
-        # one step) drifts off the road on slopes and picks the edges of bridges the plan passes under.
+        # Box height: the ego's logged height at the replan time, for the whole plan (as in es_WM and
+        # Waymax is_offroad). track_ground_z would follow the road surface instead; not used for now so
+        # results stay comparable with Waymax's metric (see scripts/audit_offroad_z.py).
         ego_idx = scorer_helpers.get_ego_idx(sim_state, world_idx)
         log_z = np.asarray(sim_state.log_trajectory.z[world_idx], dtype=np.float32)
         ego_z = float(log_z[ego_idx, int(np.clip(int(timestep), 0, int(log_z.shape[1]) - 1))])
-        z_pt = track_ground_z(
-            ego_trajectories[..., :2],
-            jnp.full((ego_trajectories.shape[0],), ego_z, jnp.float32),
-            self._cached_roadgraph(sim_state, world_idx, "ground", ground_points),
-        )
-        return _corner_signed_distances(ego_trajectories, *edges, z_pt[..., None, None])
+        return _corner_signed_distances(ego_trajectories, *edges, jnp.float32(ego_z))
 
     def _road_edges(self, sim_state, world_idx=0):
         """``road_edge_points`` of the state's roadgraph, cached per roadgraph so the boolean filtering
