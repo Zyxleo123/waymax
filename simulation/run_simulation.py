@@ -263,15 +263,18 @@ def _load_isolated_wm_forecaster(
     if (pkg_root / "occupancy").is_dir():
         _register_namespace(f"{alias}.occupancy", pkg_root / "occupancy")
 
-    # Package code uses absolute ``from data...`` / ``from occupancy...``.
-    saved_top = {
-        key: sys.modules[key]
-        for key in ("data", "occupancy")
-        if key in sys.modules
-    }
-    sys.modules["data"] = sys.modules[f"{alias}.data"]
-    if f"{alias}.occupancy" in sys.modules:
-        sys.modules["occupancy"] = sys.modules[f"{alias}.occupancy"]
+    # Package code uses absolute ``from data...`` / ``from occupancy...``. Set the repo's
+    # modules (and their submodules) aside while it imports: otherwise an already imported
+    # repo ``data.preprocess`` (e.g. by a planner) is reused and the WM gets the repo's map
+    # features instead of its own. Afterwards the package's modules leave the top-level names.
+    tops = ["data"] + (["occupancy"] if f"{alias}.occupancy" in sys.modules else [])
+
+    def _owned(key: str) -> bool:
+        return any(key == top or key.startswith(top + ".") for top in tops)
+
+    saved_top = {key: sys.modules.pop(key) for key in list(sys.modules) if _owned(key)}
+    for top in tops:
+        sys.modules[top] = sys.modules[f"{alias}.{top}"]
 
     try:
         inference = importlib.import_module(f"{alias}.model.world_model.inference")
@@ -291,11 +294,11 @@ def _load_isolated_wm_forecaster(
                 **load_kwargs,
             )
     finally:
-        for key in ("data", "occupancy"):
-            if key in saved_top:
-                sys.modules[key] = saved_top[key]
-            elif key in sys.modules and getattr(sys.modules[key], "__name__", "").startswith(alias):
-                del sys.modules[key]
+        for key in [k for k in sys.modules if _owned(k)]:
+            mod = sys.modules.pop(key)
+            if "." in key:
+                sys.modules.setdefault(f"{alias}.{key}", mod)
+        sys.modules.update(saved_top)
 
     return forecaster
 
