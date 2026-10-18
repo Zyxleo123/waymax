@@ -293,9 +293,10 @@ def _build_map_features(
 	origin_xy_b2: np.ndarray,
 	heading_b: np.ndarray,
 	cfg: PreprocessConfig,
+	rng: np.random.Generator,
 	allowed_types: tuple[int, ...] | None = None,
 	max_segments: int | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 	x_bm = np.asarray(state["roadgraph_points_x"])
 	y_bm = np.asarray(state["roadgraph_points_y"])
 	dir_x_bm = np.asarray(state["roadgraph_points_dir_x"])
@@ -307,7 +308,6 @@ def _build_map_features(
 	max_segments = int(cfg.max_segments) if max_segments is None else int(max_segments)
 	max_points_per_segment = int(cfg.max_points_per_segment)
 	feat_dim = 2 + 2 + int(cfg.num_map_type_classes)
-	sentinel_id = np.iinfo(np.int32).max
 
 	feats = np.zeros((x_bm.shape[0], max_segments, max_points_per_segment, feat_dim), dtype=np.float32)
 	valids = np.zeros((x_bm.shape[0], max_segments, max_points_per_segment), dtype=bool)
@@ -328,42 +328,39 @@ def _build_map_features(
 		if not np.any(valid_and_range):
 			continue
 
-		sort_ids = np.where(valid_and_range, point_ids, sentinel_id)
-		sort_dist = np.where(valid_and_range, dist, np.inf)
-		order = np.lexsort((sort_dist, sort_ids))
+		cand_ids = point_ids[valid_and_range]
+		cand_dist = dist[valid_and_range]
+		cand_xy = xy[valid_and_range]
+		cand_dirs = dirs[valid_and_range]
+		cand_types = types[valid_and_range]
 
-		sort_ids = sort_ids[order]
-		sort_xy = xy[order]
-		sort_dirs = dirs[order]
-		sort_types = types[order]
+		id_order = np.argsort(cand_ids, kind="stable")
+		sorted_ids = cand_ids[id_order]
+		sorted_dist = cand_dist[id_order]
+		unique_ids, starts, counts = np.unique(sorted_ids, return_index=True, return_counts=True)
+		mean_dist = np.add.reduceat(sorted_dist, starts) / np.maximum(counts.astype(np.float32), 1.0)
+		segment_rank = np.lexsort((unique_ids, mean_dist))
+		selected_ids = unique_ids[segment_rank[:max_segments]]
 
-		unique_ids, counts = np.unique(sort_ids, return_counts=True)
-		keep = unique_ids != sentinel_id
-		unique_ids = unique_ids[keep][:max_segments]
-		counts = counts[keep][:max_segments]
-		if unique_ids.size == 0:
-			continue
-
-		starts = np.concatenate([
-			np.array([0], dtype=np.int32),
-			np.cumsum(counts[:-1], dtype=np.int32),
-		], axis=0)
-		point_rank = np.arange(max_points_per_segment, dtype=np.int32)
-
-		for seg_idx, (seg_id, count, start) in enumerate(zip(unique_ids, counts, starts, strict=False)):
-			if seg_id == sentinel_id or count <= 0:
+		for seg_idx, seg_id in enumerate(selected_ids):
+			seg_local = np.flatnonzero(cand_ids == seg_id)
+			num_seg_points = int(seg_local.shape[0])
+			if num_seg_points <= 0:
 				continue
-			start = int(start)
-			end = min(start + max_points_per_segment, sort_xy.shape[0])
+			if num_seg_points > max_points_per_segment:
+				pick = rng.choice(seg_local, size=max_points_per_segment, replace=False)
+			else:
+				pick = rng.permutation(seg_local)
 
+			n_pick = int(pick.shape[0])
 			seg_xy = np.zeros((max_points_per_segment, 2), dtype=np.float32)
 			seg_dirs = np.zeros((max_points_per_segment, 2), dtype=np.float32)
 			seg_types = np.zeros((max_points_per_segment,), dtype=np.int32)
-			span = end - start
-			if span > 0:
-				seg_xy[:span] = sort_xy[start:end]
-				seg_dirs[:span] = sort_dirs[start:end]
-				seg_types[:span] = sort_types[start:end]
+			seg_valid = np.zeros((max_points_per_segment,), dtype=bool)
+			seg_xy[:n_pick] = cand_xy[pick]
+			seg_dirs[:n_pick] = cand_dirs[pick]
+			seg_types[:n_pick] = cand_types[pick]
+			seg_valid[:n_pick] = True
 
 			xy_rel = _rotate_xy(seg_xy - origin_xy_b2[batch_idx][None, :], heading_b[batch_idx]) / float(cfg.max_range)
 			dir_rel = _rotate_xy(seg_dirs, heading_b[batch_idx])
@@ -377,7 +374,6 @@ def _build_map_features(
 			)
 			type_oh = np.eye(int(cfg.num_map_type_classes), dtype=np.float32)[ty_safe]
 			seg_feat = np.concatenate([xy_rel.astype(np.float32), dir_rel.astype(np.float32), type_oh], axis=-1)
-			seg_valid = point_rank < int(count)
 			seg_feat = np.where(seg_valid[:, None], seg_feat, 0.0)
 
 			feats[batch_idx, seg_idx] = seg_feat
@@ -556,12 +552,13 @@ def _preprocess_single_cached_scenario(
 	subgoal_valid = np.ones_like(subgoal_xy[..., 0], dtype=bool)
 	remaining_timesteps = (goal_step_b - anchor_step_b) / 100.0
 
-	map_features, map_valid, map_ids = _build_map_features(state, origin_xy, anchor_yaw, cfg)
+	map_features, map_valid, map_ids = _build_map_features(state, origin_xy, anchor_yaw, cfg, rng)
 	lane_features, lane_valid, lane_ids = _build_map_features(
 		state,
 		origin_xy,
 		anchor_yaw,
 		cfg,
+		rng,
 		allowed_types=LANE_MAP_ELEMENT_TYPES,
 		max_segments=64
 	)
@@ -690,12 +687,13 @@ def _preprocess_single_cached_scenario_with_history(
 	subgoal_valid = np.ones_like(subgoal_xy[..., 0], dtype=bool)
 	remaining_timesteps = (goal_step_b - anchor_step_b) / 100.0
 
-	map_features, map_valid, map_ids = _build_map_features(state, origin_xy, anchor_yaw, cfg)
+	map_features, map_valid, map_ids = _build_map_features(state, origin_xy, anchor_yaw, cfg, rng)
 	lane_features, lane_valid, lane_ids = _build_map_features(
 		state,
 		origin_xy,
 		anchor_yaw,
 		cfg,
+		rng,
 		allowed_types=LANE_MAP_ELEMENT_TYPES,
 		max_segments=64
 	)

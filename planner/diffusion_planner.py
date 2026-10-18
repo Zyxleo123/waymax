@@ -23,18 +23,19 @@ class DiffusionPlanner(AbstractPlanner):
         preprocess_cfg: PreprocessConfig,
         population_size: int = 1,
         num_worlds: int = 1,
+        posthoc_repair: Any = None,
         **kwargs: Any,
     ) -> None:
         self.policy = policy
+        # planner/posthoc_repair.PosthocRepair: repair the sampled plan before it is executed.
+        self.posthoc_repair = posthoc_repair
         self.preprocess_cfg = preprocess_cfg
         self.num_worlds = int(num_worlds)
         self.population_size = int(population_size)
         self._compute_condition_jit = jax.jit(self.policy.compute_condition)
         self._sample_population_jit = jax.jit(
-            lambda *, cond_bf, inst_cond_bf, inst_cond_mask_bf, rng: self._sample_population(
+            lambda *, cond_bf, rng: self._sample_population(
                 cond_bf=cond_bf,
-                inst_cond_bf=inst_cond_bf,
-                inst_cond_mask_bf=inst_cond_mask_bf,
                 rng=rng,
             ),
         )
@@ -60,31 +61,23 @@ class DiffusionPlanner(AbstractPlanner):
             goal_step_override=90,
             goal_xy_override=goal,
         )
+        del instruction, instruction_mask
         features = pre_batch.features
-        if instruction is None:
-            instruction = jnp.zeros((self.num_worlds, self.preprocess_cfg.inst_dim), dtype=jnp.float32)
-            instruction_mask = jnp.zeros((self.num_worlds,), dtype=jnp.float32)
-        else:
-            raise NotImplementedError("Conditioning on instruction is not yet implemented.")
-        features["inst_features"] = instruction
-        features["inst_valid"] = instruction_mask
         if mask_goal:
             features["goal_xy"] = jnp.zeros_like(features["goal_xy"])
             features["remaining_timesteps"] = jnp.zeros_like(features["remaining_timesteps"])
-        features["subgoal_xy"] = jnp.zeros((self.num_worlds, 2), dtype=jnp.float32)
-        features["subgoal_valid"] = jnp.zeros((self.num_worlds,), dtype=jnp.float32)
-        cond_bf, inst_cond_bf = self._compute_condition_jit(features)
+        cond_bf = self._compute_condition_jit(features)
 
         current_norm_bktd = self._sample_population_jit(
             cond_bf=cond_bf,
-            inst_cond_bf=inst_cond_bf,
-            inst_cond_mask_bf=instruction_mask,
             rng=key_sample,
         )
         current_world_bkt5, world_t_seconds_bt, world_t_valid_bt = self._postprocess_population(
             current_norm_bktd,
             pre_batch,
         )
+        if self.posthoc_repair is not None:
+            current_world_bkt5 = self.posthoc_repair(current_world_bkt5, sim_state, timestep)
         best_indices = jnp.zeros((cond_bf.shape[0], 1), dtype=jnp.int32)
         best_norm_bt1d = self._gather_population(current_norm_bktd, best_indices)
         best_world_bt15 = self._gather_population(current_world_bkt5, best_indices)
@@ -102,15 +95,11 @@ class DiffusionPlanner(AbstractPlanner):
         self,
         *,
         cond_bf: jax.Array,
-        inst_cond_bf: jax.Array,
-        inst_cond_mask_bf: jax.Array,
         rng: jax.Array,
     ) -> jax.Array:
         batch_size = int(cond_bf.shape[0])
         cond_bkf = jnp.repeat(cond_bf, repeats=self.population_size, axis=0)
-        inst_cond_bf = jnp.repeat(inst_cond_bf, repeats=self.population_size, axis=0)
-        inst_cond_mask_bf = jnp.repeat(inst_cond_mask_bf, repeats=self.population_size, axis=0)
-        samples_btd = self.policy.sample_from_condition(cond_bkf, inst_cond_bf, inst_cond_mask_bf, rng=rng)
+        samples_btd = self.policy.sample_from_condition(cond_bkf, rng=rng)
         horizon = int(samples_btd.shape[1])
         target_dim = int(samples_btd.shape[2])
         return samples_btd.reshape(batch_size, self.population_size, horizon, target_dim)

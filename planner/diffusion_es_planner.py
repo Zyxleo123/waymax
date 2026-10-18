@@ -30,6 +30,8 @@ class DiffusionESPlanner(DiffusionPlanner):
         num_iterations: int = 3,
         other_agent_forecast: str = "cv",
         world_model_forecaster: Any = None,
+        posthoc_repair: Any = None,
+        offroad_mode: str = "binary",
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -48,21 +50,24 @@ class DiffusionESPlanner(DiffusionPlanner):
         # Optional es_discriminator.real_es.closed_loop.LearnedESScorer; when set it replaces the
         # handcrafted scorers for every population (hence every elite and the final selection).
         self.learned_scorer = None
+        # planner/posthoc_repair.PosthocRepair: every candidate is repaired before it is
+        # scored, so elites are chosen on (and the plan executed is) the repaired plans.
+        # With learned_scorer set too, the discriminator scores the repaired candidates.
+        self.posthoc_repair = posthoc_repair
         self.scorers = [
             Scorer(
                 metrics=metrics,
                 weights=weights,
                 other_agent_forecast=self.other_agent_forecast,
                 world_model_forecaster=self.world_model_forecaster,
+                offroad_mode=offroad_mode,
             )
             for _ in range(num_worlds)
         ]
 
         self._resample_population_jit = jax.jit(
-            lambda *, cond_bf, inst_cond_bf, inst_cond_mask_bf, proposals_bktd, rng: self._resample_population(
+            lambda *, cond_bf, proposals_bktd, rng: self._resample_population(
                 cond_bf=cond_bf,
-                inst_cond_bf=inst_cond_bf,
-                inst_cond_mask_bf=inst_cond_mask_bf,
                 proposals_bktd=proposals_bktd,
                 rng=rng,
             ),
@@ -92,31 +97,23 @@ class DiffusionESPlanner(DiffusionPlanner):
             goal_step_override=90,
             goal_xy_override=goal,
         )
+        del instruction, instruction_mask
         features = pre_batch.features
-        if instruction is None:
-            instruction = jnp.zeros((self.num_worlds, self.preprocess_cfg.inst_dim), dtype=jnp.float32)
-            instruction_mask = jnp.zeros((self.num_worlds,), dtype=jnp.float32)
-        else:
-            raise NotImplementedError("Conditioning on instruction is not yet implemented.")
-        features["inst_features"] = instruction
-        features["inst_valid"] = instruction_mask
         if mask_goal:
             features["goal_xy"] = jnp.zeros_like(features["goal_xy"])
             features["remaining_timesteps"] = jnp.zeros_like(features["remaining_timesteps"])
-        features["subgoal_xy"] = jnp.zeros((self.num_worlds, 2), dtype=jnp.float32)
-        features["subgoal_valid"] = jnp.zeros((self.num_worlds,), dtype=jnp.float32)
-        cond_bf, inst_cond_bf = self._compute_condition_jit(pre_batch.features)
+        cond_bf = self._compute_condition_jit(features)
 
         current_norm_bktd = self._sample_population_jit(
             cond_bf=cond_bf,
-            inst_cond_bf=inst_cond_bf,
-            inst_cond_mask_bf=instruction_mask,
             rng=key_sample,
         )
         current_world_bkt5, world_t_seconds_bt, world_t_valid_bt = self._postprocess_population(
             current_norm_bktd,
             pre_batch,
         )
+        if self.posthoc_repair is not None:
+            current_world_bkt5 = self.posthoc_repair(current_world_bkt5, sim_state, timestep)
         if self.learned_scorer is not None:
             current_scores_bk = self.learned_scorer(sim_state, timestep, goal, current_world_bkt5)
         else:
@@ -148,10 +145,14 @@ class DiffusionESPlanner(DiffusionPlanner):
                 current_norm_bktd,
                 elite_indices_bk,
             )
-            elite_world_bet5, _, _ = self._postprocess_population(
-                elite_norm_betd,
-                pre_batch,
-            )
+            if self.posthoc_repair is not None:
+                # The elites' REPAIRED plans; re-decoding their raw samples would undo it.
+                elite_world_bet5 = self._gather_population(current_world_bkt5, elite_indices_bk)
+            else:
+                elite_world_bet5, _, _ = self._postprocess_population(
+                    elite_norm_betd,
+                    pre_batch,
+                )
             replicated_norm_bktd = self._replicate_elites(
                 elite_norm_betd,
                 population_size=self.population_size,
@@ -160,8 +161,6 @@ class DiffusionESPlanner(DiffusionPlanner):
             rng, key_resample = jax.random.split(rng)
             current_norm_bktd = self._resample_population_jit(
                 cond_bf=cond_bf,
-                inst_cond_bf=inst_cond_bf,
-                inst_cond_mask_bf=instruction_mask,
                 proposals_bktd=replicated_norm_bktd,
                 rng=key_resample,
             )
@@ -169,6 +168,8 @@ class DiffusionESPlanner(DiffusionPlanner):
                 current_norm_bktd,
                 pre_batch,
             )
+            if self.posthoc_repair is not None:
+                current_world_bkt5 = self.posthoc_repair(current_world_bkt5, sim_state, timestep)
             if self.learned_scorer is not None:
                 current_scores_bk = self.learned_scorer(sim_state, timestep, goal, current_world_bkt5)
             else:
@@ -237,20 +238,14 @@ class DiffusionESPlanner(DiffusionPlanner):
         self,
         *,
         cond_bf: jax.Array,
-        inst_cond_bf: jax.Array,
-        inst_cond_mask_bf: jax.Array,
         proposals_bktd: jax.Array,
         rng: jax.Array,
     ) -> jax.Array:
         batch_size, population_size, horizon, target_dim = proposals_bktd.shape
         cond_bkf = jnp.repeat(cond_bf, repeats=population_size, axis=0)
-        inst_cond_bkf = jnp.repeat(inst_cond_bf, repeats=population_size, axis=0)
-        inst_cond_mask_bkf = jnp.repeat(inst_cond_mask_bf, repeats=population_size, axis=0)
         flat_proposals = proposals_bktd.reshape(batch_size * population_size, horizon, target_dim)
         samples_btd = self.policy.resample_from_condition(
             cond_bkf,
-            inst_cond_bkf,
-            inst_cond_mask_bkf,
             flat_proposals,
             self.resample_timesteps,
             rng=rng,

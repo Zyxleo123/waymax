@@ -13,6 +13,17 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+# TensorFlow only parses tfrecords here, but this CUDA build maps nearly all free GPU
+# memory when its context starts (measured 2026-10-18, job 87957: 48 of 49 GB, then JAX
+# OOM). It only worked before because JAX had already preallocated 75%. Hide the GPU
+# from TF before any TF op, so JAX and torch own the card (and two runs can share one).
+import tensorflow as _tf  # noqa: E402
+
+try:
+    _tf.config.set_visible_devices([], "GPU")
+except RuntimeError as _exc:  # the TF context was already started by an earlier import
+    print(f"[tf] could not hide the GPU from TensorFlow: {_exc}", flush=True)
+
 from train_diffusion.utils.infer import (
     load_model_for_inference,
 )
@@ -116,9 +127,11 @@ def _parse_args() -> argparse.Namespace:
         "--wm_backend",
         type=str,
         default="production",
-        choices=["production", "multifuture", "occupancy", "ego"],
+        choices=["production", "multifuture", "multifuture_ishan", "occupancy", "ego"],
         help="Which world-model package to load for --other_agent_forecast wm. "
         "'production' = model/world_model (det/gaussian). "
+        "'multifuture' = Sagar's multi-future Gaussian WM (es_WM); 'multifuture_ishan' = Ishan's "
+        "(mini-hong/waymax_rs@ishan, vendored in multiFuture_GaussianWorldModel_ishan/). "
         "Others load the matching package under the repo root.",
     )
     parser.add_argument(
@@ -217,6 +230,49 @@ def _parse_args() -> argparse.Namespace:
         help="Non-ego agents: 'log' replays the log; 'idm' runs Waymax's default IDMRoutePolicy "
         "on every non-SDC object in a closed loop with the planner (simulation/idm_closed_loop.py).",
     )
+    parser.add_argument(
+        "--sim_agents",
+        type=str,
+        default="log",
+        choices=["log", "idm"],
+        help="How non-ego agents move during the EVALUATION rollout only: 'log' = log replay, "
+        "'idm' = IDM along logged routes. Planning still sees logged agents (open loop for the "
+        "NPCs); for a true closed loop use --other_agents idm.",
+    )
+    parser.add_argument(
+        "--world_dt_method",
+        type=str,
+        default="median",
+        choices=["first", "median"],
+        help="Per-scene world step from the log timestamps: 'median' = median over all pairs "
+        "(new_model's default); 'first' = es_WM's first valid pair (runs ~25%% of hard scenes at 0.75x speed).",
+    )
+    parser.add_argument(
+        "--also_eval_sim_agents",
+        type=str,
+        default="",
+        help="Comma list of extra --sim_agents values to ALSO score each scene with (same "
+        "executed trajectory, extra evaluation rollout); written as <agents>_overlap/_offroad/_success.",
+    )
+    parser.add_argument(
+        "--posthoc_repair",
+        type=int,
+        default=0,
+        help="1 = repair every Diffusion-ES candidate with the o_am post-hoc optimizer "
+        "(planner/posthoc_repair.py) before scoring, against the same other-agent forecast.",
+    )
+    parser.add_argument("--posthoc_window", type=int, default=20,
+                        help="world steps the repair edits (o_am: 20 = 2 s)")
+    parser.add_argument("--posthoc_cfg", type=str, default="",
+                        help="LateralOptConfig overrides on top of o_am's lon=1,w_lon_prox=0.05,lon_back_m=1000")
+    parser.add_argument(
+        "--offroad_mode",
+        type=str,
+        default="binary",
+        choices=["binary", "margin_tiebreak"],
+        help="Diffusion-ES offroad objective: 'binary' = es_WM's 0/1 gate; 'margin_tiebreak' = Ishan's "
+        "clearance-graded score with a tiebreak among offroad plans (mini-hong/waymax_rs@ishan).",
+    )
     return parser.parse_args()
 
 
@@ -263,15 +319,20 @@ def _load_isolated_wm_forecaster(
     if (pkg_root / "occupancy").is_dir():
         _register_namespace(f"{alias}.occupancy", pkg_root / "occupancy")
 
-    # Package code uses absolute ``from data...`` / ``from occupancy...``.
-    saved_top = {
-        key: sys.modules[key]
-        for key in ("data", "occupancy")
-        if key in sys.modules
-    }
-    sys.modules["data"] = sys.modules[f"{alias}.data"]
-    if f"{alias}.occupancy" in sys.modules:
-        sys.modules["occupancy"] = sys.modules[f"{alias}.occupancy"]
+    # Package code uses absolute ``from data...`` / ``from occupancy...``. Set the repo's
+    # modules (and their submodules) aside while it imports: otherwise an already imported
+    # repo ``data.preprocess`` (e.g. by a planner) is reused and the WM gets the repo's map
+    # features instead of its own. Afterwards the package's modules leave the top-level names.
+    # (Ishan Jain, mini-hong/waymax_rs@ishan 1b2f7e6. Required here: new_model's repo
+    # preprocess samples the map differently from the one the WM was trained with.)
+    tops = ["data"] + (["occupancy"] if f"{alias}.occupancy" in sys.modules else [])
+
+    def _owned(key: str) -> bool:
+        return any(key == top or key.startswith(top + ".") for top in tops)
+
+    saved_top = {key: sys.modules.pop(key) for key in list(sys.modules) if _owned(key)}
+    for top in tops:
+        sys.modules[top] = sys.modules[f"{alias}.{top}"]
 
     try:
         inference = importlib.import_module(f"{alias}.model.world_model.inference")
@@ -297,13 +358,31 @@ def _load_isolated_wm_forecaster(
                 **load_kwargs,
             )
     finally:
-        for key in ("data", "occupancy"):
-            if key in saved_top:
-                sys.modules[key] = saved_top[key]
-            elif key in sys.modules and getattr(sys.modules[key], "__name__", "").startswith(alias):
-                del sys.modules[key]
+        for key in [k for k in sys.modules if _owned(k)]:
+            mod = sys.modules.pop(key)
+            if "." in key:
+                sys.modules.setdefault(f"{alias}.{key}", mod)
+        sys.modules.update(saved_top)
 
     return forecaster
+
+
+def _build_posthoc_repair(args: argparse.Namespace, wm_forecaster):
+    """planner/posthoc_repair.PosthocRepair when --posthoc_repair 1, else None."""
+    if not int(getattr(args, "posthoc_repair", 0)):
+        return None
+    from planner.posthoc_repair import O_AM_CFG, PosthocRepair
+    repair = PosthocRepair(
+        other_agent_forecast=args.other_agent_forecast,
+        world_model_forecaster=wm_forecaster,
+        window=args.posthoc_window,
+        cfg=O_AM_CFG + ("," + args.posthoc_cfg if args.posthoc_cfg else ""),
+    )
+    print(f"[posthoc] repair ON ({args.planner}): source={repair.source} window={repair.window} "
+          f"cfg={repair.cfg}", flush=True)
+    import atexit
+    atexit.register(lambda: print(f"[posthoc] stats {repair.stats}", flush=True))
+    return repair
 
 
 def _load_world_model_forecaster(args: argparse.Namespace):
@@ -322,6 +401,7 @@ def _load_world_model_forecaster(args: argparse.Namespace):
     backend_roots = {
         "production": None,
         "multifuture": repo_root / "multiFuture_GaussianWorldModel",
+        "multifuture_ishan": repo_root / "multiFuture_GaussianWorldModel_ishan",
         "occupancy": repo_root / "occupancy_worldModel",
         "ego": repo_root / "egoConditioned_WM",
     }
@@ -343,7 +423,7 @@ def _load_world_model_forecaster(args: argparse.Namespace):
         pkg_root = backend_roots[backend]
         assert pkg_root is not None
         planning_mode = None
-        if backend == "multifuture" and getattr(args, "wm_planning_mode", None):
+        if backend in ("multifuture", "multifuture_ishan") and getattr(args, "wm_planning_mode", None):
             planning_mode = str(args.wm_planning_mode)
         extra_kwargs = None
         if getattr(args, "mf_collision_method", None):
@@ -482,9 +562,19 @@ def _load_fm_model_for_inference(
 
 
 def main(args: argparse.Namespace) -> None:
+    from data.preprocess import set_world_dt_method
+    set_world_dt_method(args.world_dt_method)
+    print(f"[world_dt] method={args.world_dt_method}", flush=True)
+    if args.other_agents != "log" and (args.sim_agents != "log" or args.also_eval_sim_agents):
+        # Under the closed loop the returned log already IS the IDM rollout; an
+        # evaluation-only IDM pass would re-simulate the NPCs on top of it.
+        raise ValueError("--other_agents idm (closed loop) cannot be combined with --sim_agents / "
+                         "--also_eval_sim_agents (evaluation-only NPC models)")
     args.tfrecord_dir = os.path.join(args.tfrecord_dir, args.split)
     
     exp_name = f"simulation_{args.planner}_{args.split}"
+    if args.sim_agents != "log":
+        exp_name += f"_{args.sim_agents}"
     if args.tag is not None:
         exp_name += f"_{args.tag}"
     exp_name += f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -520,6 +610,7 @@ def main(args: argparse.Namespace) -> None:
             policy=policy,
             preprocess_cfg=inference.preprocess_cfg,
             num_worlds=args.num_worlds,
+            posthoc_repair=_build_posthoc_repair(args, _load_world_model_forecaster(args)),
         )
     elif args.planner == "es":
         inference = load_model_for_inference(
@@ -535,6 +626,8 @@ def main(args: argparse.Namespace) -> None:
             inference.nonparam_state,
         )
         from planner.diffusion_es_planner import DiffusionESPlanner
+        wm_forecaster = _load_world_model_forecaster(args)
+        repair = _build_posthoc_repair(args, wm_forecaster)
         planner = DiffusionESPlanner(
             policy=policy,
             preprocess_cfg=inference.preprocess_cfg,
@@ -545,7 +638,9 @@ def main(args: argparse.Namespace) -> None:
             num_worlds=args.num_worlds,
             metrics=["collision", "offroad"],
             other_agent_forecast=args.other_agent_forecast,
-            world_model_forecaster=_load_world_model_forecaster(args),
+            world_model_forecaster=wm_forecaster,
+            posthoc_repair=repair,
+            offroad_mode=args.offroad_mode,
         )
     elif args.planner == "fm":
         fm_ckpt_path = args.fm_ckpt_path or args.diffusion_ckpt_path

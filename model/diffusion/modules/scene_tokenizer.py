@@ -21,12 +21,14 @@ class SceneTokenizer(nnx.Module):
         hidden_dim: int = 1024,
         cond_dim: int = 256,
         token_num: int = 32,
+        include_goal: bool = True,
         rngs: nnx.Rngs = None,
     ) -> None:
         super().__init__()
         # `token_dim` is the output embedding size for scene tokens (cond_dim)
         self.token_dim = int(cond_dim)
         self.hidden_dim = int(hidden_dim)
+        self.include_goal = bool(include_goal)
         self.max_other_agents = 128
         self.other_pos_embedding = nnx.Param(jnp.zeros((1, self.max_other_agents, self.token_dim), dtype=jnp.float32))
         
@@ -45,8 +47,6 @@ class SceneTokenizer(nnx.Module):
         deterministic: bool = True,
     ) -> jnp.ndarray:
         ego_state = input_features["ego_state"]
-        goal_xy = input_features["goal_xy"]
-        remaining_timesteps = input_features["remaining_timesteps"]
         other_states = input_features["other_states"]
         other_valid = input_features["other_valid"]
         map_features = input_features["map_features"]
@@ -54,14 +54,11 @@ class SceneTokenizer(nnx.Module):
         traffic_light_features = input_features["traffic_light_features"]
         traffic_light_valid = input_features["traffic_light_valid"]
 
-        goal_input = jnp.concatenate([goal_xy, remaining_timesteps], axis=-1)
-
         batch_size, num_others, other_dim = other_states.shape
         _, num_map_segments, num_points_per_segment, map_dim = map_features.shape
         _, num_tl, tl_dim = traffic_light_features.shape
 
         ego_token = self.ego_tokenizer(ego_state, deterministic=deterministic).reshape(batch_size, 1, self.token_dim)
-        goal_token = self.goal_tokenizer(goal_input, deterministic=deterministic).reshape(batch_size, 1, self.token_dim)
 
         other_token = self.other_tokenizer(
             other_states.reshape(-1, other_dim),
@@ -80,16 +77,28 @@ class SceneTokenizer(nnx.Module):
             deterministic=deterministic,
         ).reshape(batch_size, num_tl, self.token_dim)
 
-        scene_tokens = jnp.concatenate([ego_token, goal_token, other_token, map_token, tl_token], axis=1)
-        scene_valid = jnp.concatenate(
+        scene_parts = [ego_token]
+        valid_parts = [jnp.ones((batch_size, 1), dtype=bool)]
+        if self.include_goal:
+            goal_xy = input_features["goal_xy"]
+            remaining_timesteps = input_features["remaining_timesteps"]
+            goal_input = jnp.concatenate([goal_xy, remaining_timesteps], axis=-1)
+            goal_token = self.goal_tokenizer(goal_input, deterministic=deterministic).reshape(
+                batch_size, 1, self.token_dim
+            )
+            scene_parts.append(goal_token)
+            valid_parts.append(jnp.ones((batch_size, 1), dtype=bool))
+
+        scene_parts.extend([other_token, map_token, tl_token])
+        valid_parts.extend(
             [
-                jnp.ones((batch_size, 2), dtype=bool),
                 other_valid,
                 jnp.any(map_valid, axis=2),
                 traffic_light_valid,
-            ],
-            axis=1,
+            ]
         )
+        scene_tokens = jnp.concatenate(scene_parts, axis=1)
+        scene_valid = jnp.concatenate(valid_parts, axis=1)
 
         scene_tokens = self.attention(
             query_btc=self.cond_tokens,

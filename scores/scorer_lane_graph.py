@@ -15,6 +15,35 @@ from .lane_graph_utils import LaneGraphData, LaneGraphShardStore
 
 MULTIPLICATIVE_METRICS = {"collision", "offroad", "direction", "tl_violation"}
 WEIGHTED_METRICS = {"progress", "follow_lane", "set_speed", "overtake"}
+OFFROAD_MODES = ("binary", "margin_tiebreak")
+# margin_tiebreak (ported verbatim from Ishan Jain's mini-hong/waymax_rs@ishan, 2026-10-18):
+# on-road plans score 1 at >= OFFROAD_MARGIN_M corner clearance, down to OFFROAD_MARGIN_FLOOR
+# at the road edge; offroad plans get OFFROAD_TIEBREAK_EPS * graded (later / shallower violation
+# ranks higher) so ES still has a signal when every plan fails. "binary" is es_WM's 0/1 gate.
+OFFROAD_MARGIN_M = 0.75
+OFFROAD_MARGIN_FLOOR = 0.5
+OFFROAD_TIEBREAK_EPS = 1e-3
+OFFROAD_TIEBREAK_TAU_S = 2.0
+OFFROAD_TIEBREAK_DEPTH_M = 1.0
+OFFROAD_DT = 0.1
+
+
+@jax.jit
+def _margin_tiebreak_from_distances(distances):
+    worst_t = jnp.max(distances, axis=-1)  # [P, T]
+    off_t = worst_t > 0.0
+    is_off = jnp.any(off_t, axis=-1)
+    worst = jnp.max(worst_t, axis=-1)
+    margin = OFFROAD_MARGIN_FLOOR + (1.0 - OFFROAD_MARGIN_FLOOR) * jnp.clip(
+        -worst / OFFROAD_MARGIN_M, 0.0, 1.0
+    )
+    t_first = jnp.where(is_off, jnp.argmax(off_t, axis=-1), worst_t.shape[-1]) * OFFROAD_DT
+    graded = (1.0 - jnp.exp(-t_first / OFFROAD_TIEBREAK_TAU_S)) * jnp.exp(
+        -jnp.clip(worst, 0.0, None) / OFFROAD_TIEBREAK_DEPTH_M
+    )
+    score = jnp.where(is_off, 0.0, margin).astype(jnp.float32)
+    tiebreak = jnp.where(is_off, graded, 1.0).astype(jnp.float32)
+    return score, tiebreak
 
 
 class Scorer:
@@ -30,7 +59,11 @@ class Scorer:
         weights=None,
         other_agent_forecast: str = "cv",
         world_model_forecaster=None,
+        offroad_mode: str = "binary",
     ):
+        if offroad_mode not in OFFROAD_MODES:
+            raise ValueError(f"offroad_mode must be one of {OFFROAD_MODES}, got {offroad_mode!r}")
+        self.offroad_mode = offroad_mode
         self._multiplicative_metrics = {
             metric for metric in metrics if metric in MULTIPLICATIVE_METRICS
         }
@@ -331,7 +364,9 @@ class Scorer:
         # return jnp.where(offroad_flags, 0.0, 1.0)
         return jnp.ones((ego_trajectories.shape[0],), dtype=jnp.float32)
 
-    def compute_offroad_score_v2(self, ego_trajectories, sim_state, timestep, world_idx=0):
+    def _offroad_corner_distances(self, ego_trajectories, sim_state, timestep, world_idx=0):
+        """Signed distance [P, T, 4] of the ego box corners to the nearest road edge
+        (> 0 = offroad), or None when the roadgraph has no usable road edges."""
         ego_trajectories = jnp.asarray(ego_trajectories, dtype=jnp.float32)
         if ego_trajectories.ndim != 3 or ego_trajectories.shape[-1] != 5:
             raise ValueError(
@@ -341,7 +376,7 @@ class Scorer:
 
         roadgraph_points = getattr(sim_state, "roadgraph_points", None)
         if roadgraph_points is None or not hasattr(roadgraph_points, "xyz"):
-            return self.compute_offroad_score(ego_trajectories)
+            return None
 
         roadgraph_xyz = jnp.asarray(roadgraph_points.xyz, dtype=jnp.float32)
         roadgraph_dir_xyz = jnp.asarray(roadgraph_points.dir_xyz, dtype=jnp.float32)
@@ -361,15 +396,15 @@ class Scorer:
             roadgraph_ids = roadgraph_ids[world_idx]
 
         if roadgraph_xyz.ndim != 2 or roadgraph_xyz.shape[-1] != 3:
-            return self.compute_offroad_score(ego_trajectories)
+            return None
         if roadgraph_dir_xyz.ndim != 2 or roadgraph_dir_xyz.shape[-1] != 3:
-            return self.compute_offroad_score(ego_trajectories)
+            return None
         if roadgraph_types.shape[0] != roadgraph_xyz.shape[0]:
-            return self.compute_offroad_score(ego_trajectories)
+            return None
         if roadgraph_valid.shape[0] != roadgraph_xyz.shape[0]:
-            return self.compute_offroad_score(ego_trajectories)
+            return None
         if roadgraph_ids.shape[0] != roadgraph_xyz.shape[0]:
-            return self.compute_offroad_score(ego_trajectories)
+            return None
 
         roadgraph_xyz = roadgraph_xyz[roadgraph_valid]
         roadgraph_dir_xyz = roadgraph_dir_xyz[roadgraph_valid]
@@ -378,7 +413,7 @@ class Scorer:
 
         road_edge_mask = datatypes.is_road_edge(roadgraph_types)
         if not bool(jnp.any(road_edge_mask)):
-            return self.compute_offroad_score(ego_trajectories)
+            return None
 
         roadgraph_xyz = roadgraph_xyz[road_edge_mask]
         roadgraph_dir_xyz = roadgraph_dir_xyz[road_edge_mask]
@@ -405,7 +440,7 @@ class Scorer:
         square_distances = jnp.sum(z_stretched_differences**2, axis=-1)
 
         if sampled_points.shape[0] == 0:
-            return self.compute_offroad_score(ego_trajectories)
+            return None
 
         nearest_indices = jnp.argmin(square_distances, axis=-1)
         prior_indices = jnp.maximum(jnp.zeros_like(nearest_indices), nearest_indices - 1)
@@ -426,9 +461,24 @@ class Scorer:
             )
         )
         distances = jnp.linalg.norm(nearest_xys - bbox_corners[..., :2], axis=-1) * offroad_sign
-        distances = jnp.reshape(distances, [*shape_prefix, num_agents, num_points])
+        return jnp.reshape(distances, [*shape_prefix, num_agents, num_points])
+
+    def compute_offroad_score_v2(self, ego_trajectories, sim_state, timestep, world_idx=0):
+        distances = self._offroad_corner_distances(ego_trajectories, sim_state, timestep, world_idx)
+        if distances is None:
+            return self.compute_offroad_score(ego_trajectories)
         offroad = jnp.any(distances > 0.0, axis=(-1, -2))
         return jnp.where(offroad, 0.0, 1.0).astype(jnp.float32)
+
+    def compute_offroad_score_margin_tiebreak(self, ego_trajectories, sim_state, timestep, world_idx=0):
+        """(score, tiebreak), both [P]: score 0 if any corner is past a road edge, else
+        OFFROAD_MARGIN_FLOOR..1 by clearance; tiebreak 1 on-road, else graded by how late and
+        how shallow the first violation is (Ishan's margin_tiebreak)."""
+        distances = self._offroad_corner_distances(ego_trajectories, sim_state, timestep, world_idx)
+        if distances is None:
+            score = self.compute_offroad_score(ego_trajectories)
+            return score, jnp.ones_like(score)
+        return _margin_tiebreak_from_distances(distances)
 
     def compute_direction_score(self, ego_trajectories):
         ego_trajectories = jnp.asarray(ego_trajectories)
@@ -793,10 +843,16 @@ class Scorer:
                 )
             score = score * collision_score
             components["collision"] = collision_score
+        offroad_tiebreak = None
         if "offroad" in self._multiplicative_metrics:
-            offroad_score = self.compute_offroad_score_v2(
-                ego_trajectories, sim_state=sim_state, timestep=timestep, world_idx=world_idx
-            )
+            if self.offroad_mode == "margin_tiebreak":
+                offroad_score, offroad_tiebreak = self.compute_offroad_score_margin_tiebreak(
+                    ego_trajectories, sim_state=sim_state, timestep=timestep, world_idx=world_idx
+                )
+            else:
+                offroad_score = self.compute_offroad_score_v2(
+                    ego_trajectories, sim_state=sim_state, timestep=timestep, world_idx=world_idx
+                )
             score = score * offroad_score
             components["offroad"] = offroad_score
         if "direction" in self._multiplicative_metrics:
@@ -809,6 +865,9 @@ class Scorer:
             )
             score = score * tl_score
             components["tl_violation"] = tl_score
+        if offroad_tiebreak is not None:
+            # After all gates: only reorders candidates the gates tie (e.g. every plan offroad).
+            score = score + OFFROAD_TIEBREAK_EPS * offroad_tiebreak
         components["total"] = score
 
         return score
