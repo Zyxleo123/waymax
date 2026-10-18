@@ -1,218 +1,239 @@
-# Moving waymax_rs off autonlab
+# Moving waymax_rs from autonlab to Babel
 
-Written 2026-10-18 before the autonlab outage. All the tools named here are in `env/` on
-branch `posthoc-opt-es`.
+Written 2026-10-18 on autonlab, before its outage. It covers two jobs: what yixiz runs on
+autonlab before it goes down (section 0), and what a coding agent on Babel does afterwards
+(sections 1-7). Every tool named here is in `env/` on branch `posthoc-opt-es`.
 
-The scheme: copy every needed tree under **one root on the new cluster, keeping its full
-autonlab path** (`$NEWROOT/zfsauton/scratch/...`, `$NEWROOT/zfsauton2/home/yixiz/...`).
-Then a single prefix rewrite (`env/relocate_paths.sh`) fixes the hard-coded paths: about 400
-files of code and #SBATCH lines, the split JSONs, the run env files and the ES-subset symlinks.
+## Layout on Babel
 
-| What | Size | How it moves |
+| What | Where | Notes |
 |---|---|---|
-| Code, 10 branches + 5 worktrees | — | git: `Zyxleo123/waymax` has every branch |
-| Your scratch, ckpts, WMs, disc, data (`env/transfer_list.txt`) | ~26 GB | rsync **now**, again just before shutdown |
-| conda env | — | rebuild from `env/conda_env.yml` |
-| **Data:** WOMD val shards 0-9, plus a compact copy of the new policy's 1568 validation failures | 7.8 GB + 4.2 GB | in the same transfer list, same rsync |
-| Claude memory | 1 MB | rsync |
+| Code: repo + 5 worktrees, and their `logs/` | `/home/yixiz/waymax_rs`, `/home/yixiz/waymax_rs_*` | `CODE_HOME=/home/yixiz` (100 GB quota) |
+| Data, checkpoints, results, conda env | `NEWROOT=/data/user_data/yixiz/autonlab` | 500 GB quota; every autonlab path is kept under it |
 
-## Target: Babel (CMU LTI)
+Data is mirrored with its full autonlab path. For example,
+`/zfsauton/scratch/yixiz/waymax_rs/...` becomes
+`/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/...`. A single prefix rewrite
+(`env/relocate_paths.sh`, section 5) then repoints ~400 files: code, `#SBATCH` lines, split
+JSONs, run env files and symlinks. `/zfsauton2/home/yixiz/...` goes to `/home/yixiz/...`;
+every other `/zfsauton*` path goes under `NEWROOT`.
 
-Taken from the public LTI Slurm page and search snippets of the Babel wiki. The wiki itself
-needs CMU login, so check these against `sinfo` / `scontrol show partition` on Babel.
+What moves, ~26 GB in one rsync of `env/transfer_list.txt`:
+- your scratch, about 16 GB: results, split JSONs, WOMD offset indexes, ES subsets and run roots
+- `womd_compact/valfail1568`: the 1568 new validation failures as a compact copy (4.2 GB, see below)
+- WOMD validation shards 0-9 (7.8 GB)
+- policy checkpoints (mineuih), world models (sbellad, ishanj), the ES discriminator (sbellad)
+- `logs/` (28 MB)
 
-- **Storage.** `/home/<andrewid>` holds 100 GB. `/data/user_data/<andrewid>` holds **500 GB by
-  default**. `/data/group_data`, `/data/datasets` and `/data/models` are AutoFS mounts, so always
-  use full paths: `ls /data/user_data` can come back empty on a compute node. Use
-  `NEWROOT=/data/user_data/<andrewid>/autonlab`.
-- **The quota is not an issue.** The transfer list including the data is ~26 GB, plus ~20 GB
-  for the conda env. Full WOMD (1.3 TB) would not fit, but nothing needs it now; only
-  training and o_am's training-corpus held-out evals do. If you need it later, first check
-  `/data/datasets/` for a copy; if there is one, symlink its `tf_example` to
-  `$NEWROOT/zfsauton/datasets/womd/tf_example` and verify it with `env/verify_womd.sbatch` (section 3). Otherwise ask LTI
-  help for more space.
-- **Partitions.** `general`: 2-day max, 6 h default, sbatch only, normal QoS, up to 8 GPUs.
-  `long`: 7-day max; use it for multi-day `train_safety` runs. `cpu`: 2-day max. There are also
-  `preempt` and `debug` (short, no arrays). The names `general` and `cpu` match autonlab, but the
-  autonlab QOS names (`qos_general`, `qos_cpu`, `qos_preempt`) do not exist, so drop them.
-- **GPUs.** Request them as `--gres=gpu:<type>:1`. Get the type names with
-  `sinfo -h -o "%P %G %N" | sort -u` and pick a ≥24 GB Ampere-or-newer type (section 2).
-  Unpinned `--gres=gpu:1` may land on a card this env cannot use.
-- **Relocation values** (section 4): `GPU_PARTITION=general CPU_PARTITION=cpu DROP_QOS=1 DROP_NODE_PINS=1 GPU_GRES=gpu:<type>:1`.
-- The wiki lists Slurm 20.11; arrays, `--parsable` and `afterok`/`afterany` all work there.
+The code comes from GitHub, where `git@github.com:Zyxleo123/waymax.git` (private) holds every
+branch. The conda env is rebuilt from `env/conda_env.yml`.
 
-## 0. Before autonlab goes down
+## Babel facts
 
-Run these from lov4, inside `tmux`. `NEW=user@newhost` and `NEWROOT=/abs/path` are on the new cluster.
+From `sinfo` on login3, 2026-10-18:
+
+- **`general`** has GPU nodes only: 6000Ada, A100_80GB, A6000, L40 and L40S. Every one is
+  ≥48 GB and Ampere or Ada, so **`--gres=gpu:1` is safe on `general`**.
+- **`preempt` is the default partition** (`*`). Always pass `-p general` or `-p preempt`
+  explicitly. `preempt` adds A100_40GB, H100, H200, **RTX_PRO_6000 (Blackwell, untested with
+  this jaxlib)** and some GPU-less nodes. Pin a type there, e.g. `--gres=gpu:A6000:1` or
+  `gpu:L40S:1`, and pair it with `--requeue` on resumable jobs.
+- **There is no `cpu`, `long` or `debug` partition.** CPU-only jobs (analysis, plots, checks)
+  go to `general` without `--gres`. Confirm that is allowed, and the time limit, with
+  `scontrol show partition general` (look for `MaxTime`). The ES job asks for `--time=2-00:00:00`.
+- **GRES type names are case-sensitive.** Babel uses `A6000`, where autonlab scripts used
+  `a6000`. The relocation step rewrites all 1-GPU `--gres` lines.
+- The lab partitions (neulab, katef, dlab, ...) are not ours.
+- Storage is AutoFS, so always use full paths: `ls /data/user_data` can come back empty, but
+  `/data/user_data/yixiz` works.
+
+## 0. On autonlab, before it goes down (yixiz)
+
+Run from lov4, inside `tmux`:
 
 ```bash
 cd /zfsauton2/home/yixiz/waymax_rs
-NEW=user@newhost NEWROOT=/abs/path
+NEW=yixiz@<babel login host>; NEWROOT=/data/user_data/yixiz/autonlab
 ssh $NEW "mkdir -p $NEWROOT"
-# ~26 GB. Rerun the same line just before the outage: it then sends only what changed,
-# which picks up the ES runs' latest per-scene results.
+# ~26 GB. Rerun just before the outage: it then sends only what changed
+# (the ES runs' latest per-scene results).
 rsync -a -r -z --partial --info=progress2 --exclude=.jax_compilation_cache \
   --files-from=env/transfer_list.txt / $NEW:$NEWROOT/
-# Claude memory and global instructions
 rsync -a ~/.claude/CLAUDE.md ~/.claude/projects/-zfsauton2-home-yixiz-waymax-rs/memory $NEW:claude_carry/
 ```
 
-**The data rides along in that same rsync.** It is exactly what the work needs now:
-- **val10:** WOMD validation shards 0-9 (7.8 GB), listed explicitly in the transfer list.
-- **The new eval set:** the new goal-conditioned policy's 1568 validation failures, at
-  `$ZFS/waymax_rs/womd_compact/valfail1568/`. They touch all 150 validation shards (118 GB),
-  so they travel as an **index-preserving compact copy** (`tools/build_compact_shards.py`).
-  Each shard keeps its real name and record count. The failure records are byte-identical;
-  every other record is an empty 16-byte frame. The ES runner, `target_scenarios.json` and
-  result names therefore see the same scene at the same index. It sits under your scratch,
-  so it is already in the list.
-- **Never** point anything that parses *every* record of a shard at the compact directory,
-  e.g. a splits JSON over "all scenes": the placeholders are not scenes.
+---
 
-Left behind: the training corpus, including fail1500's 187 shards (the old fail1500 ES run
-cannot resume on Babel) and the 427 shards behind o_am's training-corpus held-out splits.
-
-## 1. Code
+The rest is for **the coding agent on Babel**. Set these once and use them throughout:
 
 ```bash
-mkdir -p $NEWROOT/zfsauton2/home/yixiz && cd $NEWROOT/zfsauton2/home/yixiz
+NEWROOT=/data/user_data/yixiz/autonlab
+CODE_HOME=/home/yixiz
+E=$NEWROOT/zfsauton/scratch/mineuih/conda_envs/waymax_rs      # the env path the code expects
+```
+
+**Rules.** yixiz's global instructions were written for autonlab. These still apply:
+- All compute goes through `sbatch`, never the login node. That includes checks and plots.
+- Split jobs: GPU work on GPUs, and anything that only reads saved artefacts in a CPU job.
+- Draw figures from files on disk.
+- Pass config as a positional env-file or `VAR=value` argument, never `sbatch --export`.
+- Put `set -euo pipefail` in the job body and locate the repo via `$SLURM_SUBMIT_DIR`.
+- Every job prints `hostname` and `nvidia-smi -L`.
+- Decision gates live inside jobs; long jobs are resumable.
+
+These do **not** apply:
+- `myfree`: it doesn't exist here. Use `sinfo -p general -o "%n %G %t %C"`.
+- Everything about rhea and lov4: submit from the Babel login node directly.
+- The autonlab partition, QOS and node names.
+- The claim that `sacct` doesn't work. That was autonlab; test it here before relying on it.
+
+## 1. Preflight
+
+Stop and ask yixiz if any of these fail:
+
+```bash
+ls $NEWROOT/zfsauton/scratch/yixiz/waymax_rs/womd_compact/valfail1568/target_scenarios.json   # the rsync landed
+ls $NEWROOT/zfsauton/datasets/womd/tf_example/validation | wc -l                            # 10
+ssh -T git@github.com            # "Hi Zyxleo123!" — otherwise a key must be added to GitHub
+command -v conda || module avail 2>&1 | grep -i conda
+```
+
+## 2. Code
+
+```bash
+cd $CODE_HOME
 git clone git@github.com:Zyxleo123/waymax.git waymax_rs && cd waymax_rs
-git checkout posthoc-opt-es                                       # o_am / diffusion_ft work
-git worktree add ../waymax_rs_es_newmodel es_wm_newmodel          # live ES new-model runs
+git checkout posthoc-opt-es                                   # o_am / diffusion_ft work
+git worktree add ../waymax_rs_es_newmodel es_wm_newmodel      # the live ES new-model work
 git worktree add ../waymax_rs_es_disc     es_wm_disc
 git worktree add ../waymax_rs_es_posthoc  es_wm_posthoc
 git worktree add ../waymax_rs_es_idmfix   es_wm_idmfix
 git worktree add ../waymax_rs_amfix       amfix
 git remote rename origin myorigin
-git remote add origin git@github.com:mini-hong/waymax_rs.git     # shared repo, over SSH
+git remote add origin git@github.com:mini-hong/waymax_rs.git  # the shared repo
+mkdir -p logs && rsync -a $NEWROOT/zfsauton2/home/yixiz/waymax_rs/logs/ logs/
 ```
 
-## 2. Environment
+## 3. Environment
 
-The working env was `mineuih/conda_envs/waymax_rs`; `sbellad/conda_envs/waymax_rs` is the same
-stack. Both are Python 3.12.13, jax/jaxlib 0.10.0 + cuda12 plugin, flax 0.12.7, torch 2.11,
-tf 2.21, CUDA 12.8.1, and waymax from git at `a64dfec`. Build the env once at the path the
-code expects, then point the second path at it:
+The stack: Python 3.12.13, jax/jaxlib 0.10.0 with the cuda12 plugin, flax 0.12.7, torch 2.11,
+tf 2.21, CUDA 12.8.1, and waymax from git at `a64dfec`. sbellad's env path is the same stack,
+so link it to the one env:
 
 ```bash
-E=$NEWROOT/zfsauton/scratch/mineuih/conda_envs/waymax_rs
 conda env create -p $E -f env/conda_env.yml
 mkdir -p $NEWROOT/zfsauton/scratch/sbellad/conda_envs && ln -s $E $NEWROOT/zfsauton/scratch/sbellad/conda_envs/waymax_rs
 ```
 
-If the conda solve fails, there is a fallback: a Python 3.12 venv at `$E` plus
-`pip install -r env/pip_freeze.txt`. The jax and torch cu12 wheels bring their own CUDA. The
+If the solve fails, fall back to a Python 3.12 venv at `$E` plus
+`pip install -r env/pip_freeze.txt`; the jax and torch cu12 wheels bring their own CUDA. The
 exact conda build list is in `env/conda_explicit.txt`.
 
-**GPU:** you need at least 24 GB and Ampere or newer (A100, H100, A6000, L40S). This jaxlib
-fails on V100 at cuDNN autotune, and a 2080 Ti runs out of memory with no traceback. Check with
-`python -c "import jax; print(jax.devices())"` **inside a GPU job**.
-
-## 3. Check the data
-
-Run both checks as CPU jobs from the repo root (`mkdir -p logs` first). Both must print PASS.
-
-**Val shards 0-9.** Scene ids resolve through the cached offset indexes, which are keyed by
-shard basename only. A copy whose bytes differ from autonlab's is therefore read wrongly
-**with no error**.
+Then check that jax sees a GPU, **in a job**:
 
 ```bash
-sbatch -p <cpu partition> env/verify_womd.sbatch NEWROOT=$NEWROOT TRAIN_EXPECT=0 VAL_EXPECT=10
+sbatch -p general --gres=gpu:1 --time=10:00 --output=logs/jax_check-%j.out \
+  --wrap "hostname; nvidia-smi -L; $E/bin/python -c 'import jax; print(jax.devices())'"
 ```
 
-This compares each shard's size with `env/womd_sizes.tsv` and checks each shard's record chain
-against `womd_offsets/`. If the rsync never finished these shards, fetch them from Waymo
-(WOMD `WOD_1_3_1`: accept the licence at waymo.com/open, then `gcloud auth login`) and run the
-check again:
+## 4. Check the data
+
+Both checks are CPU jobs, run from `$CODE_HOME/waymax_rs`. Both must print PASS.
 
 ```bash
-D=$NEWROOT/zfsauton/datasets/womd/tf_example; mkdir -p $D/validation
-gcloud storage cp -n "gs://waymo_open_dataset_motion_v_1_3_1/uncompressed/tf_example/validation/validation_tfexample.tfrecord-0000[0-9]-of-00150" $D/validation/
+# val shards 0-9: sizes vs env/womd_sizes.tsv, record chains vs the cached offset indexes
+sbatch -p general env/verify_womd.sbatch NEWROOT=$NEWROOT TRAIN_EXPECT=0 VAL_EXPECT=10
+# the compact failure set: TF re-read, per-record sha256, placeholders empty
+sbatch -p general --mem=8G --time=1:00:00 --output=logs/compact_verify-%j.out --wrap \
+  "hostname; cd $PWD && CUDA_VISIBLE_DEVICES= $E/bin/python -m rl.diffusion_ft.tools.build_compact_shards verify --out_root $NEWROOT/zfsauton/scratch/yixiz/waymax_rs/womd_compact/valfail1568"
 ```
 
-If a downloaded copy fails the check, its bytes are not autonlab's. Don't use it; copy from
-autonlab once it is back. Rebuilding the offsets would silently re-map scene ids.
+Scene ids resolve through offset indexes keyed by shard basename only. A WOMD copy whose bytes
+differ is therefore read wrongly **with no error**.
 
-**The compact failure set.** This re-reads every shard with TensorFlow and checks each failure
-record's sha256 and that every other record is an empty placeholder:
+If val shards 0-9 are missing, fetch them from Waymo: accept the licence at waymo.com/open,
+run `gcloud auth login`, then
+`gcloud storage cp -n "gs://waymo_open_dataset_motion_v_1_3_1/uncompressed/tf_example/validation/validation_tfexample.tfrecord-0000[0-9]-of-00150" $NEWROOT/zfsauton/datasets/womd/tf_example/validation/`.
+Then re-check. If a downloaded copy fails the check, don't use it, and don't rebuild the
+offsets either: that would silently re-map scene ids.
+
+**About the compact failure set.** The new policy's failures touch all 150 validation shards
+(118 GB). So `tools/build_compact_shards.py` kept each shard's real name and record count:
+failure records are byte-identical, and every other record is an empty 16-byte frame. The ES
+runner's loader enumerates raw records and parses only the requested indices, so it sees the
+same scene at the same index. This was checked on autonlab: 12 scenes loaded bit-identically,
+and placeholders were refused. **Never point anything that parses every record of a shard at
+that directory**, e.g. a splits JSON over "all scenes".
+
+## 5. Relocate paths
 
 ```bash
-sbatch -p <cpu partition> --mem=8G --time=1:00:00 --output=logs/compact_verify-%j.out --wrap \
-  "cd $PWD && CUDA_VISIBLE_DEVICES= $NEWROOT/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python -m rl.diffusion_ft.tools.build_compact_shards verify --out_root $NEWROOT/zfsauton/scratch/yixiz/waymax_rs/womd_compact/valfail1568"
-```
-
-It cannot come from GCS: only the transfer list carries it. Rebuilding it takes the full
-validation split (118 GB) and `rl/diffusion_ft/slurm/build_compact_shards.sbatch`.
-
-## 4. Point the code at the new paths
-
-```bash
-cd $NEWROOT/zfsauton2/home/yixiz/waymax_rs
+cd $CODE_HOME/waymax_rs
 C=". ../waymax_rs_es_newmodel ../waymax_rs_es_disc ../waymax_rs_es_posthoc ../waymax_rs_es_idmfix ../waymax_rs_amfix"
-bash env/relocate_paths.sh $NEWROOT --dry-run $C
-# Babel: GPU_PARTITION=general CPU_PARTITION=cpu DROP_QOS=1 DROP_NODE_PINS=1 GPU_GRES=gpu:<type>:1
-GPU_PARTITION=<gpu partition> CPU_PARTITION=<cpu partition> DROP_QOS=1 DROP_NODE_PINS=1 GPU_GRES=gpu:<type>:1 \
-  bash env/relocate_paths.sh $NEWROOT $C
-for d in $C; do git -C $d commit -qam "Relocate paths to <cluster>"; done   # one commit each; revert it to go back
+V="CODE_HOME=$CODE_HOME GPU_PARTITION=general CPU_PARTITION=general DROP_QOS=1 DROP_NODE_PINS=1 GPU_GRES=gpu:1"
+env $V bash env/relocate_paths.sh $NEWROOT --dry-run $C
+env $V bash env/relocate_paths.sh $NEWROOT $C
+for d in $C; do git -C $d commit -qam "Relocate paths to Babel"; done   # revert this commit to go back
 ```
 
-The script is safe to run twice, and it skips `env/` and the byte-identical vendored trees.
-It changes four kinds of lines:
-- `#SBATCH --partition=general|cpu` lines, remapped
-- `#SBATCH --qos` lines, deleted
-- autonlab node pins, dropped (`--exclude=gpu28`, `${ES_EXCLUDE-gpu30}` and similar)
-- 1-GPU `--gres` lines, rewritten to `GPU_GRES`
+These exact values were tested on a mock tree on autonlab. Afterwards:
+- no `/zfsauton` path was left
+- code paths were in "home" and data paths in "NEWROOT"
+- every `#SBATCH --partition` was `general` and every `--gres` was `gpu:1`
+- a second run changed nothing, and every touched script parsed
 
-Check what's left by hand. The ES submitter's optional preempt path hard-codes
-`--qos=qos_preempt`; it only runs when `ES_PREEMPT_IDX` is set.
+The script skips `env/` and the byte-identical vendored trees. Check what's left by hand: the ES
+submitter's optional preempt path hard-codes `--partition=preempt --qos=qos_preempt`, but it
+only runs when `ES_PREEMPT_IDX` is set.
 
 ```bash
-git grep -nE -- '--(exclude|nodelist|qos)=|--partition=preempt|gres=gpu' -- '*.sh' '*.sbatch' ':!es_baseline' | grep -v '^env/'
+git grep -nE -- '--(exclude|nodelist|qos)=|--partition=|gres=gpu:[A-Za-z]' -- '*.sh' ':!es_baseline' ':!env'
 ```
 
-Then follow the global rules again: test the preamble with `env -i`, and read the first job's `.out` before trusting any chain.
+Then test the preamble with `env -i`, and read the first job's `.out` before trusting any chain.
 
-## 5. Resume what was running
+## 6. Resume and continue
+
+**val10 ES run.** The new-model val10 run was part-done at the outage. Resubmitting the same
+array skips every scene that already has a result (`--start_from`). Expect some arms to finish
+on Ada GPUs where autonlab used A6000; that drift is mm-level, like run-to-run noise.
+
+```bash
+cd $CODE_HOME/waymax_rs_es_newmodel
+R=$NEWROOT/zfsauton/scratch/yixiz/waymax_rs/es_posthoc/runs/nm_val10_20261018_034021_870941
+J=$(sbatch --parsable -p general --cpus-per-task=16 --mem=40G --array=0-27 slurm/sim/es_disc.sbatch $R/env)
+sbatch -p general --dependency=afterany:$J slurm/sim/es_disc_cpu.sbatch $R/compare.env
+```
+
+The fail1500 run cannot resume, because its training shards stayed on autonlab.
 
 **The new eval set** is `womd_compact/valfail1568/`: shards in `validation/`, plus
-`target_scenarios.json` in the ES runner's format and a `manifest.json`. The source list is
+`target_scenarios.json` in the ES runner's format and `manifest.json`. The source list is
 `mineuih/waymax_rs/exp/validation_0_150_failure_scenarios.json`, where index k means
-`validation_tfexample.tfrecord-<k:05d>-of-00150`. It is not wired into the ES submitter yet.
-That needs a subset directory like `es_posthoc/fail1500_subset_g2` (per group: a
-`target_scenarios.json` and `tfrecords/validation/` symlinks into the compact shards) and an
-`ES_SUBSET` case in `slurm/sim/submit_es_disc.sh`.
+`validation_tfexample.tfrecord-<k:05d>-of-00150`. It is not wired in yet. It needs:
+- a subset directory like `es_posthoc/fail1500_subset_g2`, per group: a `target_scenarios.json`
+  and `tfrecords/validation/` symlinks into the compact shards
+- an `ES_SUBSET` case in `slurm/sim/submit_es_disc.sh`
 
-The ES new-model runs (val10 88078/88079, fail1500 88081/88082, compares 88080/88083) were
-part-way done at the outage. The val10 run resumes on Babel. The fail1500 run cannot, because
-its training shards were left behind. The runner gets `--start_from <out_dir>`, so resubmitting the same
-array skips every scene that already has a result:
+## 7. Claude memory
 
 ```bash
-cd $NEWROOT/zfsauton2/home/yixiz/waymax_rs_es_newmodel
-R=$NEWROOT/zfsauton/scratch/yixiz/waymax_rs/es_posthoc/runs/nm_val10_20261018_034021_870941
-J=$(sbatch --parsable --cpus-per-task=16 --mem=40G --array=0-27 slurm/sim/es_disc.sbatch $R/env)
-sbatch --dependency=afterany:$J slurm/sim/es_disc_cpu.sbatch $R/compare.env
+mkdir -p ~/.claude/projects/-home-yixiz-waymax-rs && cp -r ~/claude_carry/memory ~/.claude/projects/-home-yixiz-waymax-rs/
 ```
 
-## 6. Claude memory
-
-Claude Code names a project's memory folder after the repo path, with every
-non-alphanumeric character turned into `-`:
-
-```bash
-K=$(echo "$NEWROOT/zfsauton2/home/yixiz/waymax_rs" | sed 's|[^A-Za-z0-9]|-|g')
-mkdir -p ~/.claude/projects/$K && cp -r ~/claude_carry/memory ~/.claude/projects/$K/
-```
-
-`~/claude_carry/CLAUDE.md` holds autonlab-specific rules (rhea, lov4, `myfree`, `sacct`, the
-partition names). Edit it for the new cluster before copying it to `~/.claude/CLAUDE.md`.
+The folder name is the repo path with every non-alphanumeric character turned into `-`. The
+memories cite autonlab paths. Read `/zfsauton2/home/yixiz/...` as `/home/yixiz/...` and any
+other `/zfsauton*` path as `$NEWROOT/zfsauton*`; job IDs and node names are autonlab history.
+`~/claude_carry/CLAUDE.md` is yixiz's autonlab-era global file. Adapt it using the rules list
+above before it becomes `~/.claude/CLAUDE.md`.
 
 ## Deliberately not copied
 
-- `mineuih/waymax_rs/lane_graphs` (58 GB). The ES runner's lane-graph loader is commented out.
-- `mineuih/waymax_rs/sim_state_cache_npz` (120 GB). Used only by annotation and legacy code.
-- `yixiz/ScenarioMaxWaymo/training.tfrecord` (930 GB). From the SB3/V-Max era.
-- The conda envs (rebuilt in section 2) and `.jax_compilation_cache` (it is GPU-specific).
-- Every pre-09-28 checkpoint under `$ZFS/waymax_rs`. Those were already deleted.
+- WOMD training shards (1.3 TB): too big for the quota and not needed for evaluation. If they
+  are needed later, check `/data/datasets/` first, then verify any copy with `env/verify_womd.sbatch`.
+- `mineuih/waymax_rs/lane_graphs` (58 GB): the ES runner's lane-graph loader is commented out.
+- `mineuih/waymax_rs/sim_state_cache_npz` (120 GB): used only by annotation and legacy code.
+- `yixiz/ScenarioMaxWaymo/training.tfrecord` (930 GB): from the SB3/V-Max era.
+- The conda envs (rebuilt) and `.jax_compilation_cache` (it is GPU-specific).
 
 The checkpoints in the transfer list belong to mineuih, sbellad and ishanj; tell them you took a copy.
