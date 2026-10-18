@@ -72,8 +72,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--use_ema", action="store_true", default=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max_num_objects", type=int, default=128)
-    parser.add_argument("--num_worlds", type=int, default=5)
-    parser.add_argument("--num_scenarios", type=int, default=1000)
+    parser.add_argument("--num_worlds", type=int, default=10)
+    parser.add_argument("--num_scenarios", type=int, default=10000000)
+    parser.add_argument("--num_shards", type=int, default=None,
+                        help="Use only the first N tfrecord shards (sorted, from index 0). Default: all.")
     parser.add_argument("--replan_interval_steps", type=int, default=10)
     parser.add_argument("--instruction_interval_steps", type=int, default=10)
     parser.add_argument("--visualize_mode", type=str, default="none", choices=["all", "success", "failure", "none"])
@@ -90,6 +92,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--save_cache", type=str, default="none", choices=["none", "all", "success", "failure"])
     parser.add_argument("--start_from", type=str, default=None)
     parser.add_argument("--target_scenario_path", type=str, default=None)
+    parser.add_argument("--other_agent", type=str, default="log", choices=["log", "idm"])
     return parser.parse_args()
 
 

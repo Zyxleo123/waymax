@@ -28,7 +28,7 @@ class DiffusionTrainConfig:
     warmup_steps: int = 2000
     grad_clip_norm: float = 0.5
     ema_update_every: int = 4
-    goal_mask_prob: float = 0.3
+    goal_mask_prob: float = 0.0
 
     hidden_dim: int = 512
     cond_dim: int = 256

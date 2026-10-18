@@ -33,9 +33,17 @@ def load_scenario_state_fast(cfg: waymax_config.DatasetConfig, scenario_index: i
 
 
 def load_scenario_state_batch_fast(
-    cfg: waymax_config.DatasetConfig, scenario_indices: Iterable[int]
+    cfg: waymax_config.DatasetConfig,
+    scenario_indices: Iterable[int],
+    *,
+    allow_missing: bool = False,
 ):
-    """Loads a batch of scenarios from one TFRecord in a single dataset scan."""
+    """Loads a batch of scenarios from one TFRecord in a single dataset scan.
+
+    The batch is ordered by ascending scenario index; the returned mapping lists the
+    loaded scenarios in batch order. With ``allow_missing``, out-of-range indices are
+    skipped instead of raising (it still raises if none of them exist).
+    """
     indices = [int(i) for i in scenario_indices]
     if not indices:
         raise ValueError("scenario_indices must be non-empty.")
@@ -56,7 +64,7 @@ def load_scenario_state_batch_fast(
                 break
 
     missing = sorted(needed.difference(selected_indices))
-    if missing:
+    if missing and (not allow_missing or not selected):
         raise ValueError(
             f"scenario_index values {missing} are out of range for tfrecord '{cfg.path}'."
         )

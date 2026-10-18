@@ -78,6 +78,8 @@ def rollout_predicted_trajectories_with_metrics(
         "metric_timeseries": metric_timeseries,
         "metric_valid": metric_valid,
         "metric_names": metric_names,
+        # metric_timeseries[i] is the metric at timestep first_timestep + i (clamped at the last step).
+        "first_timestep": int(env_obj.config.init_steps) - 1,
     }
 
 

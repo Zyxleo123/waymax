@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import itertools
 import json
 import os
 import sys
@@ -35,6 +36,7 @@ from simulation.planning_utils import (
     get_sdc_indices_for_batched_state,
     sim_state_to_ego_trajectory,
 )
+from simulation.idm_closed_loop import predict_planner_trajectories_closed_loop_idm
 from planner.abstract_planner import AbstractPlanner, PlannerResult
 
 from simulation.utils import _save_json  # noqa: E402
@@ -72,110 +74,103 @@ def _load_completed_scenarios(start_from: str | None) -> set[tuple[str, int]]:
     return completed
 
 
-def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]]:
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+def _iter_scenario_batches(args, completed_scenarios: set[tuple[str, int]], remaining_fn):
+    """Yields (tfrecord_path, scenario_indices, sim_state) batches.
 
+    ``scenario_indices`` follows the batch order of ``sim_state``. A partially
+    out-of-range batch is still yielded with the scenarios that exist, so the tail
+    of a shard is never dropped. ``remaining_fn`` returns how many scenarios may
+    still be tested and caps the next batch.
+    """
     if args.target_scenario_path is not None:
         with open(args.target_scenario_path, "r") as f:
             target_scenarios = json.load(f)
     else:
         target_scenarios = None
-
-    completed_scenarios = _load_completed_scenarios(getattr(args, "start_from", None))
-    tested_scenarios, curr_scenario_index = 0, 0
-    target_scenario_cursor = 0
-    reached_all, success_all = 0, 0
-    tfrecord_paths = sorted(glob(str(Path(args.tfrecord_dir) / "*")))
-    tfrecord_path = tfrecord_paths.pop(0)
-    # lane_graph_loader = LaneGraphLoader(args.lane_graph_dir)
-    ds_cfg = dataclasses.replace(
-        waymax_config.WOD_1_3_1_TRAINING,
-        path=str(tfrecord_path),
-        max_num_objects=int(args.max_num_objects),
-        batch_dims=(args.num_worlds,),
-        shuffle_seed=0,
-    )
     if args.scenario_indices is not None:
         target_scenario_indices = [int(idx) for idx in args.scenario_indices.split(",")]
     else:
         target_scenario_indices = None
+    sequential = target_scenarios is None and target_scenario_indices is None
+
+    tfrecord_paths = sorted(glob(str(Path(args.tfrecord_dir) / "*")))
+    num_shards = getattr(args, "num_shards", None)
+    if num_shards is not None:
+        tfrecord_paths = tfrecord_paths[: int(num_shards)]
+    if target_scenario_indices is not None:
+        # Explicit --scenario_indices refer to the first tfrecord only.
+        tfrecord_paths = tfrecord_paths[:1]
+
+    for tfrecord_path in tfrecord_paths:
+        tfrecord_name = os.path.basename(tfrecord_path)
+        if target_scenarios is not None:
+            candidates = iter([int(idx) for idx in target_scenarios.get(tfrecord_name, [])])
+        elif target_scenario_indices is not None:
+            candidates = iter(target_scenario_indices)
+        else:
+            candidates = itertools.count()
+        ds_cfg = dataclasses.replace(
+            waymax_config.WOD_1_3_1_TRAINING,
+            path=str(tfrecord_path),
+            max_num_objects=int(args.max_num_objects),
+            batch_dims=(args.num_worlds,),
+            shuffle_seed=0,
+        )
+
+        candidates_left = True
+        while candidates_left:
+            batch_size = min(int(args.num_worlds), int(remaining_fn()))
+            if batch_size <= 0:
+                return
+            scenario_indices = []
+            for scenario_idx in candidates:
+                if (tfrecord_name, scenario_idx) in completed_scenarios or scenario_idx in scenario_indices:
+                    continue
+                scenario_indices.append(scenario_idx)
+                if len(scenario_indices) >= batch_size:
+                    break
+            else:
+                candidates_left = False
+            if not scenario_indices:
+                break
+
+            try:
+                sim_state, scenario_to_batch_idx = load_scenario_state_batch_fast(
+                    ds_cfg, scenario_indices, allow_missing=True
+                )
+            except Exception as e:
+                print(f"Error loading scenarios {scenario_indices} from {tfrecord_name}: {e}")
+                print(f"Scenarios in {tfrecord_name} are all tested, moving to next tfrecord.")
+                break
+
+            missing = [idx for idx in scenario_indices if idx not in scenario_to_batch_idx]
+            if missing:
+                print(f"Scenarios {missing} are out of range for {tfrecord_name}; skipping them.")
+                if sequential:
+                    candidates_left = False
+            yield tfrecord_path, list(scenario_to_batch_idx), sim_state
+
+
+def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]]:
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    completed_scenarios = _load_completed_scenarios(getattr(args, "start_from", None))
+    tested_scenarios = 0
+    reached_all, success_all = 0, 0
+    # lane_graph_loader = LaneGraphLoader(args.lane_graph_dir)
 
     lane_graph_zip_path = None
-    while tested_scenarios < int(args.num_scenarios):
-        if target_scenarios is not None:
-            scenario_indices = []
-            scenario_base_name = os.path.basename(tfrecord_path)
-            while len(scenario_indices) < int(args.num_worlds) and target_scenario_cursor < len(target_scenarios[scenario_base_name]):
-                if scenario_base_name not in target_scenarios:
-                    scenario_indices = []
-                scenario_idx = int(target_scenarios[scenario_base_name][target_scenario_cursor])
-                target_scenario_cursor += 1
-                scenario_indices.append(scenario_idx)
-            if len(scenario_indices) == 0 or target_scenario_cursor >= len(target_scenarios[scenario_base_name]):
-                if len(tfrecord_paths) == 0:
-                    break
-                tfrecord_path = tfrecord_paths.pop(0)
-                curr_scenario_index = 0
-                ds_cfg = dataclasses.replace(
-                    waymax_config.WOD_1_3_1_TRAINING,
-                    path=str(tfrecord_path),
-                    max_num_objects=int(args.max_num_objects),
-                    batch_dims=(args.num_worlds,),
-                    shuffle_seed=0,
-                )
-                target_scenario_cursor = 0
-                continue
-
-            if not scenario_indices:
-                tfrecord_path = tfrecord_paths.pop(0)
-                curr_scenario_index = 0
-                ds_cfg = dataclasses.replace(
-                    waymax_config.WOD_1_3_1_TRAINING,
-                    path=str(tfrecord_path),
-                    max_num_objects=int(args.max_num_objects),
-                    batch_dims=(args.num_worlds,),
-                    shuffle_seed=0,
-                )
-                target_scenario_cursor = 0
-                continue
-        elif target_scenario_indices is not None:
-            scenario_indices = []
-            while len(scenario_indices) < int(args.num_worlds) and target_scenario_cursor < len(target_scenario_indices):
-                scenario_idx = int(target_scenario_indices[target_scenario_cursor])
-                target_scenario_cursor += 1
-                if (os.path.basename(tfrecord_path), scenario_idx) in completed_scenarios:
-                    continue
-                scenario_indices.append(scenario_idx)
-            if not scenario_indices:
-                break
-        else:
-            scenario_indices = []
-            while len(scenario_indices) < int(args.num_worlds) and tested_scenarios + len(scenario_indices) < int(args.num_scenarios):
-                scenario_idx = int(curr_scenario_index)
-                curr_scenario_index += 1
-                if (os.path.basename(tfrecord_path), scenario_idx) in completed_scenarios:
-                    continue
-                scenario_indices.append(scenario_idx)
-            if not scenario_indices:
-                break
-        try:
-            sim_state, _ = load_scenario_state_batch_fast(ds_cfg, scenario_indices)
-        except Exception as e:
-            print(f"Error loading scenarios {scenario_indices} from {os.path.basename(tfrecord_path)}: {e}")
-            print(f"Scenarios in {os.path.basename(tfrecord_path)} are all tested, moving to next tfrecord.")
-            tfrecord_path = tfrecord_paths.pop(0)
-            curr_scenario_index = 0
-            ds_cfg = dataclasses.replace(
-                waymax_config.WOD_1_3_1_TRAINING,
-                path=str(tfrecord_path),
-                max_num_objects=int(args.max_num_objects),
-                batch_dims=(args.num_worlds,),
-                shuffle_seed=0,
-            )
-            target_scenario_cursor = 0
-            continue
-
+    scenario_batches = _iter_scenario_batches(
+        args,
+        completed_scenarios,
+        remaining_fn=lambda: int(args.num_scenarios) - tested_scenarios,
+    )
+    if getattr(args, "other_agent", "log") == "idm":
+        replan_fn = predict_planner_trajectories_closed_loop_idm
+    else:
+        replan_fn = predict_planner_trajectories_with_periodic_replan
+    for tfrecord_path, scenario_indices, sim_state in scenario_batches:
         print(f"Testing scenarios {scenario_indices} from {os.path.basename(tfrecord_path)}...")
 
         if hasattr(planner, "set_episode_context"):
@@ -217,7 +212,7 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                     scorer_helpers.update_lane_points(
                         planner.scorers[world_idx], sim_state, world_idx
                     )
-            pred, replaced_state, info = predict_planner_trajectories_with_periodic_replan(
+            pred, replaced_state, info = replan_fn(
                 args,
                 sim_state,
                 goal_xy_b2,
@@ -254,13 +249,18 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
         goal_reached = np.asarray(goal_eval["reached"])
         goal_reached_step = np.asarray(goal_eval["reached_step"])
 
-        overlap_timeseries = np.asarray(rollout["metric_timeseries"]["overlap"][int(args.start_timestep):])
-        offroad_timeseries = np.asarray(rollout["metric_timeseries"]["offroad"][int(args.start_timestep):])
+        # Align the rollout metrics (index i <-> timestep first_timestep + i) to [eval_t0, last step].
+        num_steps = int(replaced_state.log_trajectory.x.shape[-1])
+        eval_t0 = max(int(args.start_timestep), int(rollout["first_timestep"]))
+        metric_sl = slice(eval_t0 - int(rollout["first_timestep"]), num_steps - int(rollout["first_timestep"]))
+        overlap_timeseries = np.asarray(rollout["metric_timeseries"]["overlap"][metric_sl])
+        offroad_timeseries = np.asarray(rollout["metric_timeseries"]["offroad"][metric_sl])
 
         overlap = np.zeros((len(scenario_indices),), dtype=bool)
         offroad = np.zeros((len(scenario_indices),), dtype=bool)
         for world_idx in range(len(scenario_indices)):
-            episode_length = goal_reached_step[world_idx] + 1 if goal_reached[world_idx] else overlap_timeseries.shape[0]
+            # Count violations only until the goal is reached (reached_step is an absolute timestep).
+            episode_length = max(goal_reached_step[world_idx] - eval_t0 + 1, 0) if goal_reached[world_idx] else overlap_timeseries.shape[0]
             if "overlap" in rollout["metric_timeseries"]:
                 overlap[world_idx] = overlap_timeseries[:episode_length, world_idx].sum() > 0
             if "offroad" in rollout["metric_timeseries"]:
@@ -366,8 +366,9 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
             (str(tfrecord_path), int(scenario_indices[i]))
             for i in visualize_indices
         ]
-        ego_start_times = [0 for i in visualize_indices]
-        ego_trajectories = [np.asarray(pred_traj[i]) for i in visualize_indices]
+        # Render the evaluated state itself (ego plan and, with --other_agent idm, the simulated agents)
+        # instead of reloading the logged scenario, so the video matches the metrics.
+        render_states = [(replaced_state, int(i)) for i in visualize_indices]
         # ego_indices = get_sdc_indices_for_batched_state(replaced_state)
         # ego_trajectories = [
         #     np.asarray(
@@ -388,8 +389,7 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                 tfrecord_scenarios=video_requests,
                 target_vehicles=[None] * len(scenario_indices),
                 output_dir=output_dir.as_posix(),
-                ego_start_times=ego_start_times,
-                ego_trajectories=ego_trajectories,
+                states=render_states,
                 goal_xy=goal_xys,
             )
         for i, scenario_idx in enumerate(scenario_indices):
