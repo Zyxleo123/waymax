@@ -59,7 +59,7 @@ for co in "$@"; do
     echo "   ${#pins[@]} scripts with autonlab node pins"
     if (( ! DRY )) && (( ${#pins[@]} )); then
       perl -ni -e 'next if /^#SBATCH --(exclude|nodelist)=gpu[0-9]/;
-                   s/(\$\{[A-Z_]+-)gpu[0-9][0-9,]*\}/$1}/g; s/--(exclude|nodelist)=gpu[0-9][0-9,]* ?//g; print' "${pins[@]}"
+                   s/(\$\{[A-Z_]+:?-)gpu[0-9][0-9,]*\}/$1}/g; s/--(exclude|nodelist)=gpu[0-9][0-9,]* ?//g; print' "${pins[@]}"
     fi
   fi
   if [[ -n "${GPU_GRES:-}" ]]; then
