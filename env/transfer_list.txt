@@ -8,6 +8,11 @@
 /zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures
 /zfsauton2/home/yixiz/waymax_rs/logs
 
+# --- eval sets
+# the new goal-cond policy's failures over all 150 WOMD validation shards: 1568 scenes as
+# (tfrecord_index, scenario_index), mineuih, 2026-10-18
+/zfsauton/scratch/mineuih/waymax_rs/exp/validation_0_150_failure_scenarios.json
+
 # --- policy checkpoints (mineuih)
 # o_am / diffusion_ft base policy (DFT_CKPT)
 /zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest

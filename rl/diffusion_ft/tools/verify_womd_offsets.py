@@ -37,11 +37,17 @@ def _record_end(f, offset: int) -> int:
 
 
 def check_shard(path: str, index_dir: str, sizes: dict[str, int], n_samples: int) -> str | None:
-    """None if the shard matches its index, else the reason it does not."""
+    """None if the shard matches its index (and manifest size), else the reason it does not.
+
+    ``index_dir`` empty = size check only, for shards with no cached index (read
+    sequentially, e.g. by the ES runner).
+    """
     name = os.path.basename(path)
     size = os.path.getsize(path)
     if sizes and name in sizes and sizes[name] != size:
         return f"size {size} != manifest {sizes[name]}"
+    if not index_dir:
+        return None if name in sizes else "not in the manifest (size-only check needs it)"
     idx = os.path.join(index_dir, name + ".offsets.npy")
     if not os.path.isfile(idx):
         return f"no index {idx}"
@@ -61,12 +67,14 @@ def check_shard(path: str, index_dir: str, sizes: dict[str, int], n_samples: int
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--glob", required=True, help="shard glob of the copy to check")
-    p.add_argument("--index_dir", required=True, help="dir holding <basename>.offsets.npy")
+    p.add_argument("--index_dir", default="", help="dir holding <basename>.offsets.npy; empty = size check only")
     p.add_argument("--sizes", default="", help="basename<TAB>bytes manifest (env/womd_sizes.tsv)")
     p.add_argument("--expect", type=int, default=0, help="fail unless exactly this many shards match")
     p.add_argument("--samples", type=int, default=8, help="interior records checked per shard")
     args = p.parse_args()
 
+    if not args.index_dir and not args.sizes:
+        p.error("--index_dir or --sizes is required")
     sizes: dict[str, int] = {}
     if args.sizes:
         with open(args.sizes) as fh:
@@ -75,7 +83,7 @@ def main() -> int:
                     name, n = line.split("\t")
                     sizes[name] = int(n)
     paths = sorted(glob.glob(args.glob))
-    print(f"{len(paths)} shards match {args.glob}; index_dir={args.index_dir}; manifest={len(sizes)} entries")
+    print(f"{len(paths)} shards match {args.glob}; index_dir={args.index_dir or '<none: size only>'}; manifest={len(sizes)} entries")
     bad = 0
     for path in paths:
         why = check_shard(path, args.index_dir, sizes, args.samples)

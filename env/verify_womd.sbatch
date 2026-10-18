@@ -9,12 +9,16 @@
 #SBATCH --error=logs/verify_womd-%j.out
 #
 # Is this WOMD copy byte-compatible with the cached offset indexes (and so with every
-# split JSON's scene ids)? Checks training (expect 1000 shards) and validation shards
-# 0-9 against womd_offsets/ and env/womd_sizes.tsv. CPU only, reads ~3 headers per shard.
+# split JSON's scene ids)? Checks the training shards present (TRAIN_EXPECT of them:
+# 1000 = full corpus, 187 = only fail1500's, 0 = skip) and validation shards 0-9 against
+# womd_offsets/ and env/womd_sizes.tsv, plus the size of every validation shard
+# (VAL_EXPECT, default 150 = the whole split). CPU only, reads ~10 headers per shard.
 #
 # No partition/qos line: those are per cluster. From the repo root, after `mkdir -p logs`:
 #   sbatch -p <cpu partition> env/verify_womd.sbatch NEWROOT=/abs/new/root
-# Config: positional VAR=value or env-file arguments (NEWROOT, PY, WOMD_DIR, INDEX_DIR).
+#   eval data only, with fail1500's shards:  ... NEWROOT=/abs/new/root TRAIN_EXPECT=187
+# Config: positional VAR=value or env-file arguments (NEWROOT, PY, WOMD_DIR, INDEX_DIR,
+# TRAIN_EXPECT, VAL_EXPECT).
 # NEWROOT empty = the autonlab paths themselves.
 set -euo pipefail
 for arg in "$@"; do
@@ -32,14 +36,21 @@ INDEX_DIR="${INDEX_DIR:-$NEWROOT/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
 echo "host=$(hostname) job=${SLURM_JOB_ID:-none} cpus=${SLURM_CPUS_PER_TASK:-?} mem=${SLURM_MEM_PER_NODE:-?}M"
 nvidia-smi -L 2>/dev/null || echo "gpu: none"
 echo "repo=$ROOT @ $(git rev-parse --short HEAD) python=$PY"
-echo "womd=$WOMD_DIR index=$INDEX_DIR"
+TRAIN_EXPECT="${TRAIN_EXPECT:-1000}" VAL_EXPECT="${VAL_EXPECT:-150}"
+echo "womd=$WOMD_DIR index=$INDEX_DIR train_expect=$TRAIN_EXPECT val_expect=$VAL_EXPECT"
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" PYTHONUNBUFFERED=1
 
+V="$WOMD_DIR/validation/validation_tfexample.tfrecord"
 rc=0
-"$PY" -m rl.diffusion_ft.tools.verify_womd_offsets --glob "$WOMD_DIR/training/training_tfexample.tfrecord-*" \
-  --index_dir "$INDEX_DIR" --sizes env/womd_sizes.tsv --expect 1000 || rc=1
-"$PY" -m rl.diffusion_ft.tools.verify_womd_offsets \
-  --glob "$WOMD_DIR/validation/validation_tfexample.tfrecord-0000[0-9]-of-00150" \
+if [[ "$TRAIN_EXPECT" != 0 ]]; then
+  "$PY" -m rl.diffusion_ft.tools.verify_womd_offsets --glob "$WOMD_DIR/training/training_tfexample.tfrecord-*" \
+    --index_dir "$INDEX_DIR" --sizes env/womd_sizes.tsv --expect "$TRAIN_EXPECT" || rc=1
+else
+  echo "training: skipped (TRAIN_EXPECT=0)"
+fi
+"$PY" -m rl.diffusion_ft.tools.verify_womd_offsets --glob "$V-0000[0-9]-of-00150" \
   --index_dir "$INDEX_DIR" --sizes env/womd_sizes.tsv --expect 10 || rc=1
+"$PY" -m rl.diffusion_ft.tools.verify_womd_offsets --glob "$V-*-of-00150" \
+  --sizes env/womd_sizes.tsv --expect "$VAL_EXPECT" || rc=1
 echo "verify_womd: $([[ $rc == 0 ]] && echo PASS || echo FAIL)"
 exit "$rc"
