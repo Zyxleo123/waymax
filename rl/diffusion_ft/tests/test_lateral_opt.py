@@ -460,9 +460,118 @@ def t_argmin():
     check(parse_inits("init0,initprev") == ["init0", "initprev"], "10 argmin start tokens parse")
 
 
+def t_amfix():
+    """11. o_am failure-anatomy fixes (2026-10-11), all default off.
+
+    join: the history pad reduces to the old zero pad (comfort_join at h = 0 is
+    0.5 x^T H x), the boundary columns are the padded profile's own differences,
+    join_history is zero on the fresh plan's own backward line, and the claim
+    the fix rests on -- with the car's real history, continuing the previous plan
+    is CHEAPER than the fresh plan's jump, where the zero pad billed it the jump.
+    curvature: zero at x = 0, negligible for a lane change at speed, huge for a
+    stationary car's 2 cm/step slide, finite gradient through a stop.
+    starts: shapes, signs, and a brake that never reverses and comes to rest.
+    """
+    from rl.diffusion_ft.lateral_opt import (START_SWERVE_M, comfort_boundary, comfort_join,
+                                             edit_curvature, join_history, project_onto_path,
+                                             start_profile)
+    n, dt = 20, 0.1
+    c0 = LateralOptConfig()
+    check((c0.join, c0.w_contact_edge, c0.w_contact_agent, c0.w_curv) == (0, 0.0, 0.0, 0.0),
+          "11 the new terms default off")
+    c = LateralOptConfig.parse("lon=1,w_lon_prox=0.05,join=1,w_contact_edge=1,"
+                               "w_contact_agent=1,w_curv=0.02")
+    check(c.join == 1 and c.w_curv == 0.02 and c.w_contact_agent == 1.0, "11 new keys parse")
+    check(all(raises(lambda b=b: LateralOptConfig.parse(b))
+              for b in ("join=2", "w_curv=-1", "contact_eps_m=0", "k_ref=0", "w_contact_edge=-1")),
+          "11 bad new keys raise")
+    check(parse_inits("init0,initprev,initbrake,initleft,initright")
+          == ["init0", "initprev", "initbrake", "initleft", "initright"], "11 new start tokens parse")
+
+    # -- boundary columns = differences of the padded profile ----------------- #
+    rng = np.random.default_rng(3)
+    Ka, Kj = comfort_operators(n, dt)
+    Ba, Bj = comfort_boundary(n, dt)
+    d = rng.normal(size=n) * 0.2
+    h = rng.normal(size=2) * 0.1
+    pad = np.concatenate([h, [0.0], d, [d[-1], d[-1]]])           # steps -2 .. n+2, value hold
+    a_ref = np.diff(pad, 2) / dt ** 2
+    j_ref = np.diff(a_ref) / dt
+    check(np.allclose(Ka @ d + Ba @ h, a_ref, atol=1e-6) and np.allclose(Kj @ d + Bj @ h, j_ref, atol=1e-4),
+          "11 comfort_boundary: Ka d + Ba h is the padded profile's accel (and jerk)")
+
+    # -- zero history is the old quadratic ----------------------------------- #
+    x = jnp.asarray(rng.normal(size=(3, 2 * n)) * 0.3, jnp.float32)
+    H = edit_hessian(n, dt, c)
+    old = 0.5 * np.einsum("bi,ij,bj->b", np.asarray(x, np.float64), H, np.asarray(x, np.float64))
+    new = np.asarray(comfort_join(x, jnp.zeros((3, 4)), n=n, dt=dt, cfg=c))
+    check(np.allclose(new, old, rtol=1e-4), f"11 comfort_join at h = 0 == 0.5 x^T H x (max rel "
+          f"{np.max(np.abs(new - old) / np.abs(old)):.1e})")
+
+    # -- join_history ---------------------------------------------------------- #
+    W = 51
+    P = np.asarray(_arc(B=1, W=W + 2, v=8.0, curv=0.0))           # straight, 8 m/s
+    F = jnp.asarray(P[:, 2:])                                     # fresh plan, anchor = step 2
+    hist = P[:, :2]                                               # the car's last two poses
+    hz = join_history(F, hist)
+    check(np.abs(hz).max() < 1e-4, f"11 join_history: on the plan's own line -> 0 ({np.abs(hz).max():.1e})")
+    sh = hist.copy()
+    yaw0 = float(P[0, 2, 2])
+    sh[..., 0] -= 0.2 * np.sin(yaw0)
+    sh[..., 1] += 0.2 * np.cos(yaw0)
+    hl = join_history(F, sh)
+    check(np.allclose(hl[0, :2], 0.2, atol=1e-4) and np.abs(hl[0, 2:]).max() < 1e-4,
+          "11 join_history: 0.2 m to the left -> d = 0.2, s = 0")
+
+    # -- the claim: continuing the previous plan beats the fresh plan's jump -- #
+    k = np.arange(W)
+    jump = 0.3 * (1.0 - np.exp(-k / 2.0))                         # fresh plan veers off at once
+    Fj = lateral_offset(F, jnp.asarray(jump[None], jnp.float32), dt=dt)
+    prev = F                                                      # what the car was executing
+    xp = jnp.asarray(project_onto_path(Fj, prev, n))
+    x0 = jnp.zeros_like(xp)
+    hj = jnp.asarray(join_history(Fj, hist))
+    zero_pad = [float(comfort_join(v, jnp.zeros((1, 4)), n=n, dt=dt, cfg=c)[0]) for v in (x0, xp)]
+    join_pad = [float(comfort_join(v, hj, n=n, dt=dt, cfg=c)[0]) for v in (x0, xp)]
+    check(zero_pad[1] > zero_pad[0], f"11 zero pad bills continuing ({zero_pad[1]:.3f}) over the jump "
+          f"({zero_pad[0]:.3f}) -- the bug the fix removes")
+    check(join_pad[1] < 0.25 * join_pad[0], f"11 join pad: continuing ({join_pad[1]:.3f}) is far cheaper "
+          f"than the fresh plan's jump ({join_pad[0]:.3f})")
+
+    # -- curvature ----------------------------------------------------------- #
+    fast = jnp.asarray(_arc(B=1, W=W, v=10.0, curv=0.0))
+    u = np.arange(1, n + 1) / n
+    lane = jnp.asarray(np.concatenate([1.5 * (3 * u ** 2 - 2 * u ** 3), np.zeros(n)])[None], jnp.float32)
+    k0 = np.asarray(edit_curvature(fast, jnp.zeros((1, 2 * n)), n=n, dt=dt, lon=1))
+    kl = np.asarray(edit_curvature(fast, lane, n=n, dt=dt, lon=1))
+    stop = jnp.asarray(np.repeat(np.asarray(fast)[:, :1], W, axis=1))     # a parked car
+    crab = jnp.asarray(np.concatenate([0.02 * np.arange(1, n + 1), np.zeros(n)])[None], jnp.float32)
+    ks = np.asarray(edit_curvature(stop, crab, n=n, dt=dt, lon=1))
+    check(np.abs(k0).max() == 0.0, "11 curvature: exactly 0 at x = 0")
+    check(np.abs(kl).max() < 0.05, f"11 curvature: 1.5 m lane change at 10 m/s peaks {np.abs(kl).max():.3f} /m")
+    check(np.abs(ks).max() > 1.0, f"11 curvature: a parked car sliding 2 cm/step peaks {np.abs(ks).max():.1f} /m")
+    g = jax.grad(lambda v: jnp.sum(edit_curvature(stop, v, n=n, dt=dt, lon=1) ** 2))(crab + 0.01)
+    check(bool(np.isfinite(np.asarray(g)).all()), "11 curvature gradient finite through a stop (lon on)")
+
+    # -- starts -------------------------------------------------------------- #
+    slow = jnp.asarray(_arc(B=2, W=W, v=6.0, curv=0.02))
+    s0 = start_profile("init0", slow, n, dt)
+    sl, sr = start_profile("initleft", slow, n, dt), start_profile("initright", slow, n, dt)
+    sb = start_profile("initbrake", slow, n, dt)
+    check(s0.shape == (2, 2 * n) and not s0.any(), "11 init0 start is zero")
+    check(np.allclose(sl, -sr) and np.isclose(sl[0, n - 1], START_SWERVE_M) and not sl[:, n:].any(),
+          "11 swerve starts: mirror images, reach START_SWERVE_M, no retime")
+    seg = np.linalg.norm(np.diff(np.asarray(slow)[:, :n + 1, :2], axis=1), axis=-1)
+    q = np.cumsum(seg, 1) + sb[:, n:]
+    check(not sb[:, :n].any() and (sb[:, n:] <= 0).all() and (np.diff(q, axis=1) >= -1e-6).all()
+          and np.abs(np.diff(q, axis=1)[:, -4:]).max() < 1e-3,
+          "11 brake start: behind the plan, never reverses, at rest by 1.5 s")
+    check(raises(lambda: start_profile("initprev", slow, n, dt)), "11 start_profile refuses initprev")
+
+
 def main():
     for f in (t_refactor, t_hessian, t_cubic, t_parse, t_choice, t_overrides, t_lon, t_proj,
-              t_emerg, t_argmin):
+              t_emerg, t_argmin, t_amfix):
         f()
     print()
     if FAILED:

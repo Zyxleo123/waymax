@@ -96,8 +96,8 @@ import numpy as np
 
 __all__ = ["LateralOptConfig", "comfort_operators", "comfort_hessian", "edit_hessian",
            "edit_world", "expand_offset", "expand_retime", "init_kind", "init_variant",
-           "project_onto_path",
-           "variant_cfg",
+           "project_onto_path", "comfort_boundary", "comfort_join", "join_history", "start_profile",
+           "edit_curvature", "variant_cfg",
            "make_lateral_optimizer", "parse_inits"]
 
 
@@ -149,6 +149,29 @@ class LateralOptConfig:
     # happens only where the barrier outbids it -- the argmin arms use it IN PLACE
     # of the lon_back_m cap and cons's progress tolerance. 0 = off (unchanged lon).
     w_lon_prox: float = 0.0
+    # --- o_am failure anatomy, 2026-10-11 (all off by default) ---------------- #
+    # join: pad the comfort operators with the car's REAL last two poses, in the
+    # fresh plan's (d, s) coordinates, instead of zeros. With zeros the comfort
+    # is charged on the edit relative to the fresh plan, so the fresh plan's own
+    # jump away from the motion the car was executing costs nothing, and the
+    # previous plan's tail (``initprev``) is billed a ~10 m/s^2 jump at step 1:
+    # it won 0 of 5067 o_am switches. The Hessian (the preconditioner) is
+    # unchanged; the history only adds a linear term. No history = zeros.
+    join: int = 0
+    # Contact: (1/n) sum_t w * tanh(relu(-c_t) / contact_eps_m) on the hard
+    # clearances (c_edge = min over corners, c_agent = min over agents). A
+    # saturating COUNT of violating steps: the metric fails a scene on any
+    # violation, at any depth, while the barrier is linear in depth, so it
+    # would buy 0.7 m less off-road with a new collision (scene 171055).
+    w_contact_edge: float = 0.0
+    w_contact_agent: float = 0.0
+    contact_eps_m: float = 0.05
+    # Curvature of the edit: w_curv * (1/(n+1)) sum_t (kappa_t / k_ref)^2, kappa_t
+    # the change of the heading offset lateral_offset adds, per metre travelled.
+    # The time-domain comfort lets a near-stationary car slide sideways and spin
+    # (171055: 18 deg in one 3.6 cm step); per metre that is ~1000x a lane change.
+    w_curv: float = 0.0
+    k_ref: float = 0.2          # 1/m, about a car's tightest turn (5 m radius)
 
     @classmethod
     def parse(cls, spec: str) -> "LateralOptConfig":
@@ -178,6 +201,12 @@ class LateralOptConfig:
             raise ValueError("lateral opt config: lon=1 needs w_lon_acc > 0 or w_lon_jerk > 0")
         if cfg.lon_back_m < 0:
             raise ValueError(f"lon_back_m={cfg.lon_back_m} must be >= 0")
+        if cfg.join not in (0, 1):
+            raise ValueError(f"join={cfg.join}: 0 | 1")
+        if min(cfg.w_contact_edge, cfg.w_contact_agent, cfg.w_curv) < 0:
+            raise ValueError("w_contact_edge, w_contact_agent and w_curv must be >= 0")
+        if cfg.contact_eps_m <= 0 or cfg.k_ref <= 0:
+            raise ValueError("contact_eps_m and k_ref must be > 0")
         return cfg
 
 
@@ -188,7 +217,17 @@ INIT_TIERS = {"0": (False, False), "best": (False, False), "prev": (True, False)
               "emerg": (False, True), "brake": (False, True),
               # argmin arms only: STARTS of one optimization over the fresh plan
               # (zero, or the previous plan's tail projected onto it).
-              "init0": (False, True), "initprev": (True, True)}
+              "init0": (False, True), "initprev": (True, True),
+              # ...and further starts of the same optimization (start_profile):
+              # brake to a stop, or swerve left / right.
+              "initbrake": (False, True), "initleft": (False, True),
+              "initright": (False, True)}
+
+# The extra argmin starts. They are only where the optimizer BEGINS: every start
+# is scored by the one loss and the lowest final loss runs, so these constants
+# set the basins searched, not what executes.
+START_BRAKE_MPS2 = 4.0     # a firm, not an emergency, stop
+START_SWERVE_M = 1.5       # about half a lane, the bank's l24 range
 
 # EMERGENCY tiers (2026-09-30), for rows where every gentle candidate is predicted
 # to violate. Measured on o_lpA3's residual: at its edge-only coverage failures the
@@ -259,7 +298,8 @@ def parse_inits(spec: str) -> list[str]:
         if tok not in INIT_TIERS:
             if not tok.startswith("lat"):
                 raise ValueError(f"lateral opt init '{tok}': 0 | best | prev | lon0 | lonprev "
-                                 f"| emerg | brake | init0 | initprev | lat<metres>")
+                                 f"| emerg | brake | init0 | initprev | initbrake | initleft "
+                                 f"| initright | lat<metres>")
             float(tok[3:])
         out.append(tok)
     if len(set(out)) != len(out):
@@ -399,11 +439,149 @@ def expand_offset(x_bn, W: int):
     return jnp.concatenate([jnp.zeros((B, 1), x_bn.dtype), x_bn, tail], axis=1)
 
 
+def comfort_boundary(n: int, dt: float):
+    """``(Ba, Bj)``: how the padded steps -2 and -1 enter the edit's acceleration
+    (``[n+3, 2]``) and jerk (``[n+2, 2]``) -- the columns :func:`comfort_operators`
+    multiplies by its zero pad. Under ``join`` the pad is the car's history
+    (:func:`join_history`), so ``a = Ka x + Ba h`` and ``j = Kj x + Bj h``; the
+    hold after the window does not touch these columns, so both blocks share them.
+    """
+    n = int(n)
+    D2 = np.zeros((n + 3, n + 5))
+    for i in range(n + 3):
+        D2[i, i:i + 3] = (1.0, -2.0, 1.0)
+    Ba = D2[:, :2] / dt ** 2
+    D1 = np.zeros((n + 2, n + 3))
+    for i in range(n + 2):
+        D1[i, i:i + 2] = (-1.0, 1.0)
+    return Ba, D1 @ Ba / dt
+
+
+def comfort_join(x, hist, *, n: int, dt: float, cfg: LateralOptConfig):
+    """``[B]`` comfort of the edit ``x`` with the operators' pad at steps -2, -1
+    set to the car's history ``hist`` ``[B, 4]`` (:func:`join_history`): the sums
+    :func:`edit_hessian` differentiates, plus the history's columns
+    (:func:`comfort_boundary`). At ``hist = 0`` it equals ``0.5 x^T H x``; the
+    history adds only a linear term and a constant, so ``H`` still preconditions.
+    """
+    import jax.numpy as jnp
+
+    Ka, Kj = comfort_operators(n, dt)
+    Ba, Bj = comfort_boundary(n, dt)
+
+    def f32(a):
+        return jnp.asarray(a.T, jnp.float32)
+
+    d, hd = x[:, :n], hist[:, :2]
+    q = ((cfg.w_acc / cfg.a_ref ** 2) * jnp.sum((d @ f32(Ka) + hd @ f32(Ba)) ** 2, -1)
+         + (cfg.w_jerk / cfg.j_ref ** 2) * jnp.sum((d @ f32(Kj) + hd @ f32(Bj)) ** 2, -1)
+         + (cfg.w_prox / cfg.d_ref ** 2) * jnp.sum(d ** 2, -1))
+    if cfg.lon:
+        Kav, Kjv = comfort_operators(n, dt, hold="velocity")
+        s, hs = x[:, n:], hist[:, 2:]
+        q = q + ((cfg.w_lon_acc / cfg.a_ref ** 2) * jnp.sum((s @ f32(Kav) + hs @ f32(Ba)) ** 2, -1)
+                 + (cfg.w_lon_jerk / cfg.j_ref ** 2) * jnp.sum((s @ f32(Kjv) + hs @ f32(Bj)) ** 2, -1)
+                 + (cfg.w_lon_prox / cfg.d_ref ** 2) * jnp.sum(s ** 2, -1))
+    return q / n
+
+
+def join_history(world_p, hist_xy):
+    """``[B, 4]`` = (d_-2, d_-1, s_-2, s_-1): where the car WAS at the two steps
+    before the anchor, in the edit coordinates of the fresh plan ``world_p``.
+
+    The fresh plan is extended backward from its anchor at its own first step,
+    ``p(-k) = p_0 - k (p_1 - p_0)``, and the history is measured from that line
+    along its anchor heading (s) and left normal (d), the frame
+    :func:`branching.lateral_offset` offsets in. A car whose last two steps match
+    the fresh plan's initial velocity has zero history, which is the old zero
+    pad: then executing the fresh plan as-is costs nothing at the join, and a
+    plan that jumps away from what the car was doing pays for the jump.
+    ``hist_xy`` ``[B, 2, >=2]`` are world poses at steps -2, -1. Pure numpy.
+    """
+    P = np.asarray(world_p, np.float64)
+    Hh = np.asarray(hist_xy, np.float64)[..., :2]                     # [B, 2, 2]
+    p0, v = P[:, 0, :2], P[:, 1, :2] - P[:, 0, :2]
+    yaw0 = P[:, 0, 2]
+    tng = np.stack([np.cos(yaw0), np.sin(yaw0)], -1)
+    nrm = np.stack([-np.sin(yaw0), np.cos(yaw0)], -1)
+    k = np.array([2.0, 1.0])[None, :, None]
+    rel = Hh - (p0[:, None] - k * v[:, None])                         # [B, 2, 2]
+    d = np.sum(rel * nrm[:, None], -1)
+    s = np.sum(rel * tng[:, None], -1)
+    return np.concatenate([d, s], 1).astype(np.float32)
+
+
+def start_profile(tok: str, world_p, n: int, dt: float):
+    """``[B, 2n]`` initial edit for an argmin start token (lon layout).
+
+    * ``init0``     -- no edit;
+    * ``initbrake`` -- stop at START_BRAKE_MPS2 from the plan's first-step speed,
+      along the plan's own path (never ahead of it);
+    * ``initleft`` / ``initright`` -- a cubic-smoothstep swerve of START_SWERVE_M
+      over the window, the bank's ramp shape.
+    ``initprev`` needs the previous plan (:func:`project_onto_path`), not this.
+    """
+    P = np.asarray(world_p, np.float64)
+    B = P.shape[0]
+    x = np.zeros((B, 2 * n), np.float32)
+    if tok == "init0":
+        return x
+    if tok in ("initleft", "initright"):
+        u = np.arange(1, n + 1) / n
+        sign = 1.0 if tok == "initleft" else -1.0
+        x[:, :n] = sign * START_SWERVE_M * (3 * u ** 2 - 2 * u ** 3)
+        return x
+    if tok == "initbrake":
+        seg = np.linalg.norm(np.diff(P[:, :n + 1, :2], axis=1), axis=-1)  # [B, n]
+        S = np.cumsum(seg, axis=1)
+        v0 = seg[:, :1] / dt
+        a = START_BRAKE_MPS2
+        tt = np.arange(1, n + 1)[None, :] * dt
+        stop = np.where(tt < v0 / a, v0 * tt - 0.5 * a * tt ** 2, v0 ** 2 / (2 * a))
+        x[:, n:] = np.minimum(stop - S, 0.0)
+        return x
+    raise ValueError(f"start_profile: no profile for start {tok!r}")
+
+
+def edit_curvature(world_p, x, *, n: int, dt: float, lon: int = 0):
+    """``[B, m]`` curvature (1/m) the edit ``x`` adds at steps 1..m, m = min(n+1, W-1).
+
+    :func:`branching.lateral_offset` turns the heading by ``psi_t =
+    atan2(dd_t, max(ds_t, 0.05))``; this is ``(psi_t - psi_{t-1}) / max(ds_t, 0.05)``
+    with ``psi_0 = 0`` (on the base line before the anchor), on the same retimed
+    path and the same 5 cm floor. Step n+1 is where the held offset straightens
+    out, so it is charged too. The step length uses lateral_offset's zero-gradient
+    norm at a zero-length step.
+    """
+    import jax.numpy as jnp
+
+    from rl.diffusion_ft.branching import path_retime
+
+    W = world_p.shape[1]
+    if lon:
+        world_p = path_retime(world_p, expand_retime(x[:, n:], W), dt=dt)
+        x = x[:, :n]
+    m = min(n + 1, W - 1)
+    step = jnp.diff(world_p[:, :m + 1, :2], axis=1)                    # [B, m, 2]
+    moved = jnp.any(step != 0.0, axis=-1)
+    ds = jnp.where(moved, jnp.linalg.norm(jnp.where(moved[..., None], step, 1.0), axis=-1),
+                   0.0)
+    dd = jnp.diff(expand_offset(x, W)[:, :m + 1], axis=1)              # [B, m]
+    ds = jnp.maximum(ds, 0.05)
+    psi = jnp.arctan2(dd, ds)
+    dpsi = jnp.diff(jnp.concatenate([jnp.zeros_like(psi[:, :1]), psi], axis=1), axis=1)
+    return dpsi / ds
+
+
 # --------------------------------------------------------------------------- #
 def make_lateral_optimizer(objcfg, cfg: LateralOptConfig, *, dt: float,
                            neighbor_pred: str = "log", world_dt_method: str = "median",
                            forecaster=None):
     """Jitted ``opt(world_p, x0, state, t0, active_b, n) -> (x, loss_best, loss_init)``.
+
+    ``hist=`` ``[B, 4]`` (:func:`join_history`) is read only under ``cfg.join``:
+    the car's last two poses then replace the comfort operators' zero pad. None
+    (or ``join=0``) is the old loss, op for op.
 
     ``world_p`` ``[B, W, 5]`` is the base proposal; ``x0`` ``[B, n]`` the init
     (``[B, 2n]`` under ``cfg.lon``: lateral, then along-path);
@@ -436,20 +614,37 @@ def make_lateral_optimizer(objcfg, cfg: LateralOptConfig, *, dt: float,
 
     from rl.diffusion_ft.safety_objective import WM_PREDICTIONS
 
-    def opt(world_p, x0, state, t0, active_b, n, nb_boxes=None):
+    contact = cfg.w_contact_edge > 0 or cfg.w_contact_agent > 0
+
+    def opt(world_p, x0, state, t0, active_b, n, nb_boxes=None, hist=None):
         B, W, _ = world_p.shape
         H = edit_hessian(n, dt, cfg)
         Hj = jnp.asarray(H, jnp.float32)
         Hinv = jnp.asarray(np.linalg.inv(H), jnp.float32)
         dt_b = (compute_world_dt_seconds(state, 0.1, world_dt_method)
                 if neighbor_pred in ("cv", "none") else None)
+        if not cfg.join:
+            hist = None
 
         def loss(x):
             w = edit_world(world_p, x, n=n, dt=dt, lon=cfg.lon)
             terms = candidate_safety(loss_cfg, w, state=state, t0=t0, n_steps=n,
                                      alive_b=active_b, neighbor_pred=neighbor_pred,
                                      neighbor_dt_b=dt_b, neighbor_boxes=nb_boxes)
-            per_b = terms["loss_b"] / n + 0.5 * jnp.einsum("bi,ij,bj->b", x, Hj, x)
+            if hist is None:
+                per_b = terms["loss_b"] / n + 0.5 * jnp.einsum("bi,ij,bj->b", x, Hj, x)
+            else:
+                per_b = terms["loss_b"] / n + comfort_join(x, hist, n=n, dt=dt, cfg=cfg)
+            if contact:
+                act = jnp.asarray(active_b, jnp.float32)[:, None]
+
+                def hits(c):    # a saturating count of violating steps
+                    return jnp.sum(jnp.tanh(jnp.maximum(-c, 0.0) / cfg.contact_eps_m) * act, -1)
+                per_b = per_b + (cfg.w_contact_edge * hits(terms["c_edge"])
+                                 + cfg.w_contact_agent * hits(terms["c_agent"])) / n
+            if cfg.w_curv > 0:
+                kap = edit_curvature(world_p, x, n=n, dt=dt, lon=cfg.lon)
+                per_b = per_b + cfg.w_curv * jnp.mean((kap / cfg.k_ref) ** 2, -1)
             return jnp.sum(per_b), per_b
 
         vg = jax.value_and_grad(loss, has_aux=True)
@@ -479,8 +674,8 @@ def make_lateral_optimizer(objcfg, cfg: LateralOptConfig, *, dt: float,
     from rl.diffusion_ft.world_model_forecast import get_forecaster
     fc = forecaster or get_forecaster(neighbor_pred)
 
-    def wm_opt(world_p, x0, state, t0, active_b, n):
+    def wm_opt(world_p, x0, state, t0, active_b, n, hist=None):
         dt_b = compute_world_dt_seconds(state, 0.1, world_dt_method)
-        return jopt(world_p, x0, state, t0, active_b, n, fc(state, t0, n, dt_b))
+        return jopt(world_p, x0, state, t0, active_b, n, fc(state, t0, n, dt_b), hist)
 
     return wm_opt

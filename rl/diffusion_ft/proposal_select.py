@@ -87,6 +87,8 @@ SELECTORS = ("cons", "margin", "always", "learned", "look", "proj", "argmin", "a
 # loss whenever it moved. `argmin_c` adds the one rule under test: never replace a
 # base predicted clean with a plan predicted to violate.
 ARGMIN_SELECTORS = ("argmin", "argmin_c")
+# The starts an argmin bank may list (lateral_opt.start_profile / project_onto_path).
+ARGMIN_STARTS = frozenset({"init0", "initprev", "initbrake", "initleft", "initright"})
 # Per-replan feature columns stored for every arm (alt columns NaN when the arm
 # has no alternative). Kept as data so a learned selector can be fit on CPU
 # later without re-rolling anything.
@@ -688,13 +690,14 @@ class ProposalSelectEval:
                 inits = self.bank_opts.get(a.bank, [])
                 is_am = a.selector in ARGMIN_SELECTORS
                 if is_am and (self.banks.get(a.bank) or not inits
-                              or set(inits) - {"init0", "initprev"} or "init0" not in inits
+                              or set(inits) - ARGMIN_STARTS or inits[0] != "init0"
                               or not self.bank_opt_cfg[a.bank].lon):
                     raise SystemExit(f"arm {a.name}: '{a.selector}' needs a bank of starts "
-                                     f"init0[,initprev] only, with lon=1 in its opt cfg")
-                if not is_am and a.alt == "bank" and {"init0", "initprev"} & set(inits):
-                    raise SystemExit(f"arm {a.name}: init0/initprev are argmin starts; "
-                                     f"selector '{a.selector}' cannot use them")
+                                     f"init0 first, from {sorted(ARGMIN_STARTS)}, with lon=1 "
+                                     f"in its opt cfg")
+                if not is_am and a.alt == "bank" and ARGMIN_STARTS & set(inits):
+                    raise SystemExit(f"arm {a.name}: {sorted(ARGMIN_STARTS & set(inits))} are "
+                                     f"argmin starts; selector '{a.selector}' cannot use them")
                 if a.selector == "proj" and (self.banks.get(a.bank) or not self.bank_opts.get(a.bank)):
                     raise SystemExit(f"arm {a.name}: 'proj' needs a bank of loss-optimized "
                                      f"candidates only (bank '{a.bank}' has fixed ones or none)")
@@ -768,6 +771,15 @@ class ProposalSelectEval:
         tail = w_last[:, k_last:]
         pad = jnp.repeat(tail[:, -1:], W - tail.shape[1], axis=1)
         return jnp.concatenate([tail, pad], axis=1)
+
+    def _prev_hist(self, prev_exec):
+        """``[B, 2, 5]``: the car's poses at the two steps before the current one,
+        from the plan it executed (None on the first replan, or if fewer than two
+        of its steps ran). The ``join`` comfort pad (lateral_opt.join_history)."""
+        if prev_exec is None or int(prev_exec[1]) < 2:
+            return None
+        w_last, k_last = prev_exec
+        return np.asarray(w_last[:, k_last - 2:k_last])
 
     def _optimized(self, arm, inits, world_p, base_sc, fixed_sc, cands, alive, t0, goal, n,
                    score, world_prev=None):
@@ -876,7 +888,8 @@ class ProposalSelectEval:
                                      -1)[trig]
         return worlds, scores, mags, diag, tolx
 
-    def _argmin(self, arm, world_p, base_sc, alive, t0, goal, n, score, world_prev):
+    def _argmin(self, arm, world_p, base_sc, alive, t0, goal, n, score, world_prev,
+                world_hist=None):
         """One objective, every alive row: the bank's optimizer from each start,
         and the plan with the lowest final loss. All starts optimize offsets of the
         FRESH plan (``initprev`` starts from the previous plan's tail projected onto
@@ -888,9 +901,14 @@ class ProposalSelectEval:
         ``argmin_c``, does not swap a predicted-clean base for a predicted
         violation), the winning start (-1 = base), each start's certified clearance,
         (loss0, loss, peak |d|, peak |s|) per start, and the winner's scores.
+
+        ``world_hist`` (:meth:`_prev_hist`) feeds the ``join`` comfort pad when the
+        bank's config has ``join=1``; ``initbrake`` / ``initleft`` / ``initright``
+        start from :func:`lateral_opt.start_profile`.
         """
         jnp = self.jnp
-        from rl.diffusion_ft.lateral_opt import edit_world, project_onto_path
+        from rl.diffusion_ft.lateral_opt import (edit_world, join_history, project_onto_path,
+                                                 start_profile)
 
         inits = self.bank_opts[arm.bank]
         B, W = world_p.shape[0], world_p.shape[1]
@@ -902,6 +920,9 @@ class ProposalSelectEval:
         xs, losses = [], np.full((K, B), np.inf)
         diag = np.full((B, K, 4), np.nan, np.float32)
         clear_k = np.full((B, K), np.nan, np.float32)
+        kw = {}
+        if self.bank_opt_cfg[arm.bank].join and world_hist is not None:
+            kw["hist"] = jnp.asarray(join_history(world_p, world_hist))
         for k, tok in enumerate(inits):
             if tok == "initprev":
                 if world_prev is None:
@@ -909,8 +930,8 @@ class ProposalSelectEval:
                     continue
                 x0 = project_onto_path(world_p, world_prev, n)
             else:
-                x0 = np.zeros((B, 2 * n), np.float32)
-            x, l_best, l0 = opt(world_p, jnp.asarray(x0), st, t0j, act, n)
+                x0 = start_profile(tok, world_p, n, self._opt_dt)
+            x, l_best, l0 = opt(world_p, jnp.asarray(x0), st, t0j, act, n, **kw)
             xa = np.asarray(x)
             xs.append(xa)
             losses[k] = np.where(alive_b, np.asarray(l_best), np.inf)
@@ -1149,7 +1170,8 @@ class ProposalSelectEval:
             if arm.alt == "bank" and arm.selector in ARGMIN_SELECTORS:
                 world_prev = self._prev_tail(prev_exec, world_p.shape[1])
                 world, sw, ch, ck_row, ok, s_star = self._argmin(
-                    arm, world_p, (cp, ep, ap, pp), alive, t0, goal, n, score, world_prev)
+                    arm, world_p, (cp, ep, ap, pp), alive, t0, goal, n, score, world_prev,
+                    world_hist=self._prev_hist(prev_exec))
                 for j, col in enumerate((4, 5, 6, 7)):
                     row[:, col] = s_star[j]
                 choices.append(ch); clears_k.append(ck_row); opt_ks.append(ok)

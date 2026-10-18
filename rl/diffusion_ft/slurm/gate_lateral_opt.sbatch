@@ -40,7 +40,8 @@ done
 PY="${DFT_PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 export PYTHONUNBUFFERED=1 JAX_PLATFORMS=cpu TF_CPP_MIN_LOG_LEVEL=2 CUDA_VISIBLE_DEVICES=""
 DFT_SPLITS_JSON="${DFT_SPLITS_JSON:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json}"
-DFT_SHARD_GLOB="${DFT_SHARD_GLOB:-/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
+# /zfsauton/scratch/eshau/ vanished ~2026-10-02; the same shards live under /zfsauton/datasets/womd.
+DFT_SHARD_GLOB="${DFT_SHARD_GLOB:-/zfsauton/datasets/womd/tf_example/training/training_tfexample.tfrecord-*}"
 DFT_INDEX_DIR="${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
 DFT_GATE_VERDICT="${DFT_GATE_VERDICT:?set DFT_GATE_VERDICT (where the verdict goes)}"
 DFT_LOPT_JSON="${DFT_LOPT_JSON:-$(dirname "$DFT_GATE_VERDICT")/gate_lateral_opt.json}"
@@ -51,7 +52,8 @@ DFT_LOPT_GATE_SCENES="${DFT_LOPT_GATE_SCENES:-16}"
 echo "=== lateral-opt gates: $(date) on $(hostname) ==="
 echo "request: cpus=${SLURM_CPUS_PER_TASK:-?} mem=${SLURM_MEM_PER_NODE:-?}M job=${SLURM_JOB_ID:-?} (CPU job, no GPU)"
 echo "splits=$DFT_SPLITS_JSON verdict=$DFT_GATE_VERDICT neighbors=$DFT_LOPT_NEIGHBORS"
-echo "opt_cfg=${DFT_SELECT_OPT_CFG:-<defaults>}"
+echo "opt_cfg=${DFT_SELECT_OPT_CFG:-<defaults>} am2_cfg=${DFT_LOPT_AM2_CFG:-<off>}"
+echo "code: $ROOT @ $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null) (+ $(git -C "$ROOT" status --porcelain 2>/dev/null | wc -l) uncommitted paths)"
 mkdir -p "$(dirname "$DFT_GATE_VERDICT")"
 rm -f "$DFT_GATE_VERDICT"
 
@@ -67,6 +69,8 @@ fi
   --splits_json "$DFT_SPLITS_JSON" --shard_glob "$DFT_SHARD_GLOB" \
   --index_dir "$DFT_INDEX_DIR" --n_scenes "$DFT_LOPT_GATE_SCENES" \
   --neighbors "$DFT_LOPT_NEIGHBORS" --opt_cfg "$DFT_SELECT_OPT_CFG" \
+  --am2_cfg "${DFT_LOPT_AM2_CFG:-}" \
+  --am2_starts "${DFT_LOPT_AM2_STARTS:-init0,initbrake,initleft,initright}" \
   --verdict "$DFT_GATE_VERDICT" --json_out "$DFT_LOPT_JSON" || rc=$?
 
 # The test writes the verdict itself on PASS and on FAIL; no file means it died

@@ -91,7 +91,8 @@ import dataclasses
 
 from rl.diffusion_ft.branching import lateral_ease, lateral_offset, lateral_shift, time_warp
 from rl.diffusion_ft.lateral_opt import (BRAKE_BACK_M, LateralOptConfig, comfort_operators,
-                                         edit_world, expand_offset, make_lateral_optimizer,
+                                         edit_world, expand_offset, join_history,
+                                         make_lateral_optimizer, parse_inits, start_profile,
                                          variant_cfg)
 from rl.diffusion_ft.proposal_select import EMERG_TIER_M, OPT_TIER_M, bank_choice, make_scorer
 from rl.diffusion_ft.safety_objective import SafetyObjectiveConfig
@@ -157,6 +158,10 @@ def main(argv=None):
     p.add_argument("--width", type=int, default=41, help="candidate length W (anchor + W-1)")
     p.add_argument("--neighbors", default="cv", help="log | cv | none (the arms' source)")
     p.add_argument("--opt_cfg", default="", help="LateralOptConfig overrides, k=v,k=v")
+    p.add_argument("--am2_cfg", default="",
+                   help="extra LateralOptConfig keys on top of the argmin config (e.g. "
+                        "join=1,w_contact_edge=1,...): adds the argmin2 arm and gates A3-A4")
+    p.add_argument("--am2_starts", default="init0,initbrake,initleft,initright")
     p.add_argument("--verdict", default="")
     p.add_argument("--json_out", default="")
     args = p.parse_args(argv)
@@ -184,6 +189,14 @@ def main(argv=None):
     cfg_am = dataclasses.replace(cfg, lon=1, w_lon_prox=0.05, lon_back_m=1000.0)
     opt_am = make_lateral_optimizer(objcfg, cfg_am, dt=DT, neighbor_pred=args.neighbors,
                                     world_dt_method="median")
+    am2 = bool(args.am2_cfg.strip())
+    if am2:
+        cfg_am2 = LateralOptConfig.parse(
+            f"{args.opt_cfg},lon=1,w_lon_prox=0.05,lon_back_m=1000,{args.am2_cfg}")
+        opt_am2 = make_lateral_optimizer(objcfg, cfg_am2, dt=DT, neighbor_pred=args.neighbors,
+                                         world_dt_method="median")
+        am2_starts = parse_inits(args.am2_starts)
+        print(f"[gate] argmin2 {cfg_am2}\n[gate] argmin2 starts {am2_starts}", flush=True)
     opt_em = {v: make_lateral_optimizer(objcfg, variant_cfg(cfg, v, True), dt=DT,
                                         neighbor_pred=args.neighbors, world_dt_method="median")
               for v in ("emerg", "brake")}
@@ -201,6 +214,10 @@ def main(argv=None):
     goal = jnp.asarray(lxy[np.arange(B), last], jnp.float32)
 
     arms = ("bank", "opt0", "optms", "union", "opt0lon", "opt0+lon", "full", "argmin")
+    arms = arms + (("argmin2",) if am2 else ())
+    b_id_rows = b_id_exact = b_bad = b_nonfinite = 0
+    b_anchor = 0.0
+    newviol = {"argmin": [0, 0], "argmin2": [0, 0]}     # [introduced, moved rows]
     stats = {}          # family -> arm -> lists
     id_rows = id_exact = 0
     anchor_err = 0.0
@@ -235,6 +252,14 @@ def main(argv=None):
         za = ok_rows & (np.asarray(l0a) == 0.0)
         a_id_rows += int(za.sum())
         a_id_exact += int((np.abs(np.asarray(xa_))[za].max(1) == 0.0).sum()) if za.any() else 0
+        if am2:
+            # no history: the join pad is zero, and contact / curvature vanish at x = 0
+            xb_, _, l0b = opt_am2(expert, jnp.zeros((B, 2 * n)), state, t0j, jnp.ones(B), n)
+            zb = ok_rows & (np.asarray(l0b) == 0.0)
+            b_id_rows += int(zb.sum())
+            b_id_exact += int((np.abs(np.asarray(xb_))[zb].max(1) == 0.0).sum()) if zb.any() else 0
+            # the car's real last two poses (log replay), for the join pad
+            hist_xy = lxy[:, t0 - 2:t0]
         x, lb, l0 = opt_lon(expert, jnp.zeros((B, 2 * n)), state, t0j, jnp.ones(B), n)
         zero = ok_rows & (np.asarray(l0) == 0.0)
         lid_rows += int(zero.sum())
@@ -353,7 +378,36 @@ def main(argv=None):
             a_bad += int((np.asarray(lbam)[trig] > np.asarray(l0am)[trig] + 1e-5).sum())
             a_anchor = max(a_anchor, float(jnp.max(jnp.abs(wam[:, 0, :2] - world[:, 0, :2]))))
             ch_am = np.where(np.any(xam != 0, 1) & (cam >= 0.0), 0, -1)
+            sam = tuple(np.asarray(q) for q in score(wam, state, t0j, goal, n))
+            _, ep_, ap_, _ = (np.asarray(v) for v in score(world, state, t0j, goal, n))
+
+            def introduced(sc, moved):
+                new = ((ep_ >= 0) & (sc[1] < 0)) | ((ap_ >= 0) & (sc[2] < 0))
+                return int((new & moved & trig).sum()), int((moved & trig).sum())
+            for j, v in enumerate(introduced(sam, np.any(xam != 0, 1))):
+                newviol["argmin"][j] += v
+            if am2:
+                hj = jnp.asarray(join_history(world, hist_xy))
+                best_x, best_l = None, np.full(B, np.inf)
+                for tok in am2_starts:
+                    xs0 = jnp.asarray(start_profile(tok, world, n, DT))
+                    xb, lbb, l0b = opt_am2(world, xs0, state, t0j, act, n, hist=hj)
+                    xb, lbb, l0b = np.asarray(xb), np.asarray(lbb), np.asarray(l0b)
+                    wb = edit_world(world, jnp.asarray(xb), n=n, dt=DT, lon=1)
+                    b_nonfinite += int((~np.isfinite(xb)).any() or (~np.isfinite(lbb[trig])).any())
+                    b_bad += int((lbb[trig] > l0b[trig] + 1e-5).sum())
+                    b_anchor = max(b_anchor, float(jnp.max(jnp.abs(wb[:, 0, :2] - world[:, 0, :2]))))
+                    take = lbb < best_l
+                    best_x = xb if best_x is None else np.where(take[:, None], xb, best_x)
+                    best_l = np.where(take, lbb, best_l)
+                wb = edit_world(world, jnp.asarray(best_x), n=n, dt=DT, lon=1)
+                sb2 = tuple(np.asarray(q) for q in score(wb, state, t0j, goal, n))
+                mv2 = np.any(best_x != 0, 1)
+                ch_am2 = np.where(mv2 & (sb2[0] >= 0.0), 0, -1)
+                for j, v in enumerate(introduced(sb2, mv2)):
+                    newviol["argmin2"][j] += v
             picks = {
+                **({"argmin2": (ch_am2, best_x[:, :n])} if am2 else {}),
                 "argmin": (ch_am, xam[:, :n]),
                 "full": (ch_f, d_f),
                 "opt0lon": (ch_l, xl[:, :n]),
@@ -404,6 +458,9 @@ def main(argv=None):
         print(f"  {a:>6}: |a| {pct(acc, 50):.2f}/{pct(acc, 90):.2f} m/s^2   "
               f"|j| {pct(jerk, 50):.1f}/{pct(jerk, 90):.1f} m/s^3   "
               f"comes back {np.mean(back) if back else float('nan'):.2f}")
+    summary["new_violation_type"] = newviol
+    print("\nmoved rows that INTRODUCE a violation type the base did not have "
+          "(edge or agent): " + "  ".join(f"{a} {v[0]}/{v[1]}" for a, v in newviol.items()))
     summary["sec_per_opt_call"] = float(np.median(t_opt[1:])) if len(t_opt) > 1 else None
     summary["sec_per_bank"] = float(np.median(t_bank[1:])) if len(t_bank) > 1 else None
     print(f"\n[gate] median s/call: optimizer {summary['sec_per_opt_call']}, "
@@ -437,6 +494,13 @@ def main(argv=None):
     check("A2 argmin optimizer: finite, anchor kept, loss never above the init's",
           a_nonfinite == 0 and a_anchor < 1e-4 and a_bad == 0,
           f"{a_nonfinite} non-finite, anchor {a_anchor:.1e} m, {a_bad} row-runs worse")
+    if am2:
+        check("A3 argmin2 optimizer: identity where the base costs nothing (no history)",
+              b_id_rows > 0 and b_id_exact == b_id_rows, f"{b_id_exact}/{b_id_rows} rows exactly 0")
+        check("A4 argmin2, every start, with the log history as the join pad: finite, anchor "
+              "kept, loss never above the start's",
+              b_nonfinite == 0 and b_anchor < 1e-4 and b_bad == 0,
+              f"{b_nonfinite} non-finite, anchor {b_anchor:.1e} m, {b_bad} row-runs worse")
     check("E1 emergency optimizers finite", e_nonfinite == 0, f"{e_nonfinite} non-finite runs")
     check("E2 emergency: anchor kept, loss never above the init's", e_anchor < 1e-4 and e_bad == 0,
           f"max anchor move {e_anchor:.1e} m, {e_bad} row-runs worse")

@@ -54,7 +54,9 @@
 #   # DFT_SIM_AGENTS=idm_brake, so nothing there is comparable to a run above and
 #   # `base` has to be inside the same job.
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+# A submitter runs under plain bash, so it can find its own repo (a worktree too);
+# inside an allocation SLURM_SUBMIT_DIR may be unset or point elsewhere.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"; cd "$ROOT"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
 SEL_DIR="${DFT_SELECT_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/${STAMP}}"
 VDIR=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777
