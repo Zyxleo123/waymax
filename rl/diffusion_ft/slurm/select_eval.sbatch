@@ -44,7 +44,13 @@ for arg in "$@"; do
 done
 
 PY="${DFT_PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
-export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.95}"
+# A wm_* neighbour source runs a PyTorch world model on the same GPU: leave it
+# room, or torch's first allocation fails behind JAX's 95% preallocation.
+if [[ "${DFT_SELECT_BANK_NEIGHBORS:-}" == *"wm_"* ]]; then
+  export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.85}"
+else
+  export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.95}"
+fi
 DFT_OUT_DIR="${DFT_OUT_DIR:?set DFT_OUT_DIR}"
 DFT_CKPT="${DFT_CKPT:-/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
 DFT_SPLITS_JSON="${DFT_SPLITS_JSON:?set DFT_SPLITS_JSON (three-stratum splits file)}"
@@ -130,6 +136,11 @@ DFT_WORLD_DT_METHOD="${DFT_WORLD_DT_METHOD:-first}"
 # Optional upstream gate: a verdict file whose first line must read PASS
 # (test_ego_vel.sbatch writes one). Empty = no gate.
 DFT_REQUIRE_GATE="${DFT_REQUIRE_GATE:-}"
+# World-model checkpoints / device for wm_* bank neighbours (empty = the defaults
+# in rl/diffusion_ft/world_model_forecast.py).
+DFT_WM_DET_CKPT="${DFT_WM_DET_CKPT:-}"
+DFT_WM_MF_CKPT="${DFT_WM_MF_CKPT:-}"
+DFT_WM_DEVICE="${DFT_WM_DEVICE:-}"
 
 echo "host=${SLURMD_NODENAME:-unknown} ($(hostname)) gpu=${CUDA_VISIBLE_DEVICES:-unset}"
 nvidia-smi -L 2>/dev/null || echo "nvidia-smi: unavailable"
@@ -145,6 +156,9 @@ if [[ "$DFT_ARMS" == *"bank"* ]]; then
   if [[ -n "$DFT_SELECT_BANK_RAMPS" ]]; then echo "bank_ramps=$DFT_SELECT_BANK_RAMPS"; fi
   if [[ -n "$DFT_SELECT_BANK_BLENDS" ]]; then echo "bank_blends=$DFT_SELECT_BANK_BLENDS"; fi
   if [[ -n "$DFT_SELECT_BANK_NEIGHBORS" ]]; then echo "bank_neighbors=$DFT_SELECT_BANK_NEIGHBORS"; fi
+  if [[ "$DFT_SELECT_BANK_NEIGHBORS" == *"wm_"* ]]; then
+    echo "wm det=${DFT_WM_DET_CKPT:-<default>} mf=${DFT_WM_MF_CKPT:-<default>} device=${DFT_WM_DEVICE:-auto} xla_mem=$XLA_PYTHON_CLIENT_MEM_FRACTION"
+  fi
   if [[ -n "$DFT_SELECT_BANK_OPTS" ]]; then
     echo "bank_opts=$DFT_SELECT_BANK_OPTS opt_cfg=${DFT_SELECT_OPT_CFG:-<defaults>}"
     echo "bank_opt_cfgs=${DFT_SELECT_BANK_OPT_CFGS:-<none>}"
@@ -157,6 +171,12 @@ if [[ -n "$DFT_ADAPTER_CKPT" ]]; then echo "adapter_ckpt=$DFT_ADAPTER_CKPT"; fi
 if [[ "$DFT_DUMP_PAIRS" == "1" ]]; then echo "dump_pairs=1"; fi
 echo "shard_glob=$DFT_SHARD_GLOB"
 mkdir -p "$DFT_OUT_DIR"
+# Gate: the splits file may be written by an upstream job (DFT_SPLITS_UPSTREAM).
+if [[ ! -s "$DFT_SPLITS_JSON" ]]; then
+  echo "SELECTION NOT RUN: splits file '$DFT_SPLITS_JSON' does not exist -- the job"
+  echo "  that writes it never ran or failed; check its .out"
+  exit 0
+fi
 # Gate: a 'learned' arm with no selector means the fit job gated out (no labels).
 # Say so and exit 0 so nothing downstream strands on DependencyNeverSatisfied.
 # (adapter arms' 'adapter:learned' is the adapter's gate mode, not this selector.)
@@ -215,6 +235,7 @@ srun "$PY" -u -m rl.diffusion_ft.proposal_select \
   --select_bank_opts "$DFT_SELECT_BANK_OPTS" --select_opt_cfg "$DFT_SELECT_OPT_CFG" \
   --select_bank_opt_cfgs "$DFT_SELECT_BANK_OPT_CFGS" --select_bank_prefer "$DFT_SELECT_BANK_PREFER" \
   --select_es "$DFT_SELECT_ES" \
+  --wm_det_ckpt "$DFT_WM_DET_CKPT" --wm_mf_ckpt "$DFT_WM_MF_CKPT" --wm_device "$DFT_WM_DEVICE" \
   ${DFT_DUMP_TRAJ:+$([[ "$DFT_DUMP_TRAJ" == "1" ]] && echo --dump_traj)} \
   ${DFT_DUMP_BC:+$([[ "$DFT_DUMP_BC" == "1" ]] && echo --dump_bc)} \
   ${DFT_DUMP_PAIRS:+$([[ "$DFT_DUMP_PAIRS" == "1" ]] && echo --dump_pairs)} \

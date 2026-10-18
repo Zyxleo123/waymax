@@ -102,7 +102,10 @@ SB_FLAGS=()
 [[ -n "$EXCLUDE" ]] && SB_FLAGS+=(--exclude="$EXCLUDE")
 
 DEPS=()
-if [[ ! -s "$SPLITS3" ]]; then
+# DFT_SPLITS_UPSTREAM=1: the caller's DFT_SELECT_DEP job WRITES the splits file
+# (e.g. prep_shard_splits.sbatch), so a missing one is expected, not a cue to
+# build the three-stratum file.
+if [[ ! -s "$SPLITS3" && -z "${DFT_SPLITS_UPSTREAM:-}" ]]; then
   BID=$(sb --parsable rl/diffusion_ft/slurm/build_intermittent.sbatch "DFT_SPLITS3_JSON=$SPLITS3")
   DEPS+=("afterok:${BID}")
   echo "build   -> job $BID (CPU) -> $SPLITS3"
@@ -125,6 +128,10 @@ for c in $CKPTS; do
     {
       kv DFT_OUT_DIR "$d"
       kv DFT_SPLITS_JSON "$SPLITS3"
+      # The corpus the splits' scene ids index (validation shards, say). Written
+      # explicitly so the job never falls back to the training glob.
+      kv DFT_SHARD_GLOB "${DFT_SHARD_GLOB:-/zfsauton/datasets/womd/tf_example/training/training_tfexample.tfrecord-*}"
+      kv DFT_INDEX_DIR "${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
       kv DFT_SELECT_SPLITS "${DFT_SELECT_SPLITS:-failure_heldout,success_heldout,intermittent_heldout}"
       kv DFT_FT_CKPT "$c"
       kv DFT_ARMS "$arms"
@@ -166,6 +173,11 @@ for c in $CKPTS; do
       # earlier result. Written explicitly, so a requeue can never switch methods.
       kv DFT_WORLD_DT_METHOD "${DFT_WORLD_DT_METHOD:-median}"
       kv DFT_REQUIRE_GATE "${DFT_REQUIRE_GATE:-}"
+      # Learned world-model neighbour sources (bank neighbours wm_*). Empty =
+      # world_model_forecast.DEFAULT_CKPTS / auto device.
+      kv DFT_WM_DET_CKPT "${DFT_WM_DET_CKPT:-}"
+      kv DFT_WM_MF_CKPT "${DFT_WM_MF_CKPT:-}"
+      kv DFT_WM_DEVICE "${DFT_WM_DEVICE:-}"
     } > "$ENV_DIR/$i.env"
     # Cheap invariant: source what we just wrote in a CLEAN shell and require
     # every key to come back byte-identical. Catches any value that needs quoting

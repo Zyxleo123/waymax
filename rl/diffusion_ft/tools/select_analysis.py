@@ -53,7 +53,6 @@ from pathlib import Path
 
 import numpy as np
 
-STRATA2 = ("failure_heldout", "success_heldout")
 METRICS = ("solved", "offroad", "overlap", "reached")
 
 
@@ -115,6 +114,9 @@ def bootstrap_delta(diff_by_split, w, n_boot=2000, seed=0):
     return [float(np.percentile(tot, 2.5)), float(np.percentile(tot, 97.5))]
 
 
+_complete_scenes = complete_scenes
+
+
 def any_cross(a, b):
     """Mean over r != r' of any(a[:, r], b[:, r']) -> [n]. Independent episodes.
 
@@ -130,7 +132,11 @@ def any_cross(a, b):
 
 def analyze(rows, spec, *, repeats, base_key=("base", ""), n_boot=2000, alt_of=None):
     pop = spec["population"]
-    w2 = {k: float(pop["strata"][k]["weight"]) for k in STRATA2}
+    # The two-stratum weights are the splits file's own `strata` (failure +
+    # success for the held-out scan; one weight-1 stratum for an unlabelled
+    # shard slice, build_shard_splits.py).
+    strata2 = tuple(pop["strata"])
+    w2 = {k: float(pop["strata"][k]["weight"]) for k in strata2}
     w3 = ({k: float(v["weight"]) for k, v in pop["strata3"].items()}
           if "strata3" in pop else None)
     if base_key not in rows:
@@ -141,8 +147,17 @@ def analyze(rows, spec, *, repeats, base_key=("base", ""), n_boot=2000, alt_of=N
         print(f"[select-analysis] marginal3 disabled: base rows lack "
               f"{sorted(set(w3) - set(splits))}")
         w3 = None
-    if set(STRATA2) - set(splits):
-        raise SystemExit(f"base rows lack {sorted(set(STRATA2) - set(splits))}")
+    if set(strata2) - set(splits):
+        raise SystemExit(f"base rows lack {sorted(set(strata2) - set(splits))}")
+    # Score only scenes the splits file lists. A no-op for rows scored FROM that
+    # file; it is what lets one set of rows be re-read against a restricted copy
+    # (e.g. expert-solvable scenes only, tools/expert_label_splits.py).
+    listed = {sp: {int(i) for i in spec["splits"][sp]["scene_ids"]}
+              for sp in splits if sp in spec.get("splits", {})}
+
+    def complete_scenes(pols, sp, repeats):
+        got = _complete_scenes(pols, sp, repeats)
+        return [s for s in got if s in listed[sp]] if sp in listed else got
 
     def per_policy(pol_list, name):
         """Stats for one policy, or a seed-mean over several (paired by scene)."""
