@@ -1,0 +1,24 @@
+# Everything the current work needs from autonlab, except WOMD and the conda env
+# (see env/MIGRATION.md). For `rsync -a -r --files-from=env/transfer_list.txt / HOST:NEWROOT/`:
+# each path keeps its full autonlab path under NEWROOT, which is what env/relocate_paths.sh
+# assumes. rsync ignores lines starting with '#'. About 14 GB total.
+
+# --- yours: results, split JSONs, WOMD offset indexes, ES subsets, ES run roots (12 GB apparent)
+/zfsauton/scratch/yixiz/waymax_rs
+/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures
+/zfsauton2/home/yixiz/waymax_rs/logs
+
+# --- policy checkpoints (mineuih)
+# o_am / diffusion_ft base policy (DFT_CKPT)
+/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest
+# new goal-conditioned policy for the ES runs: pass epoch_1000 explicitly, its latest/ is a stale epoch_0500
+/zfsauton/scratch/mineuih/waymax_rs/new_checkpoints/train_diffusion/goal_cond_diffusion_policy/epoch_1000
+# old Diffusion-ES policy (es_baseline)
+/zfsauton/scratch/mineuih/waymax_rs/checkpoints/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260711_141745/latest
+
+# --- world models and the discriminator (sbellad, ishanj)
+/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20260916_200620/latest.pt
+/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20260916_200620/epoch_0450.pt
+/zfsauton/scratch/ishanj/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20261005_092950/epoch_0450.pt
+/zfsauton/scratch/sbellad/es_discriminator/safety_progress/safety_progress_v3_20261016_155456_86103/best.pt
+/zfsauton/scratch/sbellad/es_discriminator/training_sets/fail1500_plus_womd_train_s02_11/scenario_split_seed0.json
