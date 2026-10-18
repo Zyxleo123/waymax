@@ -56,7 +56,7 @@ Y="$NEWROOT/zfsauton/scratch/yixiz/waymax_rs"
 if [[ -d "$Y" ]]; then
   echo "== copied inputs under $Y"
   mapfile -t inputs < <(find -P "$Y/diffusion_ft/hard_womd" "$Y/es_posthoc" -maxdepth 3 -type f -name '*.json' -size -20M 2>/dev/null
-                        find -P "$Y" -type f \( -name env -o -name '*.env' \) -size -1M 2>/dev/null)
+                        find -P "$Y" -type f \( -name env -o -name '*.env' \) -size -2048k 2>/dev/null)
   if (( ${#inputs[@]} )); then rewrite "${inputs[@]}"; fi
   echo "== absolute symlinks under $NEWROOT/zfsauton/scratch"
   n=0
