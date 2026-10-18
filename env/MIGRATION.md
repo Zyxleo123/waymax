@@ -16,6 +16,30 @@ files of code and #SBATCH lines, the split JSONs, the run env files and the ES-s
 | WOMD v1.3.1 tf_example | 1.3 TB train + 7.8 GB val (shards 0-9) | GCS download, then `env/verify_womd.sbatch` |
 | Claude memory | 1 MB | rsync |
 
+## Target: Babel (CMU LTI)
+
+Taken from the public LTI Slurm page and search snippets of the Babel wiki. The wiki itself
+needs CMU login, so check these against `sinfo` / `scontrol show partition` on Babel.
+
+- **Storage.** `/home/<andrewid>` holds 100 GB. `/data/user_data/<andrewid>` holds **500 GB by
+  default**. `/data/group_data`, `/data/datasets` and `/data/models` are AutoFS mounts, so always
+  use full paths: `ls /data/user_data` can come back empty on a compute node. Use
+  `NEWROOT=/data/user_data/<andrewid>/autonlab`.
+- **The quota is the main constraint.** Transfer list ~14 GB + conda env ~20 GB + the ES WOMD
+  shards 251 GB ≈ 285 GB, which fits. Full WOMD for the o_am splits (1.3 TB) does **not** fit.
+  First check `/data/datasets/` for a WOMD copy: if one exists, symlink its `tf_example` to
+  `$NEWROOT/zfsauton/datasets/womd/tf_example` and verify it (section 3). Otherwise ask LTI help
+  for more `user_data` or a `group_data` allocation before moving the o_am line.
+- **Partitions.** `general`: 2-day max, 6 h default, sbatch only, normal QoS, up to 8 GPUs.
+  `long`: 7-day max; use it for multi-day `train_safety` runs. `cpu`: 2-day max. There are also
+  `preempt` and `debug` (short, no arrays). The names `general` and `cpu` match autonlab, but the
+  autonlab QOS names (`qos_general`, `qos_cpu`, `qos_preempt`) do not exist, so drop them.
+- **GPUs.** Request them as `--gres=gpu:<type>:1`. Get the type names with
+  `sinfo -h -o "%P %G %N" | sort -u` and pick a ≥24 GB Ampere-or-newer type (section 2).
+  Unpinned `--gres=gpu:1` may land on a card this env cannot use.
+- **Relocation values** (section 4): `GPU_PARTITION=general CPU_PARTITION=cpu DROP_QOS=1 DROP_NODE_PINS=1 GPU_GRES=gpu:<type>:1`.
+- The wiki lists Slurm 20.11; arrays, `--parsable` and `afterok`/`afterany` all work there.
+
 ## 0. Before autonlab goes down
 
 Run these from lov4, inside `tmux`. `NEW=user@newhost` and `NEWROOT=/abs/path` are on the new cluster.
@@ -32,8 +56,10 @@ rsync -a -r -z --partial --info=progress2 --exclude=.jax_compilation_cache \
 rsync -a ~/.claude/CLAUDE.md ~/.claude/projects/-zfsauton2-home-yixiz-waymax-rs/memory $NEW:claude_carry/
 ```
 
-**Only if the new cluster cannot download WOMD from GCS:** copy it from here. ZFS stores it at
-about 5x compression, so `-z` matters.
+**WOMD from here.** On Babel, copy the ES shards now: 251 GB fits the default quota, and both
+clusters are on the CMU network. Leave the full training set until the quota question is
+settled. ZFS stores WOMD at about 5x compression; if the copy runs slower than the link
+allows, drop `-z`.
 
 ```bash
 # just the shards the ES subsets use (fail1500: 187 training shards, 243 GB; val10: 10 val shards)
@@ -110,13 +136,21 @@ rebuilding the offsets: rebuilt offsets would silently re-map every scene id in 
 cd $NEWROOT/zfsauton2/home/yixiz/waymax_rs
 C=". ../waymax_rs_es_newmodel ../waymax_rs_es_disc ../waymax_rs_es_posthoc ../waymax_rs_es_idmfix ../waymax_rs_amfix"
 bash env/relocate_paths.sh $NEWROOT --dry-run $C
-GPU_PARTITION=<gpu partition> CPU_PARTITION=<cpu partition> DROP_QOS=1 bash env/relocate_paths.sh $NEWROOT $C
+# Babel: GPU_PARTITION=general CPU_PARTITION=cpu DROP_QOS=1 DROP_NODE_PINS=1 GPU_GRES=gpu:<type>:1
+GPU_PARTITION=<gpu partition> CPU_PARTITION=<cpu partition> DROP_QOS=1 DROP_NODE_PINS=1 GPU_GRES=gpu:<type>:1 \
+  bash env/relocate_paths.sh $NEWROOT $C
 for d in $C; do git -C $d commit -qam "Relocate paths to <cluster>"; done   # one commit each; revert it to go back
 ```
 
-The script is safe to run twice. It skips `env/` and the byte-identical vendored trees. It
-remaps only `#SBATCH --partition=general|cpu` lines. Fix the rest by hand: inline flags in the
-submitters and `preempt` lines.
+The script is safe to run twice, and it skips `env/` and the byte-identical vendored trees.
+It changes four kinds of lines:
+- `#SBATCH --partition=general|cpu` lines, remapped
+- `#SBATCH --qos` lines, deleted
+- autonlab node pins, dropped (`--exclude=gpu28`, `${ES_EXCLUDE-gpu30}` and similar)
+- 1-GPU `--gres` lines, rewritten to `GPU_GRES`
+
+Check what's left by hand. The ES submitter's optional preempt path hard-codes
+`--qos=qos_preempt`; it only runs when `ES_PREEMPT_IDX` is set.
 
 ```bash
 git grep -nE -- '--(exclude|nodelist|qos)=|--partition=preempt|gres=gpu' -- '*.sh' '*.sbatch' ':!es_baseline' | grep -v '^env/'
