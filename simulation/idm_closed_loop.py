@@ -13,7 +13,9 @@ interleaved:
         ego plan is written into the ego's log from t onwards;
         the env steps ``replan_interval_steps`` times: ego follows its plan
         (expert actor on the rewritten log), every non-SDC object is driven by
-        Waymax's default ``IDMRoutePolicy`` (SimAgentConfig IDM / NON_SDC).
+        the ``--other_agents`` model of simulation/sim_agents.py: ``idm`` =
+        Waymax's stock ``IDMRoutePolicy`` (NPCs race toward 30 m/s), ``idm_brake``
+        = IDM capped at each NPC's logged speed, braking for the ego only.
 
 The returned state has ``log_trajectory`` equal to the simulated trajectory of
 every object, so the existing metric/goal code (which replays the log) scores
@@ -39,29 +41,28 @@ from simulation.planning_utils import (
 _TRAJ_FIELDS = ("x", "y", "z", "yaw", "vel_x", "vel_y", "valid", "length", "width", "height", "timestamp_micros")
 
 
-def _build_idm_env_and_ego_actor(max_num_objects: int, init_steps: int):
+def _build_idm_env_and_ego_actor(max_num_objects: int, init_steps: int, kind: str = "idm"):
     from waymax import agents
     from waymax import config as waymax_config
     from waymax import dynamics as waymax_dynamics
     from waymax import env as waymax_env
 
+    from simulation.sim_agents import REACTIVE_CHOICES, build_sim_agents
+
+    if kind not in REACTIVE_CHOICES:
+        raise ValueError(f"closed-loop NPC model must be one of {REACTIVE_CHOICES}, got {kind!r}")
     state_dynamics = waymax_dynamics.StateDynamics()
     env_cfg = waymax_config.EnvironmentConfig(
         max_num_objects=int(max_num_objects),
         init_steps=int(init_steps),
         controlled_object=waymax_config.ObjectType.SDC,
     )
-    idm = agents.create_sim_agents_from_config(
-        waymax_config.SimAgentConfig(
-            agent_type=waymax_config.SimAgentType.IDM,
-            controlled_objects=waymax_config.ObjectType.NON_SDC,
-        )
-    )
+    sim_agent_actors, sim_agent_params = build_sim_agents(kind)
     env_obj = waymax_env.PlanningAgentEnvironment(
         dynamics_model=state_dynamics,
         config=env_cfg,
-        sim_agent_actors=[idm],
-        sim_agent_params=[{}],
+        sim_agent_actors=sim_agent_actors,
+        sim_agent_params=sim_agent_params,
     )
     ego_actor = agents.create_expert_actor(
         dynamics_model=waymax_env.PlanningAgentDynamics(state_dynamics),
@@ -107,7 +108,9 @@ def predict_planner_trajectories_closed_loop_idm(
     episode_num_steps = int(sim_state.log_trajectory.x.shape[-1])
     last_t = episode_num_steps - 1
 
-    env_obj, ego_actor = _build_idm_env_and_ego_actor(num_objects, init_steps=start_timestep + 1)
+    env_obj, ego_actor = _build_idm_env_and_ego_actor(
+        num_objects, init_steps=start_timestep + 1, kind=getattr(cfg, "other_agents", "idm")
+    )
 
     @jax.jit
     def _env_step(state):

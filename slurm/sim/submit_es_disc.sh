@@ -21,7 +21,10 @@
 # VIEWS (es_WM c0fded3's evaluators; each view is its own planning run):
 #   log   NPCs replay the log (also re-scored with evaluation-only IDM: idm_* keys)
 #   idm   closed-loop IDM (simulation/idm_closed_loop.py): every non-SDC object runs Waymax's
-#         IDMRoutePolicy and the planner observes the simulated NPCs
+#         IDMRoutePolicy and the planner observes the simulated NPCs. Stock IDM races every
+#         unobstructed NPC toward 30 m/s; kept so the nm_* runs stay reproducible
+#   idm_brake  the same loop, NPCs capped at their own logged speed and braking for the ego only
+#         (simulation/sim_agents.py; gate: ES_CPU_MODE=test_idm_brake). The default here.
 # Every scene JSON also carries es_WM's original failure window (*_oldwin).
 # POLICY: mineuih goal_cond_diffusion_policy/epoch_1000 (mini-hong/waymax_rs@new_model architecture and
 # map-feature sampling, ported into this worktree; see es_disc_common.sh for why not "latest").
@@ -41,7 +44,7 @@
 #   ES_PACK=1 bash ...         # one config per GPU task (default: both groups share one GPU)
 #   ES_PREEMPT_IDX=0,1,2 bash ...  # these task ids go to preempt (qos_preempt caps 10 submitted per user)
 set -euo pipefail
-ROOT="/zfsauton2/home/yixiz/waymax_rs_es_newmodel"; cd "$ROOT"
+ROOT="/zfsauton2/home/yixiz/waymax_rs_es_idmfix"; cd "$ROOT"
 for v in $(compgen -v SLURM_); do unset "$v"; done
 source "$ROOT/slurm/sim/es_disc_common.sh"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
@@ -63,13 +66,13 @@ MF_WM="${ES_MF_WM_CKPT:-$ES_DEFAULT_MF_WM}"
 ISHAN_WM="${ES_ISHAN_WM_CKPT:-$ES_DEFAULT_ISHAN_WM}"
 for f in "$DISC" "$DISC_WM" "$MF_WM" "$ISHAN_WM" "$POLICY"; do [[ -e "$f" ]] || { echo "FATAL: missing $f" >&2; exit 1; }; done
 case "$SMOKE" in
-  "") OUT="${ES_OUT:-$SCR/runs/nm_${ES_SUBSET}_${STAMP}}" ;;
-  1) OUT="${ES_OUT:-$SCR/runs/nm_${ES_SUBSET}_smoke_${STAMP}}" ;;
+  "") OUT="${ES_OUT:-$SCR/runs/idmfix_${ES_SUBSET}_${STAMP}}" ;;
+  1) OUT="${ES_OUT:-$SCR/runs/idmfix_${ES_SUBSET}_smoke_${STAMP}}" ;;
   *) echo "FATAL: ES_SMOKE=$SMOKE not 1" >&2; exit 1 ;;
 esac
 # Longest first, so the slow arms start early.
 ARMS="${ES_ARMS_SEL:-wm_mf_disc_posthoc,wmI_mf_disc_posthoc,wm_mf_posthoc,wmI_mf_posthoc,cv_posthoc,gt,wm_mf_disc,cv,wm_mf,wmI_mf,wm_mf_tb,wmI_mf_tb,diff_posthoc,diff}"
-VIEWS="${ES_VIEWS:-log,idm}"
+VIEWS="${ES_VIEWS:-log,idm_brake}"
 PACK="${ES_PACK:-groups}"
 mkdir -p "$OUT/cfg" "$OUT/env" "$ES_LOG_DIR"
 sb() { env -i HOME="$HOME" PATH="$PATH" USER="${USER:-}" sbatch "$@"; }
@@ -98,7 +101,7 @@ write_cfg() {
   { kv ES_OUT "$OUT"; kv ES_ARM "$arm"; kv ES_VIEW "$view"; kv ES_PLANNER "$pl"; kv ES_FORECAST "$fc"
     kv ES_POSTHOC "$ph"; kv ES_DISC_CKPT "$disc"; kv ES_DISC_WM_CKPT "$DISC_WM"
     kv ES_ISHAN_WM_CKPT "$ISHAN_WM"; kv ES_OFFROAD_MODE "$om"
-    kv ES_ALSO_EVAL "$([[ "$view" == log ]] && echo "${ES_ALSO_EVAL:-idm}" || echo "")"
+    kv ES_ALSO_EVAL "$([[ "$view" == log ]] && echo "${ES_ALSO_EVAL:-idm,idm_brake}" || echo "")"
     kv ES_WORLD_DT_METHOD "${ES_WORLD_DT_METHOD:-median}"; kv ES_SAVE_TRAJ "${ES_SAVE_TRAJ:-1}"
     kv ES_GROUP_DIR "$gdir"; kv ES_SPLIT "$SPLIT"
     kv ES_DIFFUSION_CKPT "$POLICY"; kv ES_MF_WM_CKPT "$MF_WM"; kv ES_SEED "${ES_SEED:-0}"
@@ -117,7 +120,7 @@ if [[ -n "$SMOKE" ]]; then
   # log:diff and log:cv_posthoc re-run scenes an earlier run planned (regression check);
   # the rest exercise each new path once: the discriminator with and without the repair,
   # and the closed loop with the discriminator, the diffusion-only repair, gt and the WM.
-  SPECS="${ES_SMOKE_SPECS:-log:diff log:cv_posthoc log:wm_mf_disc log:wm_mf_disc_posthoc idm:wm_mf_disc_posthoc idm:diff_posthoc idm:gt idm:wm_mf}"
+  SPECS="${ES_SMOKE_SPECS:-log:diff log:cv_posthoc log:wm_mf_disc log:wm_mf_disc_posthoc idm_brake:wm_mf_disc_posthoc idm_brake:diff_posthoc idm_brake:gt idm_brake:wm_mf}"
   cfgs=()
   for s in $SPECS; do cfgs+=("$(write_cfg "${s%%:*}" "${s#*:}" "$g0")"); done
   { kv ES_SUBTASKS "${cfgs[*]}"; kv ES_SUBTASK_MODE seq; } > "$OUT/env/smoke.env"

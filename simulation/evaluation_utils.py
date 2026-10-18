@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import dataclasses
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -26,31 +24,19 @@ def _build_rollout_env_and_actor(
         controlled_object=waymax_config.ObjectType.SDC,
         metrics=waymax_config.MetricsConfig(metrics_to_run=metric_names),
     )
-    if sim_agents == "idm":
-        # Non-ego agents follow their logged route with IDM speed control
-        # instead of replaying the log; ego still replays its (replaced) log.
-        env_cfg = dataclasses.replace(
-            env_cfg,
-            sim_agents=[
-                waymax_config.SimAgentConfig(
-                    agent_type=waymax_config.SimAgentType.IDM,
-                    controlled_objects=waymax_config.ObjectType.NON_SDC,
-                )
-            ],
-        )
-    elif sim_agents != "log":
-        raise ValueError(f"Unknown sim_agents '{sim_agents}'; expected 'log' or 'idm'.")
-    # PlanningAgentEnvironment never reads env_cfg.sim_agents (only waymax's
-    # make_sdc_dm_environment converts it), so the agents must be passed as actors,
-    # or the "idm" rollout silently replays the log.
-    from waymax.agents import agent_builder
+    # Non-ego agents: "log" replays them; "idm" / "idm_brake" follow their logged route
+    # with IDM speed control (simulation/sim_agents.py); the ego still replays its
+    # (replaced) log. PlanningAgentEnvironment never reads env_cfg.sim_agents (only
+    # waymax's make_sdc_dm_environment converts it), so the agents must be passed as
+    # actors, or an IDM rollout silently replays the log.
+    from simulation.sim_agents import build_sim_agents
 
-    sim_agent_actors = [agent_builder.create_sim_agents_from_config(a) for a in (env_cfg.sim_agents or [])]
+    sim_agent_actors, sim_agent_params = build_sim_agents(sim_agents)
     env_obj = waymax_env.PlanningAgentEnvironment(
         dynamics_model=state_dynamics,
         config=env_cfg,
         sim_agent_actors=sim_agent_actors,
-        sim_agent_params=[None] * len(sim_agent_actors),
+        sim_agent_params=sim_agent_params,
     )
     actor = agents.create_expert_actor(
         dynamics_model=planning_dynamics,

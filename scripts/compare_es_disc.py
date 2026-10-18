@@ -1,15 +1,17 @@
 """Paired comparison of the Diffusion-ES arms under each of es_WM's evaluators.
 
 Layout (slurm/sim/submit_es_disc.sh): ``<root>/<run view>/<arm>/<group>/<tfrecord>.scenario_<idx>.json``
-with run view ``log`` (NPCs replay the log) or ``idm`` (es_WM's closed-loop IDM: the planner
-sees the simulated NPCs, simulation/idm_closed_loop.py). Each run view is its own planning
-run, so the two are compared arm by arm, never scene-paired across views.
+with run view ``log`` (NPCs replay the log), ``idm`` (es_WM's closed-loop IDM: the planner
+sees the simulated NPCs, simulation/idm_closed_loop.py) or ``idm_brake`` (the same loop with
+IDM capped at each NPC's logged speed, braking for the ego only, simulation/sim_agents.py).
+Each run view is its own planning run, so views are compared arm by arm, never scene-paired.
 
 Reported views (all over the scenes EVERY arm of that run view finished):
   log / idm                failures counted over [t=10, goal step] (Ishan's 4219b45 window)
   log_oldwin / idm_oldwin  es_WM's original window (metric rows [10:] -> t=20..goal+20)
   log_idm_evalonly         the log run's executed ego re-scored with evaluation-only IDM NPCs
                            (the previous protocol's "idm" view; not a closed loop)
+  idm_brake / idm_brake_oldwin, log_idm_brake_evalonly   the same, with idm_brake NPCs
 Per arm: success, collision, off-road, goal-not-reached rates; per pair (b:a) the paired
 success difference with a scene-bootstrap 95% CI and the discordant counts.
 
@@ -43,11 +45,19 @@ VIEWS = {
     "idm": ("idm", {k: k for k in KEYS}),
     "idm_oldwin": ("idm", {"success": "success_oldwin", "offroad": "offroad_oldwin",
                            "overlap": "overlap_oldwin", "goal_reached": "goal_reached"}),
+    "log_idm_brake_evalonly": ("log", {"success": "idm_brake_success", "offroad": "idm_brake_offroad",
+                                       "overlap": "idm_brake_overlap", "goal_reached": "goal_reached"}),
+    "idm_brake": ("idm_brake", {k: k for k in KEYS}),
+    "idm_brake_oldwin": ("idm_brake", {"success": "success_oldwin", "offroad": "offroad_oldwin",
+                                       "overlap": "overlap_oldwin", "goal_reached": "goal_reached"}),
 }
 TITLES = {"log": "log replay", "log_oldwin": "log replay, es_WM original window",
           "log_idm_evalonly": "log run re-scored with evaluation-only IDM (old protocol)",
-          "idm": "closed-loop IDM (es_WM evaluator)", "idm_oldwin": "closed-loop IDM, es_WM original window"}
-SPLIT_VIEWS = ("log", "idm")
+          "idm": "closed-loop IDM (es_WM evaluator)", "idm_oldwin": "closed-loop IDM, es_WM original window",
+          "log_idm_brake_evalonly": "log run re-scored with evaluation-only idm_brake NPCs",
+          "idm_brake": "closed-loop idm_brake (NPCs capped at logged speed, brake for ego)",
+          "idm_brake_oldwin": "closed-loop idm_brake, es_WM original window"}
+SPLIT_VIEWS = ("log", "idm", "idm_brake")
 
 
 def load_arm(d: Path, expected_agents: str) -> dict:

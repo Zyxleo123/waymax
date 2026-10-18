@@ -226,18 +226,20 @@ def _parse_args() -> argparse.Namespace:
         "--other_agents",
         type=str,
         default="log",
-        choices=["log", "idm"],
+        choices=["log", "idm", "idm_brake"],
         help="Non-ego agents: 'log' replays the log; 'idm' runs Waymax's default IDMRoutePolicy "
-        "on every non-SDC object in a closed loop with the planner (simulation/idm_closed_loop.py).",
+        "on every non-SDC object in a closed loop with the planner (simulation/idm_closed_loop.py); "
+        "'idm_brake' the same loop with IDM capped at each NPC's logged speed, braking for the ego "
+        "only (simulation/sim_agents.py).",
     )
     parser.add_argument(
         "--sim_agents",
         type=str,
         default="log",
-        choices=["log", "idm"],
+        choices=["log", "idm", "idm_brake"],
         help="How non-ego agents move during the EVALUATION rollout only: 'log' = log replay, "
-        "'idm' = IDM along logged routes. Planning still sees logged agents (open loop for the "
-        "NPCs); for a true closed loop use --other_agents idm.",
+        "'idm' / 'idm_brake' = IDM along logged routes (simulation/sim_agents.py). Planning still "
+        "sees logged agents (open loop for the NPCs); for a true closed loop use --other_agents.",
     )
     parser.add_argument(
         "--world_dt_method",
@@ -568,7 +570,7 @@ def main(args: argparse.Namespace) -> None:
     if args.other_agents != "log" and (args.sim_agents != "log" or args.also_eval_sim_agents):
         # Under the closed loop the returned log already IS the IDM rollout; an
         # evaluation-only IDM pass would re-simulate the NPCs on top of it.
-        raise ValueError("--other_agents idm (closed loop) cannot be combined with --sim_agents / "
+        raise ValueError(f"--other_agents {args.other_agents} (closed loop) cannot be combined with --sim_agents / "
                          "--also_eval_sim_agents (evaluation-only NPC models)")
     args.tfrecord_dir = os.path.join(args.tfrecord_dir, args.split)
     

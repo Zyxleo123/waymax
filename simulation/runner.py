@@ -269,7 +269,7 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                     scorer_helpers.update_lane_points(
                         planner.scorers[world_idx], sim_state, world_idx
                     )
-            if getattr(args, "other_agents", "log") == "idm":
+            if getattr(args, "other_agents", "log") in ("idm", "idm_brake"):
                 replan_fn = predict_planner_trajectories_closed_loop_idm
             else:
                 replan_fn = predict_planner_trajectories_with_periodic_replan
@@ -527,7 +527,7 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                 "success_oldwin": bool(success_old[i]),
                 # WOMD scenario/id: joins against es_discriminator's scenario-hash train/val/test split.
                 "scenario_id": str(scenario_ids[i]) if scenario_ids is not None else None,
-                # log = NPCs replay the log; idm = closed-loop IDM (simulation/idm_closed_loop.py).
+                # log = NPCs replay the log; idm / idm_brake = closed-loop IDM (simulation/idm_closed_loop.py).
                 "other_agents": str(getattr(args, "other_agents", "log")),
                 "discriminator": bool(getattr(args, "discriminator_ckpt", None)),
             }
