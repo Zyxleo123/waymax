@@ -30,6 +30,7 @@ class DiffusionESPlanner(DiffusionPlanner):
         num_iterations: int = 3,
         other_agent_forecast: str = "cv",
         world_model_forecaster: Any = None,
+        posthoc_repair: Any = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -48,6 +49,10 @@ class DiffusionESPlanner(DiffusionPlanner):
         # Optional es_discriminator.real_es.closed_loop.LearnedESScorer; when set it replaces the
         # handcrafted scorers for every population (hence every elite and the final selection).
         self.learned_scorer = None
+        # planner/posthoc_repair.PosthocRepair: every candidate is repaired before it is
+        # scored, so elites are chosen on (and the plan executed is) the repaired plans.
+        # With learned_scorer set too, the discriminator scores the repaired candidates.
+        self.posthoc_repair = posthoc_repair
         self.scorers = [
             Scorer(
                 metrics=metrics,
@@ -117,6 +122,8 @@ class DiffusionESPlanner(DiffusionPlanner):
             current_norm_bktd,
             pre_batch,
         )
+        if self.posthoc_repair is not None:
+            current_world_bkt5 = self.posthoc_repair(current_world_bkt5, sim_state, timestep)
         if self.learned_scorer is not None:
             current_scores_bk = self.learned_scorer(sim_state, timestep, goal, current_world_bkt5)
         else:
@@ -148,10 +155,14 @@ class DiffusionESPlanner(DiffusionPlanner):
                 current_norm_bktd,
                 elite_indices_bk,
             )
-            elite_world_bet5, _, _ = self._postprocess_population(
-                elite_norm_betd,
-                pre_batch,
-            )
+            if self.posthoc_repair is not None:
+                # The elites' REPAIRED plans; re-decoding their raw samples would undo it.
+                elite_world_bet5 = self._gather_population(current_world_bkt5, elite_indices_bk)
+            else:
+                elite_world_bet5, _, _ = self._postprocess_population(
+                    elite_norm_betd,
+                    pre_batch,
+                )
             replicated_norm_bktd = self._replicate_elites(
                 elite_norm_betd,
                 population_size=self.population_size,
@@ -169,6 +180,8 @@ class DiffusionESPlanner(DiffusionPlanner):
                 current_norm_bktd,
                 pre_batch,
             )
+            if self.posthoc_repair is not None:
+                current_world_bkt5 = self.posthoc_repair(current_world_bkt5, sim_state, timestep)
             if self.learned_scorer is not None:
                 current_scores_bk = self.learned_scorer(sim_state, timestep, goal, current_world_bkt5)
             else:
