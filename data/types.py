@@ -56,4 +56,5 @@ class CacheBatch:
     prompts: list[str] = None
     answers: list[str] = None
     keys: list[str] = None
+    cache_paths: list[str] = None
 

@@ -92,7 +92,7 @@ def _build_preprocess_cfg(metadata: dict[str, Any]) -> PreprocessConfig:
         map_unknown_type_index=20,
         max_segments=int(metadata["max_num_segments"]),
         max_points_per_segment=int(metadata["max_points_per_segment"]),
-        inst_dim=int(metadata["inst_dim"]),
+        inst_dim=int(metadata.get("inst_dim", 768)),
     )
 
 
@@ -103,10 +103,10 @@ def _build_model_from_metadata(metadata: dict[str, Any], seed: int) -> Diffusion
         cond_dim=int(metadata["cond_dim"]),
         map_attr_dim=int(metadata["map_attr_dim"]),
         tl_attr_dim=int(metadata["tl_attr_dim"]),
-        inst_attr_dim=int(metadata["inst_dim"]),
         predict_horizon=int(metadata["predict_horizon"]),
         predict_type=str(metadata["predict_type"]),
-        subgoal_conditioned=bool(metadata["subgoal_conditioned"]),
+        goal_conditioned=bool(metadata.get("goal_conditioned", True)),
+        num_denoising_steps=int(metadata.get("num_denoising_steps", 100)),
         rngs=nnx.Rngs(int(seed)),
     )
 
