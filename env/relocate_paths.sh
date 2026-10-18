@@ -10,6 +10,9 @@
 # Optional env:
 #   GPU_PARTITION / CPU_PARTITION  rewrite '#SBATCH --partition=general' / '=cpu' lines
 #   DROP_QOS=1                     delete '#SBATCH --qos=' lines (autonlab QOS names)
+#   DROP_NODE_PINS=1               drop autonlab node pins: '#SBATCH --exclude/--nodelist=gpuNN'
+#                                  lines, literal '--exclude=gpuNN' flags, '${X-gpuNN}' defaults
+#   GPU_GRES=gpu:<type>:1          rewrite '#SBATCH --gres=gpu:1' and '--gres=gpu:<type>:1' lines
 #
 # Also rewrites the small input files under the copied scratch (split JSONs, subset
 # manifests, run env files) and re-points absolute symlinks (the ES subsets link into
@@ -48,6 +51,23 @@ for co in "$@"; do
       [[ -n "${GPU_PARTITION:-}" ]] && sed -i "s|^#SBATCH --partition=general\$|#SBATCH --partition=$GPU_PARTITION|" "${sb[@]}"
       [[ -n "${CPU_PARTITION:-}" ]] && sed -i "s|^#SBATCH --partition=cpu\$|#SBATCH --partition=$CPU_PARTITION|" "${sb[@]}"
       [[ "${DROP_QOS:-0}" == 1 ]] && sed -i '/^#SBATCH --qos=/d' "${sb[@]}"
+    fi
+  fi
+  if [[ "${DROP_NODE_PINS:-0}" == 1 ]]; then
+    mapfile -t pins < <(git -C "$co" grep -lE -- '--(exclude|nodelist)=gpu[0-9]|-gpu[0-9][0-9,]*\}' -- '*.sbatch' '*.sh' \
+                          ':!env' ':!es_baseline' ':!legacy' | sed "s|^|$co/|")
+    echo "   ${#pins[@]} scripts with autonlab node pins"
+    if (( ! DRY )) && (( ${#pins[@]} )); then
+      perl -ni -e 'next if /^#SBATCH --(exclude|nodelist)=gpu[0-9]/;
+                   s/(\$\{[A-Z_]+-)gpu[0-9][0-9,]*\}/$1}/g; s/--(exclude|nodelist)=gpu[0-9][0-9,]* ?//g; print' "${pins[@]}"
+    fi
+  fi
+  if [[ -n "${GPU_GRES:-}" ]]; then
+    mapfile -t gr < <(git -C "$co" grep -lE '^#SBATCH --gres=gpu:([a-z0-9_]+:)?1$' -- '*.sbatch' '*.sh' ':!env' ':!es_baseline' \
+                        ':!legacy' | sed "s|^|$co/|")
+    echo "   ${#gr[@]} batch scripts with a 1-GPU #SBATCH --gres line"
+    if (( ! DRY )) && (( ${#gr[@]} )); then
+      sed -i -E "s|^#SBATCH --gres=gpu:([a-z0-9_]+:)?1\$|#SBATCH --gres=$GPU_GRES|" "${gr[@]}"
     fi
   fi
 done
