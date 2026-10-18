@@ -11,10 +11,9 @@ files of code and #SBATCH lines, the split JSONs, the run env files and the ES-s
 | What | Size | How it moves |
 |---|---|---|
 | Code, 10 branches + 5 worktrees | — | git: `Zyxleo123/waymax` has every branch |
-| Your scratch, ckpts, WMs, disc (`env/transfer_list.txt`) | ~14 GB | rsync **now**, again just before shutdown |
+| Your scratch, ckpts, WMs, disc, data (`env/transfer_list.txt`) | ~26 GB | rsync **now**, again just before shutdown |
 | conda env | — | rebuild from `env/conda_env.yml` |
-| WOMD v1.3.1, **eval data only**: all 150 validation shards | 117.6 GB | rsync **now** (GCS later if it doesn't finish) |
-| optional: fail1500's 187 training shards | 243 GB | rsync after the validation split, if time allows |
+| **Data:** WOMD val shards 0-9, plus a compact copy of the new policy's 1568 validation failures | 7.8 GB + 4.2 GB | in the same transfer list, same rsync |
 | Claude memory | 1 MB | rsync |
 
 ## Target: Babel (CMU LTI)
@@ -26,12 +25,12 @@ needs CMU login, so check these against `sinfo` / `scontrol show partition` on B
   default**. `/data/group_data`, `/data/datasets` and `/data/models` are AutoFS mounts, so always
   use full paths: `ls /data/user_data` can come back empty on a compute node. Use
   `NEWROOT=/data/user_data/<andrewid>/autonlab`.
-- **The quota is fine for eval data.** Transfer list ~14 GB + conda env ~20 GB + the
-  validation split 118 GB ≈ 152 GB. With fail1500's training shards it is ≈ 395 GB.
-  Full WOMD (1.3 TB) does **not** fit, but only training and o_am's training-corpus held-out
-  evals need it. If you need it later, first check `/data/datasets/` for a copy; if there is
-  one, symlink its `tf_example` to `$NEWROOT/zfsauton/datasets/womd/tf_example` and verify it
-  (section 3). Otherwise ask LTI help for more space.
+- **The quota is not an issue.** The transfer list including the data is ~26 GB, plus ~20 GB
+  for the conda env. Full WOMD (1.3 TB) would not fit, but nothing needs it now; only
+  training and o_am's training-corpus held-out evals do. If you need it later, first check
+  `/data/datasets/` for a copy; if there is one, symlink its `tf_example` to
+  `$NEWROOT/zfsauton/datasets/womd/tf_example` and verify it (section 3). Otherwise ask LTI
+  help for more space.
 - **Partitions.** `general`: 2-day max, 6 h default, sbatch only, normal QoS, up to 8 GPUs.
   `long`: 7-day max; use it for multi-day `train_safety` runs. `cpu`: 2-day max. There are also
   `preempt` and `debug` (short, no arrays). The names `general` and `cpu` match autonlab, but the
@@ -50,7 +49,7 @@ Run these from lov4, inside `tmux`. `NEW=user@newhost` and `NEWROOT=/abs/path` a
 cd /zfsauton2/home/yixiz/waymax_rs
 NEW=user@newhost NEWROOT=/abs/path
 ssh $NEW "mkdir -p $NEWROOT"
-# ~14 GB. Rerun the same line just before the outage: it then sends only what changed,
+# ~26 GB. Rerun the same line just before the outage: it then sends only what changed,
 # which picks up the ES runs' latest per-scene results.
 rsync -a -r -z --partial --info=progress2 --exclude=.jax_compilation_cache \
   --files-from=env/transfer_list.txt / $NEW:$NEWROOT/
@@ -58,21 +57,20 @@ rsync -a -r -z --partial --info=progress2 --exclude=.jax_compilation_cache \
 rsync -a ~/.claude/CLAUDE.md ~/.claude/projects/-zfsauton2-home-yixiz-waymax-rs/memory $NEW:claude_carry/
 ```
 
-**WOMD: evaluation data only.** Copy in this order and stop when time runs out. Anything not
-copied can come from GCS later (section 3). ZFS stores WOMD at about 5x compression; if a
-copy runs slower than the link allows, drop `-z`.
+**The data rides along in that same rsync.** It is exactly what the work needs now:
+- **val10:** WOMD validation shards 0-9 (7.8 GB), listed explicitly in the transfer list.
+- **The new eval set:** the new goal-conditioned policy's 1568 validation failures, at
+  `$ZFS/waymax_rs/womd_compact/valfail1568/`. They touch all 150 validation shards (118 GB),
+  so they travel as an **index-preserving compact copy** (`tools/build_compact_shards.py`).
+  Each shard keeps its real name and record count. The failure records are byte-identical;
+  every other record is an empty 16-byte frame. The ES runner, `target_scenarios.json` and
+  result names therefore see the same scene at the same index. It sits under your scratch,
+  so it is already in the list.
+- **Never** point anything that parses *every* record of a shard at the compact directory,
+  e.g. a splits JSON over "all scenes": the placeholders are not scenes.
 
-```bash
-# 1. the whole validation split (117.6 GB): val10 plus the new policy's 1568 validation
-#    failures, which touch all 150 shards (the ES runner reads each shard whole)
-rsync -a -R -z --partial --info=progress2 /zfsauton/datasets/womd/tf_example/validation $NEW:$NEWROOT/
-# 2. optional, 243 GB: fail1500's 187 training shards, only to finish or compare the old fail1500 ES run
-find -P /zfsauton/scratch/yixiz/waymax_rs/es_posthoc/fail1500_subset_g2 -type l -printf '%l\n' | sort -u > ~/fail1500_shards.txt
-rsync -a -z --partial --info=progress2 --files-from=$HOME/fail1500_shards.txt / $NEW:$NEWROOT/
-```
-
-Not needed now: the rest of the training corpus. o_am's training-corpus held-out splits
-(1450 scenes) are only 3.9 GB of records, but they sit in 427 different shards.
+Left behind: the training corpus, including fail1500's 187 shards (the old fail1500 ES run
+cannot resume on Babel) and the 427 shards behind o_am's training-corpus held-out splits.
 
 ## 1. Code
 
@@ -112,14 +110,22 @@ fails on V100 at cuDNN autotune, and a 2080 Ti runs out of memory with no traceb
 
 ## 3. WOMD
 
-This section only matters for shards the section-0 rsync did not finish. The code parses WOMD
-as `WOD_1_3_1`. Accept the licence at waymo.com/open with your Google account, run
-`gcloud auth login`, then:
+Run these checks whether the shards came by rsync or from GCS. GCS matters only if the
+section-0 rsync didn't finish val shards 0-9. The code parses WOMD as `WOD_1_3_1`. Accept the
+licence at waymo.com/open with your Google account, run `gcloud auth login`, then:
 
 ```bash
 D=$NEWROOT/zfsauton/datasets/womd/tf_example; mkdir -p $D/validation
 B=gs://waymo_open_dataset_motion_v_1_3_1/uncompressed/tf_example
-gcloud storage cp -n "$B/validation/*" $D/validation/   # -n: keep shards already rsynced
+gcloud storage cp -n "$B/validation/validation_tfexample.tfrecord-0000[0-9]-of-00150" $D/validation/
+```
+
+The compact failure set cannot come from GCS; only the transfer list carries it. To rebuild it
+you would need the full validation split (118 GB) and `rl/diffusion_ft/slurm/build_compact_shards.sbatch`.
+Check it with:
+
+```bash
+python -m rl.diffusion_ft.tools.build_compact_shards verify --out_root $NEWROOT/zfsauton/scratch/yixiz/waymax_rs/womd_compact/valfail1568   # in a CPU job
 ```
 
 **Then verify. This is the one step you must not skip.** Scene ids resolve through the cached
@@ -127,8 +133,8 @@ offset indexes, which are keyed by shard basename only, so a copy that differs f
 autonlab one is read wrongly **with no error**.
 
 ```bash
-# eval data only: TRAIN_EXPECT=0, or 187 if you copied fail1500's training shards
-mkdir -p logs && sbatch -p <cpu partition> env/verify_womd.sbatch NEWROOT=$NEWROOT TRAIN_EXPECT=0
+# this data set: no training shards, validation shards 0-9 only
+mkdir -p logs && sbatch -p <cpu partition> env/verify_womd.sbatch NEWROOT=$NEWROOT TRAIN_EXPECT=0 VAL_EXPECT=10
 ```
 
 The job must print `verify_womd: PASS`. It checks:
@@ -168,21 +174,22 @@ Then follow the global rules again: test the preamble with `env -i`, and read th
 
 ## 5. Resume what was running
 
-**The new eval set:** `mineuih/waymax_rs/exp/validation_0_150_failure_scenarios.json` (in the
-transfer list). It holds the new goal-conditioned policy's 1568 failures over all 150
-validation shards, as `(tfrecord_index, scenario_index)`; index k is
-`validation_tfexample.tfrecord-<k:05d>-of-00150`. It is not wired in yet. To run ES on it,
-build a subset directory like `es_posthoc/fail1500_subset_g2`: per group, a
-`target_scenarios.json` mapping shard basename → scene indices, plus `tfrecords/validation/`
-symlinks. Then add an `ES_SUBSET` case to `slurm/sim/submit_es_disc.sh`.
+**The new eval set** is `womd_compact/valfail1568/`: shards in `validation/`, plus
+`target_scenarios.json` in the ES runner's format and a `manifest.json`. The source list is
+`mineuih/waymax_rs/exp/validation_0_150_failure_scenarios.json`, where index k means
+`validation_tfexample.tfrecord-<k:05d>-of-00150`. It is not wired into the ES submitter yet.
+That needs a subset directory like `es_posthoc/fail1500_subset_g2` (per group: a
+`target_scenarios.json` and `tfrecords/validation/` symlinks into the compact shards) and an
+`ES_SUBSET` case in `slurm/sim/submit_es_disc.sh`.
 
 The ES new-model runs (val10 88078/88079, fail1500 88081/88082, compares 88080/88083) were
-part-way done at the outage. The fail1500 run needs the optional 187 training shards. The runner gets `--start_from <out_dir>`, so resubmitting the same
+part-way done at the outage. The val10 run resumes on Babel. The fail1500 run cannot, because
+its training shards were left behind. The runner gets `--start_from <out_dir>`, so resubmitting the same
 array skips every scene that already has a result:
 
 ```bash
 cd $NEWROOT/zfsauton2/home/yixiz/waymax_rs_es_newmodel
-for R in $NEWROOT/zfsauton/scratch/yixiz/waymax_rs/es_posthoc/runs/nm_{val10_20261018_034021_870941,fail1500_20261018_034021_871142}; do
+for R in $NEWROOT/zfsauton/scratch/yixiz/waymax_rs/es_posthoc/runs/nm_val10_20261018_034021_870941; do
   J=$(sbatch --parsable --cpus-per-task=16 --mem=40G --array=0-27 slurm/sim/es_disc.sbatch $R/env)
   sbatch --dependency=afterany:$J slurm/sim/es_disc_cpu.sbatch $R/compare.env
 done

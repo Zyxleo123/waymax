@@ -1,7 +1,8 @@
 # Everything the current work needs from autonlab, including its eval data, except the conda
 # env (see env/MIGRATION.md). For `rsync -a -r --files-from=env/transfer_list.txt / HOST:NEWROOT/`:
 # each path keeps its full autonlab path under NEWROOT, which is what env/relocate_paths.sh
-# assumes. rsync ignores lines starting with '#'. About 14 GB total.
+# assumes. rsync ignores lines starting with '#'. About 26 GB total (12 GB scratch incl. the 4.2 GB
+# compact failure set, 7.8 GB val shards 0-9, 1.9 GB checkpoints).
 
 # --- yours: results, split JSONs, WOMD offset indexes, ES subsets, ES run roots (12 GB apparent),
 #     and womd_compact/valfail1568: the new failures' compact copy (tools/build_compact_shards.py)
