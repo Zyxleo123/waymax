@@ -185,6 +185,40 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--save_cache", type=str, default="none", choices=["none", "all", "success", "failure"])
     parser.add_argument("--start_from", type=str, default=None)
     parser.add_argument("--target_scenario_path", type=str, default=None)
+    parser.add_argument(
+        "--sim_agents",
+        type=str,
+        default="log",
+        choices=["log", "idm"],
+        help="How non-ego agents move during evaluation rollout: 'log' = log replay, "
+        "'idm' = IDM along logged routes. Planning still sees logged agents.",
+    )
+    parser.add_argument(
+        "--world_dt_method",
+        type=str,
+        default="first",
+        choices=["first", "median"],
+        help="Per-scene world step from the log timestamps: 'first' = first valid pair "
+        "(original; runs ~25%% of hard scenes at 0.75x speed), 'median' = median over all pairs.",
+    )
+    parser.add_argument(
+        "--also_eval_sim_agents",
+        type=str,
+        default="",
+        help="Comma list of extra --sim_agents values to ALSO score each scene with (same "
+        "executed trajectory, extra evaluation rollout); written as <agents>_overlap/_offroad/_success.",
+    )
+    parser.add_argument(
+        "--posthoc_repair",
+        type=int,
+        default=0,
+        help="1 = repair every Diffusion-ES candidate with the o_am post-hoc optimizer "
+        "(planner/posthoc_repair.py) before scoring, against the same other-agent forecast.",
+    )
+    parser.add_argument("--posthoc_window", type=int, default=20,
+                        help="world steps the repair edits (o_am: 20 = 2 s)")
+    parser.add_argument("--posthoc_cfg", type=str, default="",
+                        help="LateralOptConfig overrides on top of o_am's lon=1,w_lon_prox=0.05,lon_back_m=1000")
     return parser.parse_args()
 
 
@@ -272,6 +306,24 @@ def _load_isolated_wm_forecaster(
                 del sys.modules[key]
 
     return forecaster
+
+
+def _build_posthoc_repair(args: argparse.Namespace, wm_forecaster):
+    """planner/posthoc_repair.PosthocRepair when --posthoc_repair 1, else None."""
+    if not int(getattr(args, "posthoc_repair", 0)):
+        return None
+    from planner.posthoc_repair import O_AM_CFG, PosthocRepair
+    repair = PosthocRepair(
+        other_agent_forecast=args.other_agent_forecast,
+        world_model_forecaster=wm_forecaster,
+        window=args.posthoc_window,
+        cfg=O_AM_CFG + ("," + args.posthoc_cfg if args.posthoc_cfg else ""),
+    )
+    print(f"[posthoc] repair ON ({args.planner}): source={repair.source} window={repair.window} "
+          f"cfg={repair.cfg}", flush=True)
+    import atexit
+    atexit.register(lambda: print(f"[posthoc] stats {repair.stats}", flush=True))
+    return repair
 
 
 def _load_world_model_forecaster(args: argparse.Namespace):
@@ -450,9 +502,14 @@ def _load_fm_model_for_inference(
 
 
 def main(args: argparse.Namespace) -> None:
+    from data.preprocess import set_world_dt_method
+    set_world_dt_method(args.world_dt_method)
+    print(f"[world_dt] method={args.world_dt_method}", flush=True)
     args.tfrecord_dir = os.path.join(args.tfrecord_dir, args.split)
     
     exp_name = f"simulation_{args.planner}_{args.split}"
+    if args.sim_agents != "log":
+        exp_name += f"_{args.sim_agents}"
     if args.tag is not None:
         exp_name += f"_{args.tag}"
     exp_name += f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -488,6 +545,7 @@ def main(args: argparse.Namespace) -> None:
             policy=policy,
             preprocess_cfg=inference.preprocess_cfg,
             num_worlds=args.num_worlds,
+            posthoc_repair=_build_posthoc_repair(args, _load_world_model_forecaster(args)),
         )
     elif args.planner == "es":
         inference = load_model_for_inference(
@@ -503,6 +561,8 @@ def main(args: argparse.Namespace) -> None:
             inference.nonparam_state,
         )
         from planner.diffusion_es_planner import DiffusionESPlanner
+        wm_forecaster = _load_world_model_forecaster(args)
+        repair = _build_posthoc_repair(args, wm_forecaster)
         planner = DiffusionESPlanner(
             policy=policy,
             preprocess_cfg=inference.preprocess_cfg,
@@ -513,7 +573,8 @@ def main(args: argparse.Namespace) -> None:
             num_worlds=args.num_worlds,
             metrics=["collision", "offroad"],
             other_agent_forecast=args.other_agent_forecast,
-            world_model_forecaster=_load_world_model_forecaster(args),
+            world_model_forecaster=wm_forecaster,
+            posthoc_repair=repair,
         )
     elif args.planner == "fm":
         fm_ckpt_path = args.fm_ckpt_path or args.diffusion_ckpt_path

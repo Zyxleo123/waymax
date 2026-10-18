@@ -56,7 +56,30 @@ def extract_ego_index(state: datatypes.SimulatorState) -> jax.Array:
     return jnp.argmax(is_sdc.astype(jnp.int32), axis=-1)
 
 
-def compute_world_dt_seconds(state: datatypes.SimulatorState, fallback_dt: float = 0.1) -> jax.Array:
+# How the per-scene world step is read off the log timestamps (ported from
+# yixiz/waymax_rs data/preprocess.py, 2026-09-24):
+#   "first"  -- the dt of the FIRST valid timestamp pair (the original behaviour);
+#   "median" -- the median over every valid pair.
+# The planner lays its plan on a k * world_dt grid and the simulator executes ONE
+# log step (0.1 s) per grid point. WOMD timestamps are not uniform, and in some
+# scenes the first interval is short (~0.075 s), so under "first" those scenes
+# execute every plan at ~0.75x speed and miss the goal (measured on a failure
+# split: 44/173 scenes, 43 of which never reached the goal). Set the method for a
+# process with set_world_dt_method() (simulation/run_simulation.py --world_dt_method).
+WORLD_DT_METHODS = ("first", "median")
+_WORLD_DT_METHOD = "first"
+
+
+def set_world_dt_method(method: str) -> None:
+    global _WORLD_DT_METHOD
+    if method not in WORLD_DT_METHODS:
+        raise ValueError(f"world dt method must be one of {WORLD_DT_METHODS}, got {method!r}")
+    _WORLD_DT_METHOD = method
+
+
+def compute_world_dt_seconds(state: datatypes.SimulatorState, fallback_dt: float = 0.1,
+                             method: str | None = None) -> jax.Array:
+    method = _WORLD_DT_METHOD if method is None else method
     ego_idx = extract_ego_index(state)
     ego_ts_us = _gather_ego(state.log_trajectory.timestamp_micros, ego_idx).astype(jnp.float32)
     ego_valid = _gather_ego(state.log_trajectory.valid, ego_idx)
@@ -65,9 +88,14 @@ def compute_world_dt_seconds(state: datatypes.SimulatorState, fallback_dt: float
     valid_pair = ego_valid[:, 1:] & ego_valid[:, :-1] & (dt > 0.0)
     any_valid = jnp.any(valid_pair, axis=-1)
 
-    first_idx = _first_true_index(valid_pair)
-    first_dt = jnp.take_along_axis(dt, first_idx[:, None], axis=1)[:, 0]
-    return jnp.where(any_valid, first_dt, jnp.full_like(first_dt, fallback_dt))
+    if method == "first":
+        first_idx = _first_true_index(valid_pair)
+        est = jnp.take_along_axis(dt, first_idx[:, None], axis=1)[:, 0]
+    elif method == "median":
+        est = jnp.nanmedian(jnp.where(valid_pair, dt, jnp.nan), axis=-1)
+    else:
+        raise ValueError(f"world dt method must be one of {WORLD_DT_METHODS}, got {method!r}")
+    return jnp.where(any_valid, est, jnp.full_like(est, fallback_dt))
 
 
 def sample_anchor_step(

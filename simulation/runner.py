@@ -27,8 +27,9 @@ from scores.scorer_lane_graph import LaneGraphShardStore
 from simulation.evaluation_utils import (
     rollout_predicted_trajectories_with_metrics,
     infer_goals_from_sim_state, 
-    check_goal_reaching, 
-    check_traffic_light_violation
+    check_goal_reaching,
+    check_traffic_light_violation,
+    episode_failure_flags,
 )
 from simulation.planning_utils import (
     predict_planner_trajectories_with_periodic_replan,
@@ -205,6 +206,11 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
             sim_state, _, scenario_ids = load_scenario_state_batch_fast(
                 ds_cfg, scenario_indices, return_scenario_ids=True
             )
+            # Which scenes the first-pair clock would have slowed (logged, not used).
+            from data.preprocess import compute_world_dt_seconds
+            _dt_first = np.asarray(compute_world_dt_seconds(sim_state, 0.1, "first"))
+            _dt_used = np.asarray(compute_world_dt_seconds(sim_state, 0.1))
+            print(f"[world_dt] first-pair {np.round(_dt_first, 3).tolist()} used {np.round(_dt_used, 3).tolist()}", flush=True)
             wm_forecaster = getattr(planner, "world_model_forecaster", None)
             if hasattr(wm_forecaster, "set_scene_ids"):
                 wm_forecaster.set_scene_ids(scenario_ids)
@@ -270,6 +276,7 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
         rollout = rollout_predicted_trajectories_with_metrics(
             replaced_state,
             rng_key=rng_key,
+            sim_agents=getattr(args, "sim_agents", "log"),
         )
         # tl_violation_eval = check_traffic_light_violation(
         #     replaced_state,
@@ -285,20 +292,35 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
         goal_reached = np.asarray(goal_eval["reached"])
         goal_reached_step = np.asarray(goal_eval["reached_step"])
 
-        overlap_timeseries = np.asarray(rollout["metric_timeseries"]["overlap"][int(args.start_timestep):])
-        offroad_timeseries = np.asarray(rollout["metric_timeseries"]["offroad"][int(args.start_timestep):])
+        # Count failures only in [start_timestep, goal step], indexed by the rollout's
+        # absolute timesteps (Ishan's 4219b45: the rollout starts at t=10, and the old
+        # [start_timestep:] slice counted t=20..goal+20).
+        def _window(ro):
+            return tuple(
+                episode_failure_flags(
+                    ro["metric_timeseries"][name],
+                    ro["timestep"],
+                    start_timestep=int(args.start_timestep),
+                    goal_reached_b=goal_reached,
+                    goal_reached_step_b=goal_reached_step,
+                    num_log_steps=ro["num_log_steps"],
+                )
+                for name in ("overlap", "offroad")
+            )
 
-        overlap = np.zeros((len(scenario_indices),), dtype=bool)
-        offroad = np.zeros((len(scenario_indices),), dtype=bool)
-        for world_idx in range(len(scenario_indices)):
-            episode_length = goal_reached_step[world_idx] + 1 if goal_reached[world_idx] else overlap_timeseries.shape[0]
-            if "overlap" in rollout["metric_timeseries"]:
-                overlap[world_idx] = overlap_timeseries[:episode_length, world_idx].sum() > 0
-            if "offroad" in rollout["metric_timeseries"]:
-                offroad[world_idx] = offroad_timeseries[:episode_length, world_idx].sum() > 0
+        overlap, offroad = _window(rollout)
         # tl_violation = tl_violation & (tl_violation_step < goal_reached_step)
 
         success = goal_reached & (~overlap) & (~offroad)
+        # Also score the SAME executed ego trajectory with other non-ego agent models
+        # (e.g. --also_eval_sim_agents idm). Only the evaluation rollout changes --
+        # planning saw logged agents either way -- so one planning run serves both.
+        extra_eval = {}
+        for sa in [x for x in str(getattr(args, "also_eval_sim_agents", "") or "").split(",")
+                   if x and x != getattr(args, "sim_agents", "log")]:
+            ro = rollout_predicted_trajectories_with_metrics(replaced_state, rng_key=rng_key, sim_agents=sa)
+            ovl, off = _window(ro)
+            extra_eval[sa] = (ovl, off, goal_reached & (~ovl) & (~off))
         reached_all += int(np.sum(goal_eval["reached"]))
         success_all += int(np.sum(success))
 
@@ -437,7 +459,14 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                 "offroad": bool(offroad[i]),
                 "success": bool(success[i]),
                 "tfrecord": str(tfrecord_path),
+                # Failures counted over [start_timestep, goal step] by absolute rollout timestep (4219b45).
+                "eval_window": "abs_t10_to_goal",
+                "world_dt_method": str(getattr(args, "world_dt_method", "first")),
             }
+            for sa, (ovl, off, suc) in extra_eval.items():
+                result[f"{sa}_overlap"] = bool(ovl[i])
+                result[f"{sa}_offroad"] = bool(off[i])
+                result[f"{sa}_success"] = bool(suc[i])
             result_path = output_dir / f"{os.path.basename(tfrecord_path)}.scenario_{scenario_idx:03d}.json"
             _save_json(result_path, result)
             completed_scenarios.add((os.path.basename(tfrecord_path), int(scenario_idx)))

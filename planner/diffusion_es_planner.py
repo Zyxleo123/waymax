@@ -30,6 +30,7 @@ class DiffusionESPlanner(DiffusionPlanner):
         num_iterations: int = 3,
         other_agent_forecast: str = "cv",
         world_model_forecaster: Any = None,
+        posthoc_repair: Any = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(
@@ -43,6 +44,9 @@ class DiffusionESPlanner(DiffusionPlanner):
         self.num_iterations = num_iterations
         self.other_agent_forecast = str(other_agent_forecast).strip().lower()
         self.world_model_forecaster = world_model_forecaster
+        # planner/posthoc_repair.PosthocRepair: every candidate is repaired before it is
+        # scored, so elites are chosen on (and the plan executed is) the repaired plans.
+        self.posthoc_repair = posthoc_repair
         self.scorers = [
             Scorer(
                 metrics=metrics,
@@ -112,6 +116,8 @@ class DiffusionESPlanner(DiffusionPlanner):
             current_norm_bktd,
             pre_batch,
         )
+        if self.posthoc_repair is not None:
+            current_world_bkt5 = self.posthoc_repair(current_world_bkt5, sim_state, timestep)
         current_scores_bk = []
         for world_idx in range(current_world_bkt5.shape[0]):
             current_scores_bk.append(self.scorers[world_idx].compute_score(
@@ -134,10 +140,14 @@ class DiffusionESPlanner(DiffusionPlanner):
                 current_norm_bktd,
                 elite_indices_bk,
             )
-            elite_world_bet5, _, _ = self._postprocess_population(
-                elite_norm_betd,
-                pre_batch,
-            )
+            if self.posthoc_repair is not None:
+                # The elites' REPAIRED plans; re-decoding their raw samples would undo it.
+                elite_world_bet5 = self._gather_population(current_world_bkt5, elite_indices_bk)
+            else:
+                elite_world_bet5, _, _ = self._postprocess_population(
+                    elite_norm_betd,
+                    pre_batch,
+                )
             replicated_norm_bktd = self._replicate_elites(
                 elite_norm_betd,
                 population_size=self.population_size,
@@ -155,6 +165,8 @@ class DiffusionESPlanner(DiffusionPlanner):
                 current_norm_bktd,
                 pre_batch,
             )
+            if self.posthoc_repair is not None:
+                current_world_bkt5 = self.posthoc_repair(current_world_bkt5, sim_state, timestep)
             current_scores_bk = []
             for world_idx in range(current_world_bkt5.shape[0]):
                 current_scores_k = self.scorers[world_idx].compute_score(

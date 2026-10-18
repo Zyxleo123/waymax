@@ -23,9 +23,12 @@ class DiffusionPlanner(AbstractPlanner):
         preprocess_cfg: PreprocessConfig,
         population_size: int = 1,
         num_worlds: int = 1,
+        posthoc_repair: Any = None,
         **kwargs: Any,
     ) -> None:
         self.policy = policy
+        # planner/posthoc_repair.PosthocRepair: repair the sampled plan before it is executed.
+        self.posthoc_repair = posthoc_repair
         self.preprocess_cfg = preprocess_cfg
         self.num_worlds = int(num_worlds)
         self.population_size = int(population_size)
@@ -85,6 +88,8 @@ class DiffusionPlanner(AbstractPlanner):
             current_norm_bktd,
             pre_batch,
         )
+        if self.posthoc_repair is not None:
+            current_world_bkt5 = self.posthoc_repair(current_world_bkt5, sim_state, timestep)
         best_indices = jnp.zeros((cond_bf.shape[0], 1), dtype=jnp.int32)
         best_norm_bt1d = self._gather_population(current_norm_bktd, best_indices)
         best_world_bt15 = self._gather_population(current_world_bkt5, best_indices)
