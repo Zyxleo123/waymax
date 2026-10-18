@@ -29,7 +29,8 @@ done
 PY="${DFT_PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 TARGETS="${DFT_COMPACT_TARGETS:-/zfsauton/scratch/mineuih/waymax_rs/exp/validation_0_150_failure_scenarios.json}"
 SRC="${DFT_COMPACT_SRC:-/zfsauton/datasets/womd/tf_example/validation}"
-NAME_FMT="${DFT_COMPACT_NAME_FMT:-validation_tfexample.tfrecord-{:05d}-of-00150}"
+# (a '}' inside a ${VAR:-default} would end the expansion early, so no inline default here)
+NAME_FMT="${DFT_COMPACT_NAME_FMT:-}"; [[ -n "$NAME_FMT" ]] || NAME_FMT='validation_tfexample.tfrecord-{:05d}-of-00150'
 OUT="${DFT_COMPACT_OUT:-/zfsauton/scratch/yixiz/waymax_rs/womd_compact/valfail1568}"
 SPLIT="${DFT_COMPACT_SPLIT:-validation}"
 echo "host=$(hostname) job=${SLURM_JOB_ID:-none} partition=${SLURM_JOB_PARTITION:-?} cpus=${SLURM_CPUS_PER_TASK:-?} mem=${SLURM_MEM_PER_NODE:-?}M"

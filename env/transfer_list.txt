@@ -1,14 +1,26 @@
-# Everything the current work needs from autonlab, except WOMD and the conda env
-# (see env/MIGRATION.md). For `rsync -a -r --files-from=env/transfer_list.txt / HOST:NEWROOT/`:
+# Everything the current work needs from autonlab, including its eval data, except the conda
+# env (see env/MIGRATION.md). For `rsync -a -r --files-from=env/transfer_list.txt / HOST:NEWROOT/`:
 # each path keeps its full autonlab path under NEWROOT, which is what env/relocate_paths.sh
 # assumes. rsync ignores lines starting with '#'. About 14 GB total.
 
-# --- yours: results, split JSONs, WOMD offset indexes, ES subsets, ES run roots (12 GB apparent)
+# --- yours: results, split JSONs, WOMD offset indexes, ES subsets, ES run roots (12 GB apparent),
+#     and womd_compact/valfail1568: the new failures' compact copy (tools/build_compact_shards.py)
 /zfsauton/scratch/yixiz/waymax_rs
 /zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures
 /zfsauton2/home/yixiz/waymax_rs/logs
 
-# --- eval sets
+# --- eval data: WOMD validation shards 0-9 (val10; 7.8 GB) ...
+/zfsauton/datasets/womd/tf_example/validation/validation_tfexample.tfrecord-00000-of-00150
+/zfsauton/datasets/womd/tf_example/validation/validation_tfexample.tfrecord-00001-of-00150
+/zfsauton/datasets/womd/tf_example/validation/validation_tfexample.tfrecord-00002-of-00150
+/zfsauton/datasets/womd/tf_example/validation/validation_tfexample.tfrecord-00003-of-00150
+/zfsauton/datasets/womd/tf_example/validation/validation_tfexample.tfrecord-00004-of-00150
+/zfsauton/datasets/womd/tf_example/validation/validation_tfexample.tfrecord-00005-of-00150
+/zfsauton/datasets/womd/tf_example/validation/validation_tfexample.tfrecord-00006-of-00150
+/zfsauton/datasets/womd/tf_example/validation/validation_tfexample.tfrecord-00007-of-00150
+/zfsauton/datasets/womd/tf_example/validation/validation_tfexample.tfrecord-00008-of-00150
+/zfsauton/datasets/womd/tf_example/validation/validation_tfexample.tfrecord-00009-of-00150
+# ... and the new failure list (its scenes travel as the compact copy above)
 # the new goal-cond policy's failures over all 150 WOMD validation shards: 1568 scenes as
 # (tfrecord_index, scenario_index), mineuih, 2026-10-18
 /zfsauton/scratch/mineuih/waymax_rs/exp/validation_0_150_failure_scenarios.json
