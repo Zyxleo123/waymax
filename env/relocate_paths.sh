@@ -13,6 +13,9 @@
 #   DROP_NODE_PINS=1               drop autonlab node pins: '#SBATCH --exclude/--nodelist=gpuNN'
 #                                  lines, literal '--exclude=gpuNN' flags, '${X-gpuNN}' defaults
 #   GPU_GRES=gpu:<type>:1          rewrite '#SBATCH --gres=gpu:1' and '--gres=gpu:<type>:1' lines
+#   CODE_HOME=/abs/dir             put the code somewhere else: '/zfsauton2/home/yixiz/...' (the
+#                                  checkouts and their logs/) -> '$CODE_HOME/...' instead of
+#                                  '$NEWROOT/zfsauton2/home/yixiz/...'; everything else stays under NEWROOT
 #
 # Also rewrites the small input files under the copied scratch (split JSONs, subset
 # manifests, run env files) and re-points absolute symlinks (the ES subsets link into
@@ -24,16 +27,22 @@ NEWROOT="${NEWROOT%/}"
 [[ "$NEWROOT" == /* ]] || { echo "NEWROOT must be absolute" >&2; exit 1; }
 DRY=0; if [[ "${1:-}" == --dry-run ]]; then DRY=1; shift; fi
 (( $# )) || set -- "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
-export NEWROOT
+CODE_HOME="${CODE_HOME:-}"; CODE_HOME="${CODE_HOME%/}"
+[[ -z "$CODE_HOME" || "$CODE_HOME" == /* ]] || { echo "CODE_HOME must be absolute" >&2; exit 1; }
+export NEWROOT CODE_HOME
 # (?<![\w./]) = the path starts here, so "$NEWROOT/zfsauton/..." does not match again.
 PAT='(?<![\w./])/zfsauton(2?)/'
+# Applied first when CODE_HOME is set; (?![\w.-]) keeps /zfsauton2/home/yixiz2 out.
+HOME_PAT='(?<![\w./])/zfsauton2/home/yixiz(?![\w.-])'
+SUB="s#$PAT#\$ENV{NEWROOT}/zfsauton\$1/#g"
+[[ -n "$CODE_HOME" ]] && SUB="s#$HOME_PAT#\$ENV{CODE_HOME}#g; $SUB"
 
 rewrite() {  # files...
   local f n
   for f in "$@"; do
     n=$(perl -ne "\$n += () = m#$PAT#g; END { print \$n + 0 }" "$f")
     (( n > 0 )) || continue
-    if (( DRY )); then echo "  $n  $f"; else perl -pi -e "s#$PAT#\$ENV{NEWROOT}/zfsauton\$1/#g" "$f"; fi
+    if (( DRY )); then echo "  $n  $f"; else perl -pi -e "$SUB" "$f"; fi
   done
 }
 
@@ -82,7 +91,7 @@ if [[ -d "$Y" ]]; then
   n=0
   while IFS= read -r l; do
     t=$(readlink "$l"); n=$((n + 1))
-    (( DRY )) || ln -sfn "$NEWROOT$t" "$l"
+    (( DRY )) || ln -sfn "$(printf '%s\n' "$t" | perl -pe "$SUB")" "$l"
   done < <(find -P "$NEWROOT/zfsauton/scratch" -type l \( -lname '/zfsauton/*' -o -lname '/zfsauton2/*' \) 2>/dev/null)
   echo "   $n symlinks to re-point"
 fi
