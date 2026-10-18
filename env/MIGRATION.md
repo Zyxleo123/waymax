@@ -29,7 +29,7 @@ needs CMU login, so check these against `sinfo` / `scontrol show partition` on B
   for the conda env. Full WOMD (1.3 TB) would not fit, but nothing needs it now; only
   training and o_am's training-corpus held-out evals do. If you need it later, first check
   `/data/datasets/` for a copy; if there is one, symlink its `tf_example` to
-  `$NEWROOT/zfsauton/datasets/womd/tf_example` and verify it (section 3). Otherwise ask LTI
+  `$NEWROOT/zfsauton/datasets/womd/tf_example` and verify it with `env/verify_womd.sbatch` (section 3). Otherwise ask LTI
   help for more space.
 - **Partitions.** `general`: 2-day max, 6 h default, sbatch only, normal QoS, up to 8 GPUs.
   `long`: 7-day max; use it for multi-day `train_safety` runs. `cpu`: 2-day max. There are also
@@ -108,41 +108,41 @@ exact conda build list is in `env/conda_explicit.txt`.
 fails on V100 at cuDNN autotune, and a 2080 Ti runs out of memory with no traceback. Check with
 `python -c "import jax; print(jax.devices())"` **inside a GPU job**.
 
-## 3. WOMD
+## 3. Check the data
 
-Run these checks whether the shards came by rsync or from GCS. GCS matters only if the
-section-0 rsync didn't finish val shards 0-9. The code parses WOMD as `WOD_1_3_1`. Accept the
-licence at waymo.com/open with your Google account, run `gcloud auth login`, then:
+Run both checks as CPU jobs from the repo root (`mkdir -p logs` first). Both must print PASS.
+
+**Val shards 0-9.** Scene ids resolve through the cached offset indexes, which are keyed by
+shard basename only. A copy whose bytes differ from autonlab's is therefore read wrongly
+**with no error**.
+
+```bash
+sbatch -p <cpu partition> env/verify_womd.sbatch NEWROOT=$NEWROOT TRAIN_EXPECT=0 VAL_EXPECT=10
+```
+
+This compares each shard's size with `env/womd_sizes.tsv` and checks each shard's record chain
+against `womd_offsets/`. If the rsync never finished these shards, fetch them from Waymo
+(WOMD `WOD_1_3_1`: accept the licence at waymo.com/open, then `gcloud auth login`) and run the
+check again:
 
 ```bash
 D=$NEWROOT/zfsauton/datasets/womd/tf_example; mkdir -p $D/validation
-B=gs://waymo_open_dataset_motion_v_1_3_1/uncompressed/tf_example
-gcloud storage cp -n "$B/validation/validation_tfexample.tfrecord-0000[0-9]-of-00150" $D/validation/
+gcloud storage cp -n "gs://waymo_open_dataset_motion_v_1_3_1/uncompressed/tf_example/validation/validation_tfexample.tfrecord-0000[0-9]-of-00150" $D/validation/
 ```
 
-The compact failure set cannot come from GCS; only the transfer list carries it. To rebuild it
-you would need the full validation split (118 GB) and `rl/diffusion_ft/slurm/build_compact_shards.sbatch`.
-Check it with:
+If a downloaded copy fails the check, its bytes are not autonlab's. Don't use it; copy from
+autonlab once it is back. Rebuilding the offsets would silently re-map scene ids.
+
+**The compact failure set.** This re-reads every shard with TensorFlow and checks each failure
+record's sha256 and that every other record is an empty placeholder:
 
 ```bash
-python -m rl.diffusion_ft.tools.build_compact_shards verify --out_root $NEWROOT/zfsauton/scratch/yixiz/waymax_rs/womd_compact/valfail1568   # in a CPU job
+sbatch -p <cpu partition> --mem=8G --time=1:00:00 --output=logs/compact_verify-%j.out --wrap \
+  "cd $PWD && CUDA_VISIBLE_DEVICES= $NEWROOT/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python -m rl.diffusion_ft.tools.build_compact_shards verify --out_root $NEWROOT/zfsauton/scratch/yixiz/waymax_rs/womd_compact/valfail1568"
 ```
 
-**Then verify. This is the one step you must not skip.** Scene ids resolve through the cached
-offset indexes, which are keyed by shard basename only, so a copy that differs from the
-autonlab one is read wrongly **with no error**.
-
-```bash
-# this data set: no training shards, validation shards 0-9 only
-mkdir -p logs && sbatch -p <cpu partition> env/verify_womd.sbatch NEWROOT=$NEWROOT TRAIN_EXPECT=0 VAL_EXPECT=10
-```
-
-The job must print `verify_womd: PASS`. It checks:
-- every validation shard's size against `env/womd_sizes.tsv`
-- the record chain of validation shards 0-9 against `womd_offsets/`
-- the same two checks for the training shards, if you set `TRAIN_EXPECT` If it fails, the GCS bytes are
-not the autonlab bytes. In that case copy the shards from autonlab (section 0) rather than
-rebuilding the offsets: rebuilt offsets would silently re-map every scene id in every split JSON.
+It cannot come from GCS: only the transfer list carries it. Rebuilding it takes the full
+validation split (118 GB) and `rl/diffusion_ft/slurm/build_compact_shards.sbatch`.
 
 ## 4. Point the code at the new paths
 
@@ -189,10 +189,9 @@ array skips every scene that already has a result:
 
 ```bash
 cd $NEWROOT/zfsauton2/home/yixiz/waymax_rs_es_newmodel
-for R in $NEWROOT/zfsauton/scratch/yixiz/waymax_rs/es_posthoc/runs/nm_val10_20261018_034021_870941; do
-  J=$(sbatch --parsable --cpus-per-task=16 --mem=40G --array=0-27 slurm/sim/es_disc.sbatch $R/env)
-  sbatch --dependency=afterany:$J slurm/sim/es_disc_cpu.sbatch $R/compare.env
-done
+R=$NEWROOT/zfsauton/scratch/yixiz/waymax_rs/es_posthoc/runs/nm_val10_20261018_034021_870941
+J=$(sbatch --parsable --cpus-per-task=16 --mem=40G --array=0-27 slurm/sim/es_disc.sbatch $R/env)
+sbatch --dependency=afterany:$J slurm/sim/es_disc_cpu.sbatch $R/compare.env
 ```
 
 ## 6. Claude memory
