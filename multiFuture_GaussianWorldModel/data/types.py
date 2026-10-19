@@ -27,6 +27,9 @@ class PreprocessConfig:
     max_points_per_segment: int = 128
     num_object_types: int = 8
     inst_dim: int = 768
+    # "legacy": lowest polyline IDs, points nearest the ego.
+    # "nearest_even": polylines nearest the ego, points evenly spaced along each.
+    map_selection: str = struct.field(pytree_node=False, default="legacy")
 
 
 @struct.dataclass

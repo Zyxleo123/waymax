@@ -17,7 +17,8 @@ unchanged) with two candidate-relative, time-aligned cross-attention branches:
                is directly available for offroad reasoning.
 
 Each candidate gets one score; the per-step branch outputs are pooled (mean and max over
-time) and fused with the base pooled vector.
+time) and fused with the base pooled vector. The constructor flags remove parts for the
+ablations in `analyse_discriminator/ablations.py`; all on = the original model.
 """
 
 from __future__ import annotations
@@ -104,20 +105,39 @@ class _GeoAttention(nn.Module):
 
 class WMTrajectoryDiscriminator(TrajectoryDiscriminator):
     def __init__(self, hidden: int = 128, heads: int = 4, dropout: float = 0.1, *,
-                 pos_scale: float = 20.0, vel_scale: float = 5.0) -> None:
-        super().__init__(hidden, heads, dropout)
+                 pos_scale: float = 20.0, vel_scale: float = 5.0, goal_fusion: bool = True,
+                 map_tokens: bool = True, agent_tokens: bool = True, scene_attention: bool = True,
+                 edge_branch: bool = True, wm_branch: bool = True, max_pool: bool = True) -> None:
+        """`goal_fusion` = False drops the direct goal embedding from the final fusion (the goal token
+        stays in scene attention); `map_tokens` / `agent_tokens`: see `TrajectoryDiscriminator`.
+        `scene_attention` = False replaces the scene cross-attention by the goal embedding and the
+        masked mean of the traffic-light embeddings in the fusion (needs map and agent tokens off);
+        `edge_branch` / `wm_branch` = False drop the road-edge / WM encoder and attention;
+        `max_pool` = False pools the branch outputs over time by mean only."""
+        if not scene_attention and (map_tokens or agent_tokens):
+            raise ValueError("scene_attention=False conditions on goal and traffic lights only; "
+                             "turn map_tokens and agent_tokens off")
+        super().__init__(hidden, heads, dropout, agent_tokens=agent_tokens, map_tokens=map_tokens,
+                         scene_attention=scene_attention)
         self.variant = VARIANT
+        self.goal_fusion = bool(goal_fusion)
+        self.edge_branch, self.wm_branch, self.max_pool = bool(edge_branch), bool(wm_branch), bool(max_pool)
         self.pos_scale, self.vel_scale = float(pos_scale), float(vel_scale)
-        self.mode_embed = _MLP(10, hidden)
-        self.mode_temporal = _Temporal(hidden)
-        self.mode_index = nn.Embedding(6, hidden)
-        self.prob_embed = nn.Linear(1, hidden)
-        self.wm_attn = _GeoAttention(hidden, heads, 12)
-        self.edge_embed = _MLP(5, hidden)
-        self.edge_attn = _GeoAttention(hidden, heads, 7)
+        if self.wm_branch:
+            self.mode_embed = _MLP(10, hidden)
+            self.mode_temporal = _Temporal(hidden)
+            self.mode_index = nn.Embedding(6, hidden)
+            self.prob_embed = nn.Linear(1, hidden)
+            self.wm_attn = _GeoAttention(hidden, heads, 12)
+        if self.edge_branch:
+            self.edge_embed = _MLP(5, hidden)
+            self.edge_attn = _GeoAttention(hidden, heads, 7)
+        per_branch = 2 if self.max_pool else 1
+        fused = (1 + (1 if self.scene_attention else 2) + self.goal_fusion
+                 + per_branch * (self.edge_branch + self.wm_branch)) * hidden
         self.head = nn.Sequential(
-            nn.LayerNorm(7 * hidden),
-            nn.Linear(7 * hidden, hidden), nn.GELU(), nn.Dropout(dropout),
+            nn.LayerNorm(fused),
+            nn.Linear(fused, hidden), nn.GELU(), nn.Dropout(dropout),
             nn.Linear(hidden, 1),
         )
 
@@ -182,46 +202,72 @@ class WMTrajectoryDiscriminator(TrajectoryDiscriminator):
 
     def encode_context(self, batch: dict, wm: dict, edges: dict, ego_size: torch.Tensor) -> dict:
         """Candidate-independent part (scene, WM and edge tokens); reusable across ES iterations."""
-        tokens, valid, goal_token = self._encode_scene(batch)
-        edge_tok = self.edge_embed(torch.cat([edges["xy"] / self.pos_scale, edges["dir"],
-                                              edges["mask"][..., None].float()], -1))  # [B,E,H]
-        wm_tok = self._wm_tokens(wm)
-        return dict(tokens=tokens, valid=valid, goal_token=goal_token, wm=wm, wm_tok=wm_tok, edges=edges,
-                    edge_tok=edge_tok, ego_size=ego_size)
+        if self.scene_attention:
+            tokens, valid, goal_token = self._encode_scene(batch)
+            enc = dict(tokens=tokens, valid=valid, goal_token=goal_token)
+        else:
+            goal_token = self._goal_token(batch)
+            light = self.light_embed(batch["lights"])                                # [B,L,H]
+            lmask = batch["lights_mask"].bool().unsqueeze(-1)
+            light_mean = (light * lmask).sum(1) / lmask.sum(1).clamp(min=1)
+            enc = dict(goal_token=goal_token, scene=torch.cat([goal_token[:, 0], light_mean], -1))
+        enc.update(wm=wm, edges=edges, ego_size=ego_size)
+        if self.edge_branch:
+            enc["edge_tok"] = self.edge_embed(torch.cat([edges["xy"] / self.pos_scale, edges["dir"],
+                                                         edges["mask"][..., None].float()], -1))  # [B,E,H]
+        if self.wm_branch:
+            enc["wm_tok"] = self._wm_tokens(wm)
+        return enc
 
     def score_encoded(self, enc: dict, candidates: torch.Tensor, cand_xyyaw: torch.Tensor, chunk: int = 0) -> torch.Tensor:
         count = candidates.shape[1]
-        if enc["wm"]["mean"].shape[3] != candidates.shape[2]:
+        if self.wm_branch and enc["wm"]["mean"].shape[3] != candidates.shape[2]:
             raise ValueError(f"WM steps {enc['wm']['mean'].shape[3]} != candidate steps {candidates.shape[2]}")
         parts = []
         step = chunk if chunk and chunk < count else count
         for s0 in range(0, count, step):
             sl = slice(s0, s0 + step)
-            parts.append(self._score_chunk(enc["tokens"], enc["valid"], enc["goal_token"], candidates[:, sl],
-                                           cand_xyyaw[:, sl], enc["wm"], enc["wm_tok"], enc["edges"],
-                                           enc["edge_tok"], enc["ego_size"]))
+            parts.append(self._score_chunk(enc, candidates[:, sl], cand_xyyaw[:, sl]))
         return torch.cat(parts, dim=1)
 
-    def _score_chunk(self, tokens, valid, goal_token, candidates, cand_xyyaw, wm, wm_tok, edges, edge_tok, ego_size):
+    def _pool_time(self, out: torch.Tensor) -> list[torch.Tensor]:
+        """[B,K,T,H] branch output -> mean (and max) over T, each [B*K,H]."""
+        n = out.shape[0] * out.shape[1]
+        pooled = [out.mean(2).reshape(n, -1)]
+        if self.max_pool:
+            pooled.append(out.amax(2).reshape(n, -1))
+        return pooled
+
+    def _score_chunk(self, enc: dict, candidates, cand_xyyaw):
         bsz, count, steps, _ = candidates.shape
+        ego_size = enc["ego_size"]
         traj = self.traj_embed(candidates.reshape(bsz * count, steps, -1))
         encoded_traj, _ = self.traj_gru(traj)
-        cross, _ = self.cross_attn(encoded_traj.reshape(bsz, count * steps, -1), tokens, tokens,
-                                   key_padding_mask=~valid, need_weights=False)
-        cross = cross.reshape(bsz * count, steps, -1)
+        pooled = [encoded_traj[:, -1]]
+        if self.scene_attention:
+            cross, _ = self.cross_attn(encoded_traj.reshape(bsz, count * steps, -1), enc["tokens"], enc["tokens"],
+                                       key_padding_mask=~enc["valid"], need_weights=False)
+            pooled.append(cross.reshape(bsz * count, steps, -1).mean(dim=1))
+        else:
+            pooled.append(enc["scene"].repeat_interleave(count, dim=0))
+        if self.goal_fusion:
+            pooled.append(enc["goal_token"][:, 0].repeat_interleave(count, dim=0))
         q = encoded_traj.reshape(bsz, count, steps, -1)
         cand_xy = cand_xyyaw[..., :2]
         cand_yaw = torch.atan2(candidates[..., 4], candidates[..., 5])               # path yaw, as in features
-        pooled = [encoded_traj[:, -1], cross.mean(dim=1), goal_token[:, 0].repeat_interleave(count, dim=0)]
 
-        e_geo = self._edge_geometry(cand_xy, cand_yaw, ego_size, edges)
-        e_out = self.edge_attn(q, edge_tok[:, None], e_geo, None, edges["mask"][:, None, None, :])
-        pooled += [e_out.mean(2).reshape(bsz * count, -1), e_out.amax(2).reshape(bsz * count, -1)]
+        if self.edge_branch:
+            edges = enc["edges"]
+            e_geo = self._edge_geometry(cand_xy, cand_yaw, ego_size, edges)
+            e_out = self.edge_attn(q, enc["edge_tok"][:, None], e_geo, None, edges["mask"][:, None, None, :])
+            pooled += self._pool_time(e_out)
 
-        b, a, m, t, _ = wm["mean"].shape
-        w_geo = self._wm_geometry(cand_xy, cand_yaw, ego_size, wm)
-        mask = (wm["valid"][:, :, None] & (wm["probs"] > 0)).reshape(b, 1, 1, a * m).expand(b, 1, t, a * m)
-        bias = torch.log(wm["probs"].clamp(min=1e-4)).reshape(b, 1, 1, a * m)
-        w_out = self.wm_attn(q, wm_tok, w_geo, bias, mask)
-        pooled += [w_out.mean(2).reshape(bsz * count, -1), w_out.amax(2).reshape(bsz * count, -1)]
+        if self.wm_branch:
+            wm = enc["wm"]
+            b, a, m, t, _ = wm["mean"].shape
+            w_geo = self._wm_geometry(cand_xy, cand_yaw, ego_size, wm)
+            mask = (wm["valid"][:, :, None] & (wm["probs"] > 0)).reshape(b, 1, 1, a * m).expand(b, 1, t, a * m)
+            bias = torch.log(wm["probs"].clamp(min=1e-4)).reshape(b, 1, 1, a * m)
+            w_out = self.wm_attn(q, enc["wm_tok"], w_geo, bias, mask)
+            pooled += self._pool_time(w_out)
         return self.head(torch.cat(pooled, -1)).squeeze(-1).reshape(bsz, count)

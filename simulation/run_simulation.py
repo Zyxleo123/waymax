@@ -113,15 +113,6 @@ def _parse_args() -> argparse.Namespace:
         "'auto' prefers CUDA when available.",
     )
     parser.add_argument(
-        "--wm_backend",
-        type=str,
-        default="production",
-        choices=["production", "multifuture", "occupancy", "ego"],
-        help="Which world-model package to load for --other_agent_forecast wm. "
-        "'production' = model/world_model (det/gaussian). "
-        "Others load the matching package under the repo root.",
-    )
-    parser.add_argument(
         "--wm_planning_mode",
         type=str,
         default=None,
@@ -133,7 +124,7 @@ def _parse_args() -> argparse.Namespace:
             "expected",
             "worst_case",
         ],
-        help="Multifuture WM only: agent-wise collision risk. "
+        help="Agent-wise collision risk of the multi-future WM. "
         "top1 | expected_independent | worst_case_independent "
         "(aliases: expected, worst_case). Default: checkpoint config.",
     )
@@ -142,7 +133,7 @@ def _parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         choices=["mean_uniform", "mean_learned", "gaussian_uniform", "gaussian_learned", "expected_independent"],
-        help="Multifuture WM only: collision-scoring ablation. Unset = --wm_planning_mode scoring. "
+        help="Collision-scoring ablation of the multi-future WM. Unset = --wm_planning_mode scoring. "
         "mean_* = SAT on mode means; gaussian_* = SAT on M samples per mode; "
         "*_uniform = w=1/K, *_learned = w=p_k. expected_independent = mean_learned.",
     )
@@ -152,36 +143,6 @@ def _parse_args() -> argparse.Namespace:
                         help="gaussian_* only: base seed (combined with scene fingerprint and timestep).")
     parser.add_argument("--mf_collision_debug_dump", action="store_true",
                         help="gaussian_* only: dump per-prediction sample noise to <output_dir>/mf_samples_debug/.")
-    parser.add_argument(
-        "--wm_refresh_steps",
-        type=int,
-        default=10,
-        help="WM absolute-sim-step refresh interval. "
-        "50 = Exp1 (0,50,...), 20 = Exp2, 10 = Exp3 / every replan. "
-        "Shortfall always re-queries at the current timestep. "
-        "Only used by the production ScheduledWorldModelForecaster.",
-    )
-    parser.add_argument(
-        "--num_collision_worlds",
-        type=int,
-        default=8,
-        help="Gaussian WM only: Monte Carlo samples for collision scoring. "
-        "1 disables sampling (mean-only). Ignored for deterministic WM / cv / gt.",
-    )
-    parser.add_argument(
-        "--collision_reduce",
-        type=str,
-        default="mean",
-        choices=["any", "mean"],
-        help="How to reduce collision across WM sample worlds: "
-        "'mean' = Monte Carlo P(safe); 'any' = collide if any sample overlaps.",
-    )
-    parser.add_argument(
-        "--collision_sample_seed",
-        type=int,
-        default=0,
-        help="RNG seed offset for Gaussian collision sampling (plus timestep).",
-    )
     parser.add_argument("--save_cache", type=str, default="none", choices=["none", "all", "success", "failure"])
     parser.add_argument(
         "--save_es_candidates",
@@ -240,7 +201,7 @@ def _load_isolated_wm_forecaster(
     planning_mode: str | None = None,
     extra_kwargs: dict[str, Any] | None = None,
 ):
-    """Load a package-local WorldModelForecaster without clashing with repo ``model``/``data``."""
+    """Load the multi-future WM package's WorldModelForecaster without clashing with repo ``model``/``data``."""
     import importlib
     import types
 
@@ -260,48 +221,29 @@ def _load_isolated_wm_forecaster(
     _register_namespace(f"{alias}.data", pkg_root / "data")
     _register_namespace(f"{alias}.model", pkg_root / "model")
     _register_namespace(f"{alias}.model.world_model", pkg_root / "model" / "world_model")
-    if (pkg_root / "occupancy").is_dir():
-        _register_namespace(f"{alias}.occupancy", pkg_root / "occupancy")
 
-    # Package code uses absolute ``from data...`` / ``from occupancy...``.
-    saved_top = {
-        key: sys.modules[key]
-        for key in ("data", "occupancy")
-        if key in sys.modules
-    }
+    # Package code uses absolute ``from data...``. Already-imported repo submodules
+    # (e.g. ``data.types``) must be hidden too, or they shadow the package's.
+    def _is_swapped(key: str) -> bool:
+        return key == "data" or key.startswith("data.")
+
+    saved_top = {key: mod for key, mod in sys.modules.items() if _is_swapped(key)}
+    for key in saved_top:
+        del sys.modules[key]
     sys.modules["data"] = sys.modules[f"{alias}.data"]
-    if f"{alias}.occupancy" in sys.modules:
-        sys.modules["occupancy"] = sys.modules[f"{alias}.occupancy"]
 
     try:
         inference = importlib.import_module(f"{alias}.model.world_model.inference")
         load_kwargs: dict[str, Any] = {"device": device}
-        # Only multifuture accepts planning_mode today.
         if planning_mode is not None:
             load_kwargs["planning_mode"] = planning_mode
-        if extra_kwargs:
-            # Never silently drop requested ablation options on the TypeError fallback.
-            forecaster = inference.WorldModelForecaster.from_checkpoint(
-                checkpoint_path, **load_kwargs, **extra_kwargs
-            )
-            return forecaster
-        try:
-            forecaster = inference.WorldModelForecaster.from_checkpoint(
-                checkpoint_path,
-                **load_kwargs,
-            )
-        except TypeError:
-            load_kwargs.pop("planning_mode", None)
-            forecaster = inference.WorldModelForecaster.from_checkpoint(
-                checkpoint_path,
-                **load_kwargs,
-            )
+        forecaster = inference.WorldModelForecaster.from_checkpoint(
+            checkpoint_path, **load_kwargs, **(extra_kwargs or {})
+        )
     finally:
-        for key in ("data", "occupancy"):
-            if key in saved_top:
-                sys.modules[key] = saved_top[key]
-            elif key in sys.modules and getattr(sys.modules[key], "__name__", "").startswith(alias):
-                del sys.modules[key]
+        for key in [k for k in sys.modules if _is_swapped(k)]:
+            del sys.modules[key]
+        sys.modules.update(saved_top)
 
     return forecaster
 
@@ -317,64 +259,29 @@ def _load_world_model_forecaster(args: argparse.Namespace):
     if device.startswith("cuda"):
         os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
-    backend = str(getattr(args, "wm_backend", "production")).strip().lower()
-    repo_root = Path(__file__).resolve().parents[1]
-    backend_roots = {
-        "production": None,
-        "multifuture": repo_root / "multiFuture_GaussianWorldModel",
-        "occupancy": repo_root / "occupancy_worldModel",
-        "ego": repo_root / "egoConditioned_WM",
-    }
-    if backend not in backend_roots:
-        raise ValueError(f"Unknown --wm_backend {backend!r}")
-
-    if backend == "production":
-        from model.world_model.inference import ScheduledWorldModelForecaster
-
-        forecaster = ScheduledWorldModelForecaster.from_checkpoint(
-            args.world_model_ckpt,
-            device=device,
-            refresh_steps=int(args.wm_refresh_steps),
-            num_collision_worlds=int(args.num_collision_worlds),
-            collision_reduce=str(args.collision_reduce),
-            collision_sample_seed=int(args.collision_sample_seed),
-        )
-    else:
-        pkg_root = backend_roots[backend]
-        assert pkg_root is not None
-        planning_mode = None
-        if backend == "multifuture" and getattr(args, "wm_planning_mode", None):
-            planning_mode = str(args.wm_planning_mode)
-        extra_kwargs = None
-        if getattr(args, "mf_collision_method", None):
-            if backend != "multifuture":
-                raise ValueError("--mf_collision_method requires --wm_backend multifuture.")
-            extra_kwargs = {
-                "mf_collision_method": str(args.mf_collision_method),
-                "mf_gaussian_num_samples": int(args.mf_gaussian_num_samples),
-                "mf_gaussian_seed": int(args.mf_gaussian_seed),
-                "mf_diagnostics_dir": str(args.output_dir),
-                "mf_debug_dump": bool(args.mf_collision_debug_dump),
-            }
-        forecaster = _load_isolated_wm_forecaster(
-            pkg_root,
-            checkpoint_path=str(args.world_model_ckpt),
-            device=device,
-            planning_mode=planning_mode,
-            extra_kwargs=extra_kwargs,
-        )
-        if not hasattr(forecaster, "num_collision_worlds"):
-            forecaster.num_collision_worlds = 1
-        if not hasattr(forecaster, "collision_reduce"):
-            forecaster.collision_reduce = "any"
-        if extra_kwargs:
-            args.mf_num_modes = int(forecaster.config.num_modes)
+    planning_mode = str(args.wm_planning_mode) if getattr(args, "wm_planning_mode", None) else None
+    extra_kwargs = None
+    if getattr(args, "mf_collision_method", None):
+        extra_kwargs = {
+            "mf_collision_method": str(args.mf_collision_method),
+            "mf_gaussian_num_samples": int(args.mf_gaussian_num_samples),
+            "mf_gaussian_seed": int(args.mf_gaussian_seed),
+            "mf_diagnostics_dir": str(args.output_dir),
+            "mf_debug_dump": bool(args.mf_collision_debug_dump),
+        }
+    forecaster = _load_isolated_wm_forecaster(
+        Path(__file__).resolve().parents[1] / "multiFuture_GaussianWorldModel",
+        checkpoint_path=str(args.world_model_ckpt),
+        device=device,
+        planning_mode=planning_mode,
+        extra_kwargs=extra_kwargs,
+    )
+    if extra_kwargs:
+        args.mf_num_modes = int(forecaster.config.num_modes)
 
     print(
-        f"[wm] backend={backend} loaded {args.world_model_ckpt} on {device}; "
-        f"wm_refresh_steps={int(args.wm_refresh_steps)}; "
-        f"num_collision_worlds={int(getattr(forecaster, 'num_collision_worlds', 1))}; "
-        f"collision_reduce={getattr(forecaster, 'collision_reduce', 'any')}"
+        f"[wm] multi-future WM {args.world_model_ckpt} on {device}; "
+        f"planning_mode={getattr(forecaster, 'planning_mode', None)}"
         + (
             f"; mf_collision_method={forecaster.mf_collision_method}"
             f" M={forecaster.mf_gaussian_num_samples} seed={forecaster.mf_gaussian_seed}"
@@ -702,7 +609,7 @@ def _attach_learned_reward(args: argparse.Namespace, planner) -> None:
     planner.learned_scorer = scorer
     atexit.register(scorer.close)
     info = {**scorer.describe(), "other_agent_forecast": args.other_agent_forecast,
-            "planner_world_model_ckpt": args.world_model_ckpt, "wm_backend": args.wm_backend,
+            "planner_world_model_ckpt": args.world_model_ckpt,
             "wm_planning_mode": getattr(args, "wm_planning_mode", None),
             "handcrafted_scorer_used": False, "seed": int(args.seed),
             "es": {"population_size": args.population_size, "elite_size": args.elite_size,
@@ -742,7 +649,6 @@ def _write_mf_experiment_config(args: argparse.Namespace) -> None:
         "mf_gaussian_seed": int(args.mf_gaussian_seed),
         "random_seed": int(args.seed),
         "world_model_checkpoint": args.world_model_ckpt,
-        "wm_backend": args.wm_backend,
         "planner_checkpoint": args.fm_ckpt_path if args.planner == "es_fm" else args.diffusion_ckpt_path,
         "es": {
             "population_size": args.population_size,

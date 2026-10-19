@@ -9,5 +9,4 @@ trainer              training loop used by safety_progress
 evaluate             offline comparison of discriminator / ES / oracle / random picks
 deploy               scorer with the planner's inputs (SimulatorState + world-frame population)
 closed_loop          learned ES reward hook used by simulation/run_simulation.py
-compare_closed_loop  closed-loop comparison against handcrafted baselines
 """

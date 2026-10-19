@@ -64,6 +64,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max_map_segments", type=int, default=64)
     p.add_argument("--max_points_per_segment", type=int, default=32)
     p.add_argument("--max_tl_points", type=int, default=16)
+    p.add_argument(
+        "--map_selection",
+        type=str,
+        default="legacy",
+        choices=["legacy", "nearest_even"],
+        help="legacy: lowest polyline IDs, ego-nearest points. "
+        "nearest_even: ego-nearest polylines, points evenly spaced along each.",
+    )
 
     p.add_argument("--hidden_dim", type=int, default=256)
     p.add_argument("--num_heads", type=int, default=4)
@@ -108,6 +116,7 @@ def _make_config(args: argparse.Namespace) -> WorldModelConfig:
         max_map_segments=args.max_map_segments,
         max_points_per_segment=args.max_points_per_segment,
         max_tl_points=args.max_tl_points,
+        map_selection=args.map_selection,
         hidden_dim=args.hidden_dim,
         num_heads=args.num_heads,
         num_scene_layers=args.num_scene_layers,

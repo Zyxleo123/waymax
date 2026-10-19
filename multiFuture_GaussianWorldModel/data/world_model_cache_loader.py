@@ -198,6 +198,7 @@ def _build_world_model_arrays(
         max_segments=int(config.max_map_segments),
         max_points_per_segment=int(config.max_points_per_segment),
         num_object_types=int(config.num_object_types),
+        map_selection=str(config.map_selection),
     )
     anchor_step_b = np.full((s,), anchor, dtype=np.int32)
     map_features, map_valid, _ = _build_map_features(

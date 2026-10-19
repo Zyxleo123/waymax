@@ -16,7 +16,7 @@
 # the recorded fail1500 Diffusion-ES candidates: Waymax safety + progress pairs 80/20,
 # stratified candidates, fp32, 64 candidates per replan per step, model selection on the
 # validation split only, then offline val/test evaluation and the deploy-scorer consistency
-# check (online WM forward vs cached inputs). Needs slurm/train/cache_wm_predictions.sh first.
+# check (online WM forward vs cached inputs). Needs slurm/train/discriminator_data.sh first.
 # --method / --variant are optional and only accept safety_progress / full_gaussian.
 # Run name: safety_progress_full_gaussian_wm. Submit from rhea or lov4:
 #
@@ -26,7 +26,7 @@
 #
 # --data NAME trains on a combined set built by es_discriminator.build_training_set
 # (${SCRATCH}/es_discriminator/training_sets/NAME, with its own split and invalid list), e.g.
-# fail1500 + the WOMD training shards from slurm/sim/collect_es_candidates_womd_train.sh:
+# fail1500 + the WOMD training shards from slurm/train/discriminator_data.sh --source womd:
 #
 #   python -m es_discriminator.build_training_set --name fail1500_plus_womd_train_s02_11   # on lov1
 #   sbatch slurm/train/train_wm_discriminator.sh --data fail1500_plus_womd_train_s02_11

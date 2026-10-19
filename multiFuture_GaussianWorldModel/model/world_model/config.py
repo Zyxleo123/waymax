@@ -11,6 +11,8 @@ PLANNING_MODES = (
     "expected_independent",
     "worst_case_independent",
 )
+MAP_SELECTIONS = ("legacy", "nearest_even")
+
 _PLANNING_MODE_ALIASES = {
     "expected": "expected_independent",
     "worst_case": "worst_case_independent",
@@ -46,6 +48,9 @@ class WorldModelConfig:
     max_tl_points: int = 16
     num_map_type_classes: int = 21
     map_unknown_type_index: int = 20
+    # "legacy" (lowest IDs, ego-nearest points) or "nearest_even" (ego-nearest
+    # polylines, points evenly spaced along each). Must match the checkpoint.
+    map_selection: str = "legacy"
 
     hidden_dim: int = 256
     num_heads: int = 4
@@ -78,6 +83,8 @@ class WorldModelConfig:
                 f"(aliases: expected, worst_case), got {self.planning_mode!r}"
             )
         self.planning_mode = mode
+        if self.map_selection not in MAP_SELECTIONS:
+            raise ValueError(f"map_selection must be one of {MAP_SELECTIONS}, got {self.map_selection!r}")
 
     @property
     def agent_feature_dim(self) -> int:

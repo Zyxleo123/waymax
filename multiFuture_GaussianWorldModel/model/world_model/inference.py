@@ -254,6 +254,7 @@ class WorldModelForecaster:
             max_segments=int(cfg.max_map_segments),
             max_points_per_segment=int(cfg.max_points_per_segment),
             num_object_types=int(cfg.num_object_types),
+            map_selection=str(cfg.map_selection),
         )
         origin_jax = jnp.asarray(origin_xy)
         ego_yaw_jax = jnp.asarray(ego_yaw)

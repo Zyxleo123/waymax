@@ -15,6 +15,7 @@
 # Train the multi-future Gaussian world model (multiFuture_GaussianWorldModel/).
 #   bash slurm/train/mf_wm.sh                       # submits itself
 #   NUM_MODES=8 EPOCHS=300 bash slurm/train/mf_wm.sh
+#   MAP_SELECTION=nearest_even bash slurm/train/mf_wm.sh   # ego-nearest polylines, evenly spaced points
 # Hyper-parameters are environment variables (inherited by sbatch; no --export).
 set -euo pipefail
 
@@ -37,7 +38,8 @@ source /zfsauton/scratch/sbellad/miniconda3/bin/activate /zfsauton/scratch/sbell
 set -u
 mkdir -p "${SCRATCH_WM}" "${SAVE_DIR}"
 cd "${ROOT}"
-export PYTHONPATH="${ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+# ROOT first so its data/ and model/ win; REPO for shared modules (scores.polygon).
+export PYTHONPATH="${ROOT}:${REPO}${PYTHONPATH:+:${PYTHONPATH}}"
 echo "host=$(hostname)  cuda=${CUDA_VISIBLE_DEVICES:-}  python=$(command -v python)"
 python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
 
@@ -61,6 +63,7 @@ python train_world_model.py \
   --mode_cls_weight "${MODE_CLS_WEIGHT:-1.0}" \
   --sigma_eps "${SIGMA_EPS:-1e-3}" \
   --planning_mode "${PLANNING_MODE:-top1}" \
+  --map_selection "${MAP_SELECTION:-legacy}" \
   --wandb_project "${WANDB_PROJECT:-world Model}" \
   --wandb_entity "${WANDB_ENTITY:-scbellad2025-carnegie-mellon-university}" \
   --wandb_name "${WANDB_NAME:-multiFuture_GaussianWorldModel}" \

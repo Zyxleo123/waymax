@@ -1,0 +1,110 @@
+{
+ "name": "A0_v3",
+ "ablation": "A0",
+ "description": "original trained discriminator",
+ "flags": {
+  "goal_fusion": true,
+  "map_tokens": true,
+  "agent_tokens": true,
+  "scene_attention": true,
+  "edge_branch": true,
+  "wm_branch": true,
+  "max_pool": true
+ },
+ "source_run": "/zfsauton/scratch/sbellad/es_discriminator/safety_progress/safety_progress_v3_20261016_155456_86103",
+ "best_epoch": 26,
+ "parameters": 552169,
+ "method": "safety_progress",
+ "model_kwargs": {
+  "hidden": 128,
+  "heads": 4,
+  "dropout": 0.1,
+  "variant": "full_gaussian",
+  "pos_scale": 20.0,
+  "vel_scale": 5.0
+ },
+ "candidate_features": {
+  "dt": 0.2,
+  "pos_scale": 20.0,
+  "vel_scale": 5.0
+ },
+ "data_config": {
+  "anchors": [
+   10,
+   20,
+   30,
+   40
+  ],
+  "anchors_per_scene": 3,
+  "horizon": 25,
+  "future_stride": 2,
+  "history": 5,
+  "history_stride": 2,
+  "max_agents": 16,
+  "max_map_points": 256,
+  "map_point_stride": 6,
+  "max_lights": 16,
+  "max_agent_distance_m": 80.0,
+  "max_map_distance_m": 80.0,
+  "negative_per_anchor": 2,
+  "benign_probability": 0.25,
+  "negative_strength": 1.0,
+  "residual_fraction": 0.7,
+  "residual_min_percentile": 25.0,
+  "benign_residual_scale": [
+   0.1,
+   0.2
+  ],
+  "dt": 0.2
+ },
+ "training": {
+  "data_dir": "/zfsauton/scratch/sbellad/es_discriminator/training_sets/fail1500_plus_womd_train_s02_11/es_candidates",
+  "split": "/zfsauton/scratch/sbellad/es_discriminator/training_sets/fail1500_plus_womd_train_s02_11/scenario_split_seed0.json",
+  "invalid_at_start": "/zfsauton/scratch/sbellad/es_discriminator/training_sets/fail1500_plus_womd_train_s02_11/invalid_at_start.json",
+  "wm_dir": "/zfsauton/scratch/sbellad/es_discriminator/training_sets/fail1500_plus_womd_train_s02_11/wm_predictions",
+  "edge_dir": "/zfsauton/scratch/sbellad/es_discriminator/training_sets/fail1500_plus_womd_train_s02_11/road_edges",
+  "epochs": 30,
+  "batch_groups": 16,
+  "lr": 0.0003,
+  "weight_decay": 0.0001,
+  "warmup_steps": 200,
+  "hidden": 128,
+  "heads": 4,
+  "dropout": 0.1,
+  "train_cands": 64,
+  "max_pairs": 512,
+  "safety_frac": 0.8,
+  "progress_key": "goal_gain",
+  "progress_margin": 2.0,
+  "seed": 0
+ },
+ "groups": {
+  "train_groups": 33041,
+  "val_groups": 7194,
+  "prediction_groups": {
+   "val": 7712,
+   "test": 7552
+  }
+ },
+ "test_metrics": {
+  "filtered_7014_replans": {
+   "unsafe": 0.02594810379241517,
+   "overlap": 0.018106643855146848,
+   "offroad": 0.007984031936127744,
+   "goal_gain": 23.53623012802222,
+   "progress": 23.665529607516596,
+   "pairwise_accuracy": 0.9494669564354666,
+   "safety_auroc": 0.9368733447485454
+  },
+  "es_unsafe_first_bad_replan_49": {
+   "unsafe": 0.24489795918367346,
+   "overlap": 0.12244897959183673,
+   "offroad": 0.12244897959183673,
+   "goal_gain": 37.20664177622114,
+   "progress": 36.605352489315734,
+   "pairwise_accuracy": 0.8429850851953362,
+   "safety_auroc": 0.8332737180190005
+  }
+ },
+ "world_model_for_inputs": "world_models/mf_wm_old_20260916 (epoch_0450.pt)"
+}

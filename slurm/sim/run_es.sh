@@ -13,13 +13,13 @@
 #SBATCH --error=/zfsauton/scratch/sbellad/immediate_exp/logs/run_es_%j.err
 
 # One closed-loop ES simulation job (Diffusion-ES or FM-ES) on one subset.
-# Normally submitted by slurm/sim/{trainval,fail1500,probe250}.sh; see README.md.
+# Normally submitted by slurm/sim/submit.sh; see README.md.
 #
 #   sbatch slurm/sim/run_es.sh --subset fail1500 --planner fm --forecast wm_mf
 #   bash   slurm/sim/run_es.sh ... --print_cmd     # show run name, dirs, command; run nothing
 #
-# Run names and output dirs are identical to the pre-reorganisation scripts
-# (legacy/sim/), so old results, resume and comparison scripts keep working.
+# Run names and output dirs match the earlier per-experiment scripts, so old results,
+# resume and comparison scripts keep working.
 set -euo pipefail
 
 ROOT="${WAYMAX_RS_ROOT:-/zfsauton2/home/sbellad/baseline/waymax_rs}"
@@ -34,20 +34,20 @@ FAIL1500_SUBSET_DIR="${DIFF_ES_SIM_ROOT}/es_failure_subset_n1500_seed0"
 VAL10_TFRECORD_DIR="${SCRATCH}/womd_val_shards00_09"
 DIFFUSION_CKPT="${SCRATCH}/train_diffusion/diffusion_baseline_baseline_20260810_144559/epoch_0500"
 FM_CKPT="/zfsauton/scratch/mineuih/waymax_rs/checkpoints/pretrain_flow_matching/pretrain_fm_policy_20260828_011255/epoch_0500"
-DET_WM_CKPT="${SCRATCH}/world_model/ckpts/world_model_20260912_170741/epoch_0500.pt"
 MF_WM_CKPT="${SCRATCH}/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20260916_200620/epoch_0450.pt"
-GAU_WM_CKPT="${SCRATCH}/world_model/ckpts_gaussian/gaussian_world_model_20260916_194054/epoch_0370.pt"
 CONDA_ROOT="${SCRATCH}/miniconda3"
 WAYMAX_ENV="${SCRATCH}/conda_envs/waymax_rs"
 
 usage() {
   cat <<'EOF'
-Usage: run_es.sh --subset {trainval|fail1500|probe250|val10} --planner {diffusion|fm} --forecast F [options]
+Usage: run_es.sh --subset {trainval|fail1500|val10} --planner {diffusion|fm} --forecast F [options]
 
-  val10 = WOMD validation shards 00000-00009 (2916 scenes; 2895 run, since each
-          shard's leftover partial batch of num_worlds is skipped)
+  trainval = WOMD training + validation shards 00000/00001 (both splits in one job)
+  fail1500 = the 1500 FM-failure scenes
+  val10    = WOMD validation shards 00000-00009 (2916 scenes; 2895 run, since each
+             shard's leftover partial batch of num_worlds is skipped)
 
-  --forecast F          cv | gt | wm_det | wm_mf | wm_gau | wm_gau_mean   (wm = wm_det)
+  --forecast F          cv | gt | wm_mf (multi-future Gaussian world model)
   --other_agents A      log (default, log replay) | idm (closed loop, Waymax default IDM on all
                         non-SDC objects; names get "IDM_"; fail1500 IDM runs go to
                         Diffusion_ES_sim / Flow_matching_sim)
@@ -58,7 +58,7 @@ Usage: run_es.sh --subset {trainval|fail1500|probe250|val10} --planner {diffusio
   --ablation_subdir D   e.g. _smoke_n10 (ablation runs only)
   --seed S              planner seed (default 0)
   --num_scenarios N     cap scenes (default 100000 = all)
-  --num_worlds N        batch size (default 5; probe250 default 1)
+  --num_worlds N        batch size (default 5)
   --it N                ES iterations (default 4)
   --pop N / --elite N   population / elite size (default 64 / 8)
   --rs N                FM resample ODE steps (default 20)
@@ -66,33 +66,27 @@ Usage: run_es.sh --subset {trainval|fail1500|probe250|val10} --planner {diffusio
   --fm_steps N          FM full-sample ODE steps (default 50)
   --solver S            FM ODE solver (default euler)
   --resample_timesteps N  Diffusion resample timesteps (default 5)
-  --wm_refresh N        WM refresh steps (default 10)
   --wm_ckpt PATH        override the world-model checkpoint
-  --num_collision_worlds N  wm_gau Monte-Carlo samples (default 8)
-  --tag_suffix S        probe250: appended to the run tag (Phase-2 config name)
   --run_suffix S        appended to the run name
   --disc_ckpt PATH      Diffusion-ES with the learned WM-conditioned discriminator as the complete ES
                         reward (handcrafted scorer bypassed). Run name is es_diffusion_[IDM_]discriminator
                         (+ _fail1500 / _val10); outputs go to es_discriminator/closed_loop/ unless --exp_root.
-  --disc_name N         unused for paths (kept for older scripts); checkpoint path is what matters
   --exp_root PATH       put EXP_DIR and logs under PATH/<run_name> (overrides Diffusion_ES_sim /
                         es_discriminator/closed_loop / etc.)
-  --probe_n N / --probe_seed S   probe250 subset (default 250 / 0)
   --print_cmd           print run name, dirs and simulation command(s); run nothing
-  --print_paths         print run name and dirs only (used by the submit scripts)
+  --print_paths         print run name and dirs only (used by submit.sh)
 EOF
 }
 
 need() { [[ $# -ge 2 && -n "$2" ]] || { echo "ERROR: $1 needs a value" >&2; exit 1; }; }
 
 SUBSET="" PLANNER="" FORECAST="" MF_MODE="" MF_COLLISION="" MF_M=8 MF_SEED="" ABLATION_SUBDIR=""
-SEED=0 NUM_SCENARIOS=100000 NUM_WORLDS="" NUM_ES_ITERATIONS=4 POPULATION_SIZE=64 ELITE_SIZE=8
+SEED=0 NUM_SCENARIOS=100000 NUM_WORLDS=5 NUM_ES_ITERATIONS=4 POPULATION_SIZE=64 ELITE_SIZE=8
 RESAMPLE_NUM_STEPS=20 RESAMPLE_T_START=0.2 FM_NUM_STEPS=50 FM_SOLVER=euler RESAMPLE_TIMESTEPS=5
-WM_REFRESH_STEPS=10 WM_CKPT_OVERRIDE="" NUM_COLLISION_WORLDS_OVERRIDE="" TAG_SUFFIX="" RUN_SUFFIX=""
-PROBE_N=250 PROBE_SEED=0 PRINT_MODE=""
-REPLAN_INTERVAL_STEPS=10 COLLISION_SAMPLE_SEED=0 WORLD_MODEL_DEVICE=auto MAX_RETRIES=3
+WM_CKPT_OVERRIDE="" RUN_SUFFIX="" PRINT_MODE=""
+REPLAN_INTERVAL_STEPS=10 WORLD_MODEL_DEVICE=auto MAX_RETRIES=3
 OTHER_AGENTS=log
-DISC_CKPT="" DISC_NAME=safety_progress_full_gaussian_wm
+DISC_CKPT=""
 EXP_ROOT_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
@@ -118,15 +112,9 @@ while [[ $# -gt 0 ]]; do
     --fm_steps) need "$@"; FM_NUM_STEPS="$2"; shift 2 ;;
     --solver) need "$@"; FM_SOLVER="$2"; shift 2 ;;
     --resample_timesteps) need "$@"; RESAMPLE_TIMESTEPS="$2"; shift 2 ;;
-    --wm_refresh) need "$@"; WM_REFRESH_STEPS="$2"; shift 2 ;;
     --wm_ckpt) need "$@"; WM_CKPT_OVERRIDE="$2"; shift 2 ;;
-    --num_collision_worlds) need "$@"; NUM_COLLISION_WORLDS_OVERRIDE="$2"; shift 2 ;;
-    --tag_suffix) need "$@"; TAG_SUFFIX="$2"; shift 2 ;;
     --run_suffix) need "$@"; RUN_SUFFIX="$2"; shift 2 ;;
     --disc_ckpt) need "$@"; DISC_CKPT="$2"; shift 2 ;;
-    --disc_name) need "$@"; DISC_NAME="$2"; shift 2 ;;
-    --probe_n) need "$@"; PROBE_N="$2"; shift 2 ;;
-    --probe_seed) need "$@"; PROBE_SEED="$2"; shift 2 ;;
     --print_cmd) PRINT_MODE=cmd; shift ;;
     --print_paths) PRINT_MODE=paths; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -137,67 +125,39 @@ done
 set --
 
 case "${SUBSET}" in
-  trainval|fail1500|probe250|val10) ;;
-  *) echo "ERROR: --subset must be trainval|fail1500|probe250|val10 (got '${SUBSET}')" >&2; exit 1 ;;
+  trainval|fail1500|val10) ;;
+  *) echo "ERROR: --subset must be trainval|fail1500|val10 (got '${SUBSET}')" >&2; exit 1 ;;
 esac
 case "${PLANNER}" in
   diffusion|diff|es) PLANNER=es ;;
   fm|flow_matching|es_fm) PLANNER=es_fm ;;
   *) echo "ERROR: --planner must be diffusion|fm (got '${PLANNER}')" >&2; exit 1 ;;
 esac
-[[ "${FORECAST}" == "wm" ]] && FORECAST=wm_det
 case "${OTHER_AGENTS}" in
   log|idm) ;;
   *) echo "ERROR: --other_agents must be log|idm (got '${OTHER_AGENTS}')" >&2; exit 1 ;;
 esac
 
 # ---- forecast / world model --------------------------------------------------
-WM_BACKEND=production WORLD_MODEL_CKPT="" NUM_COLLISION_WORLDS=1 COLLISION_REDUCE=mean WM_PLANNING_MODE=""
+WORLD_MODEL_CKPT="" WM_PLANNING_MODE=""
 case "${FORECAST}" in
-  cv|gt) OTHER_AGENT_FORECAST="${FORECAST}" ;;
-  wm_det)
-    OTHER_AGENT_FORECAST=wm WORLD_MODEL_CKPT="${DET_WM_CKPT}" ;;
+  cv|gt) OTHER_AGENT_FORECAST="${FORECAST}" FORECAST_TAG="${FORECAST}" ;;
   wm_mf)
-    OTHER_AGENT_FORECAST=wm WM_BACKEND=multifuture WORLD_MODEL_CKPT="${MF_WM_CKPT}" COLLISION_REDUCE=any
+    OTHER_AGENT_FORECAST=wm WORLD_MODEL_CKPT="${WM_CKPT_OVERRIDE:-${MF_WM_CKPT}}"
     WM_PLANNING_MODE="${MF_MODE:-expected_independent}"
     case "${WM_PLANNING_MODE}" in
       top1|expected_independent|worst_case_independent|expected|worst_case) ;;
       *) echo "ERROR: unknown --mf_mode '${WM_PLANNING_MODE}'" >&2; exit 1 ;;
-    esac ;;
-  wm_gau)
-    OTHER_AGENT_FORECAST=wm WORLD_MODEL_CKPT="${GAU_WM_CKPT}" NUM_COLLISION_WORLDS="${NUM_COLLISION_WORLDS_OVERRIDE:-8}" ;;
-  wm_gau_mean)
-    OTHER_AGENT_FORECAST=wm WORLD_MODEL_CKPT="${GAU_WM_CKPT}" COLLISION_REDUCE=any ;;
-  *) echo "ERROR: --forecast must be cv|gt|wm_det|wm_mf|wm_gau|wm_gau_mean (got '${FORECAST}')" >&2; exit 1 ;;
+    esac
+    ckpt_base="$(basename "${WORLD_MODEL_CKPT}" .pt)"
+    if [[ "${ckpt_base}" =~ ^epoch_([0-9]+)$ ]]; then wm_epoch="epoch${BASH_REMATCH[1]}"; else wm_epoch="${ckpt_base}"; fi
+    FORECAST_TAG="wm_mf_${wm_epoch}_${WM_PLANNING_MODE}"
+    # trainval WM run names carry the (fixed) refresh interval of 10 steps.
+    [[ "${SUBSET}" == "trainval" ]] && FORECAST_TAG="${FORECAST_TAG}_r10" ;;
+  *) echo "ERROR: --forecast must be cv|gt|wm_mf (got '${FORECAST}')" >&2; exit 1 ;;
 esac
-if [[ "${OTHER_AGENT_FORECAST}" == "wm" && -n "${WM_CKPT_OVERRIDE}" ]]; then
-  WORLD_MODEL_CKPT="${WM_CKPT_OVERRIDE}"
-fi
 # MF-only options are ignored for other forecasts so comma lists can mix forecasts.
-if [[ "${FORECAST}" != "wm_mf" ]]; then
-  MF_COLLISION=""
-fi
-
-WM_EPOCH_TAG=""
-if [[ -n "${WORLD_MODEL_CKPT}" ]]; then
-  ckpt_base="$(basename "${WORLD_MODEL_CKPT}" .pt)"
-  if [[ "${ckpt_base}" =~ ^epoch_([0-9]+)$ ]]; then
-    WM_EPOCH_TAG="epoch${BASH_REMATCH[1]}"
-  else
-    WM_EPOCH_TAG="${ckpt_base}"
-  fi
-fi
-case "${FORECAST}" in
-  cv|gt) FORECAST_TAG="${FORECAST}" ;;
-  wm_det) FORECAST_TAG="wm_det_${WM_EPOCH_TAG}" ;;
-  wm_mf) FORECAST_TAG="wm_mf_${WM_EPOCH_TAG}_${WM_PLANNING_MODE}" ;;
-  wm_gau) FORECAST_TAG="wm_gau_${WM_EPOCH_TAG}_k${NUM_COLLISION_WORLDS}" ;;
-  wm_gau_mean) FORECAST_TAG="wm_gau_mean_${WM_EPOCH_TAG}_k1" ;;
-esac
-# trainval always tags the refresh; the other subsets only when it differs from 10.
-if [[ "${OTHER_AGENT_FORECAST}" == "wm" ]] && [[ "${SUBSET}" == "trainval" || "${WM_REFRESH_STEPS}" != "10" ]]; then
-  FORECAST_TAG="${FORECAST_TAG}_r${WM_REFRESH_STEPS}"
-fi
+[[ "${FORECAST}" == "wm_mf" ]] || MF_COLLISION=""
 [[ "${OTHER_AGENTS}" == "idm" ]] && FORECAST_TAG="IDM_${FORECAST_TAG}"
 
 # Budget tag appended to trainval/fail1500 names only when it differs from the
@@ -219,6 +179,10 @@ if [[ -n "${DISC_CKPT}" ]]; then
   [[ "${PLANNER}" == "es" ]] || { echo "ERROR: --disc_ckpt requires --planner diffusion" >&2; exit 1; }
   [[ -z "${MF_COLLISION}" ]] || { echo "ERROR: --disc_ckpt replaces the reward; drop --mf_collision" >&2; exit 1; }
 fi
+if [[ -n "${MF_COLLISION}" && "${SUBSET}" != "fail1500" ]]; then
+  echo "ERROR: --mf_collision is only wired for --subset fail1500" >&2
+  exit 1
+fi
 
 RUN_STAMP="${RUN_STAMP:-$(date +%Y%m%d_%H%M%S)}"
 TARGET_JSON=""
@@ -227,7 +191,6 @@ SPLITS=(training)
 # ---- per-subset naming / layout ---------------------------------------------
 case "${SUBSET}" in
   trainval)
-    NUM_WORLDS="${NUM_WORLDS:-5}"
     if [[ -n "${DISC_CKPT}" ]]; then
       RUN_NAME="es_diffusion_discriminator"
       [[ "${OTHER_AGENTS}" == "idm" ]] && RUN_NAME="es_diffusion_IDM_discriminator"
@@ -246,7 +209,6 @@ case "${SUBSET}" in
     SPLITS=(training validation)
     ;;
   fail1500)
-    NUM_WORLDS="${NUM_WORLDS:-5}"
     if [[ -n "${DISC_CKPT}" ]]; then
       RUN_NAME="es_diffusion_discriminator_fail1500"
       [[ "${OTHER_AGENTS}" == "idm" ]] && RUN_NAME="es_diffusion_IDM_discriminator_fail1500"
@@ -282,7 +244,6 @@ case "${SUBSET}" in
     TARGET_JSON="${FAIL1500_SUBSET_DIR}/target_scenarios.json"
     ;;
   val10)
-    NUM_WORLDS="${NUM_WORLDS:-5}"
     if [[ -n "${DISC_CKPT}" ]]; then
       RUN_NAME="es_diffusion_discriminator_val10"
       [[ "${OTHER_AGENTS}" == "idm" ]] && RUN_NAME="es_diffusion_IDM_discriminator_val10"
@@ -301,25 +262,6 @@ case "${SUBSET}" in
     LOG_FILE="${LOG_DIR}/${RUN_NAME}_${RUN_STAMP}.log"
     TFRECORD_DIR="${VAL10_TFRECORD_DIR}"
     SPLITS=(validation)
-    ;;
-  probe250)
-    NUM_WORLDS="${NUM_WORLDS:-1}"
-    PROBE_SUBSET_DIR="${FM_SIM_ROOT}/fm_hparam_probe_n${PROBE_N}_seed${PROBE_SEED}"
-    if [[ -n "${DISC_CKPT}" ]]; then
-      RUN_NAME="es_diffusion_discriminator_probe250"
-      [[ "${OTHER_AGENTS}" == "idm" ]] && RUN_NAME="es_diffusion_IDM_discriminator_probe250"
-    elif [[ "${PLANNER}" == "es" ]]; then
-      RUN_NAME="diff_${FORECAST_TAG}_baseline_pop${POPULATION_SIZE}_it${NUM_ES_ITERATIONS}_rs${RESAMPLE_TIMESTEPS}"
-    else
-      RUN_NAME="fm_${FORECAST_TAG}_t${RESAMPLE_T_START}_pop${POPULATION_SIZE}_it${NUM_ES_ITERATIONS}_rs${RESAMPLE_NUM_STEPS}_n${FM_NUM_STEPS}_${FM_SOLVER}"
-    fi
-    [[ -n "${TAG_SUFFIX}" ]] && RUN_NAME="${RUN_NAME}_${TAG_SUFFIX}"
-    [[ -n "${RUN_SUFFIX}" ]] && RUN_NAME="${RUN_NAME}_${RUN_SUFFIX}"
-    EXP_DIR="${FM_SIM_ROOT}/fm_hparam_probe_runs/${RUN_NAME}"
-    LOG_DIR="${FM_SIM_ROOT}/logs"
-    LOG_FILE="${LOG_DIR}/${RUN_NAME}_${RUN_STAMP}.log"
-    TFRECORD_DIR="${PROBE_SUBSET_DIR}/tfrecords"
-    TARGET_JSON="${PROBE_SUBSET_DIR}/target_scenarios.json"
     ;;
 esac
 if [[ -n "${DISC_CKPT}" ]]; then
@@ -342,10 +284,6 @@ if [[ -n "${EXP_ROOT_OVERRIDE}" ]]; then
   else
     LOG_FILE="${LOG_DIR}/${RUN_NAME}_${RUN_STAMP}.log"
   fi
-fi
-if [[ -n "${MF_COLLISION}" && "${SUBSET}" != "fail1500" ]]; then
-  echo "ERROR: --mf_collision is only wired for --subset fail1500" >&2
-  exit 1
 fi
 
 split_tag() {
@@ -390,10 +328,7 @@ build_cmd() {
   fi
   if [[ "${OTHER_AGENT_FORECAST}" == "wm" ]]; then
     CMD+=(--world_model_ckpt "${WORLD_MODEL_CKPT}" --world_model_device "${WORLD_MODEL_DEVICE}"
-          --wm_backend "${WM_BACKEND}" --wm_refresh_steps "${WM_REFRESH_STEPS}"
-          --num_collision_worlds "${NUM_COLLISION_WORLDS}" --collision_reduce "${COLLISION_REDUCE}"
-          --collision_sample_seed "${COLLISION_SAMPLE_SEED}")
-    [[ -n "${WM_PLANNING_MODE}" ]] && CMD+=(--wm_planning_mode "${WM_PLANNING_MODE}")
+          --wm_planning_mode "${WM_PLANNING_MODE}")
     if [[ -n "${MF_COLLISION}" ]]; then
       CMD+=(--mf_collision_method "${MF_COLLISION}" --mf_gaussian_num_samples "${MF_M}"
             --mf_gaussian_seed "${MF_SEED}")
@@ -453,7 +388,6 @@ if [[ "${PLANNER}" == "es" ]]; then required+=("${DIFFUSION_CKPT}"); else requir
 for p in "${required[@]}"; do
   if [[ ! -e "${p}" ]]; then
     log "ERROR: missing ${p}"
-    [[ "${SUBSET}" == "probe250" && "${p}" == "${TARGET_JSON}" ]] && log "  build it first: bash slurm/sim/probe250.sh build"
     exit 1
   fi
 done
@@ -490,8 +424,7 @@ fi
     echo " diffusion: resample_timesteps=${RESAMPLE_TIMESTEPS}"
   fi
   if [[ "${OTHER_AGENT_FORECAST}" == "wm" ]]; then
-    echo " wm: backend=${WM_BACKEND} ckpt=${WORLD_MODEL_CKPT} refresh=${WM_REFRESH_STEPS} collision_worlds=${NUM_COLLISION_WORLDS} reduce=${COLLISION_REDUCE}"
-    [[ -n "${WM_PLANNING_MODE}" ]] && echo " wm_planning_mode=${WM_PLANNING_MODE}"
+    echo " wm: ckpt=${WORLD_MODEL_CKPT} planning_mode=${WM_PLANNING_MODE}"
     [[ -n "${MF_COLLISION}" ]] && echo " mf_collision=${MF_COLLISION} M=${MF_M} mf_seed=${MF_SEED}"
   fi
   echo "============================================================"

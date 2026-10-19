@@ -2,7 +2,9 @@
 
 Closed-loop Waymax simulation of an ego planner (Diffusion-ES or Flow-Matching-ES)
 whose candidate plans are scored against a forecast of the other agents:
-constant velocity (CV), privileged ground truth (GT), or a learned world model (WM).
+constant velocity (CV), privileged ground truth (GT), or the multi-future Gaussian
+world model (WM). A learned discriminator (`es_discriminator/`) can replace the
+handcrafted ES reward.
 
 - [1. Setup](#1-setup)
 - [2. Repository layout](#2-repository-layout)
@@ -11,10 +13,9 @@ constant velocity (CV), privileged ground truth (GT), or a learned world model (
 - [5. Outputs](#5-outputs)
 - [6. Experiment log](#6-experiment-log)
 - [7. Training](#7-training)
-- [8. World models](#8-world-models)
-- [9. Analysis and evaluation](#9-analysis-and-evaluation)
-- [10. Cluster notes](#10-cluster-notes)
-- [11. Lane graphs and goal-reaching (original setup)](#11-lane-graphs-and-goal-reaching-original-setup)
+- [8. World model](#8-world-model)
+- [9. Cluster notes](#9-cluster-notes)
+- [10. Lane graphs and goal-reaching (original setup)](#10-lane-graphs-and-goal-reaching-original-setup)
 
 ---
 
@@ -36,27 +37,24 @@ scripts activate the environment themselves.
 ```text
 slurm/
   sim/
-    run_es.sh                   the only simulation job body (all logic lives here)
-    trainval.sh                 submit runs on WOMD train+val shards 00/01
-    fail1500.sh                 submit runs on the fail1500 subset
-    probe250.sh                 submit runs on the 250-scene probe subset (+ "build")
-    _submit.sh                  shared submitter (comma lists, --dry_run, --exclude)
-    fail1500_gt_filter.sh       re-score runs on the GT-filtered fail1500 scenes
-    fail1500_gt_filter_reeval.sh  build the GT filter and re-evaluate
+    submit.sh                   every simulation submission (job grids + named experiments)
+    run_es.sh                   job: one Diffusion-ES / FM-ES simulation
+    run_policy.sh               job: one plain diffusion / FM simulation (no ES)
   train/
-    det_wm.sh  mf_wm.sh         world-model training
+    mf_wm.sh                    multi-future Gaussian WM training
     diffusion.sh  vla.sh        policy training
-legacy/                         pre-reorganisation scripts, kept for reference (see §6)
-  sim/  train/  analysis/  annotation_vla/  docs/
+    discriminator_data.sh       discriminator data: collect ES candidates, labels, WM caches
+    train_wm_discriminator.sh   discriminator training + offline evaluation
 
 simulation/run_simulation.py    closed-loop simulator entry point
 planner/                        Diffusion-ES and FM-ES planners
 scores/                         collision (SAT) / offroad / goal scoring
-model/world_model/              deterministic + Gaussian WM inference ("production" backend)
-train_deterministic_world_model/  deterministic WM training/eval code
-multiFuture_GaussianWorldModel/   multi-future Gaussian WM (training, inference, evaluation)
+multiFuture_GaussianWorldModel/ multi-future Gaussian WM (training, data, inference)
+es_discriminator/               learned ES reward (see es_discriminator/README.md)
+  analyse_discriminator/        architecture ablations A0-A8 (+ their scripts and tests)
 train_diffusion/  train_vla/    policy training code
-scripts/                        subset builders, filters, analysis tools
+model/                          diffusion / VLA networks
+scripts/                        data preparation (training cache, fail1500 subset, annotation)
 viz/                            better Waymax visualisation (import viz as visualization)
 ```
 
@@ -79,8 +77,8 @@ Several Python scripts still default to it — always pass the new path
 | Subset | Scenes | Where | Notes |
 |---|---|---|---|
 | `trainval` | all scenes of training shards 00000+00001 and validation shards 00000+00001 | symlinks created per run under the exp root | both splits run inside one job |
-| `fail1500` | 1500 scenes where FM-ES failed (offroad 658, overlap 679, goal 139, both 24), 187 shards | `/zfsauton/scratch/sbellad/immediate_exp/es_failure_subset_n1500_seed0` | main benchmark; GT-filtered variant n=1102 |
-| `probe250` | 250 scenes sampled from fail1500 | `/zfsauton/scratch/sbellad/Flow_matching_sim/fm_hparam_probe_n250_seed0` | FM hyper-parameter probe; `num_worlds` defaults to 1 |
+| `fail1500` | 1500 scenes where FM-ES failed (offroad 658, overlap 679, goal 139, both 24), 187 shards | `/zfsauton/scratch/sbellad/Diffusion_ES_sim/es_failure_subset_n1500_seed0` | main benchmark (built by `scripts/build_failure_subset_for_es.py`) |
+| `val10` | WOMD validation shards 00000-00009 (2916 scenes; 2895 run) | `/zfsauton/scratch/sbellad/womd_val_shards00_09` | final evaluation |
 
 Subset tfrecords are symlinks into the WOMD folder. Every job checks at start
 that all shards are readable on its node and aborts otherwise (a node without
@@ -90,55 +88,66 @@ the `/zfsauton/datasets` mount used to finish with 0 scenes and print `DONE`).
 
 ## 4. Running simulations
 
-Submit from **rhea or lov4** (sbatch is denied on lov1). Each entry script takes
-named flags; comma-separated values expand into one job per combination, and
-duplicates (same run name) are submitted once.
+Submit from **rhea or lov4** (sbatch is denied on lov1). Everything goes through
+`slurm/sim/submit.sh`; comma-separated values expand into one job per combination,
+and duplicates (same run name) are submitted once.
 
 ```bash
-bash slurm/sim/fail1500.sh --planner fm --forecast cv,wm_det,wm_mf --it 6 --rs 40
-bash slurm/sim/fail1500.sh --planner diffusion --forecast wm_mf --mf_collision gaussian_uniform,gaussian_learned --M 4,8,16
-bash slurm/sim/trainval.sh --planner diffusion --forecast cv,gt,wm_det,wm_mf
-bash slurm/sim/probe250.sh --planner fm --forecast gt --t_start 0.2,0.5,0.8
+bash slurm/sim/submit.sh es --subset fail1500 --planner fm --forecast cv,wm_mf --it 6 --rs 40
+bash slurm/sim/submit.sh es --subset fail1500 --planner diffusion --forecast wm_mf --mf_collision gaussian_uniform,gaussian_learned --M 4,8,16
+bash slurm/sim/submit.sh es --subset trainval --planner diffusion --forecast cv,gt,wm_mf
+bash slurm/sim/submit.sh policy --subset val10 --planner diffusion,fm --other_agents log,idm
 ```
+
+Named experiments submit the exact job set behind a reported result
+(`bash slurm/sim/submit.sh --help` lists them):
+
+| Name | Jobs |
+|---|---|
+| `val10_all [--other_agents log,idm]` | plain diffusion / FM, Diffusion-ES and FM-ES (it6/rs40) with gt, cv, wm_mf on val10 |
+| `idm_fail1500` | the same planners on fail1500 with IDM other agents |
+| `final_val10 [--exp_root R]` | paper runs on val10 -> `final_runs/` (diffusion only, CV, WM, WM + discriminator trained on fail1500) |
+| `disc_v3` | discriminator v3 (A0): val10 log + IDM -> `final_runs/`, and trainval |
+| `dtfix` | fail1500 after the world-dt fix -> `final_runs_dtfix/`: WM, WM + discriminator v3 |
+| `disc_v4` | discriminator v4 (A4) on fail1500 -> `final_runs_dtfix/` |
 
 Always preview first — `--dry_run` prints every job's run name, output dir and
 exact `run_simulation.py` command without submitting:
 
 ```bash
-bash slurm/sim/fail1500.sh --planner fm --forecast wm_mf --it 6 --rs 40 --dry_run
+bash slurm/sim/submit.sh disc_v4 --dry_run
 ```
 
-### Flags
+### Flags (`submit.sh es`, `run_es.sh`)
 
 | Flag | Values / default | Meaning |
 |---|---|---|
+| `--subset` | `trainval` \| `fail1500` \| `val10` | scenes |
 | `--planner` | `diffusion` \| `fm` | Diffusion-ES or FM-ES |
-| `--forecast` | `cv` \| `gt` \| `wm_det` \| `wm_mf` \| `wm_gau` \| `wm_gau_mean` | other-agent forecast (`wm` = `wm_det`) |
+| `--forecast` | `cv` \| `gt` \| `wm_mf` | other-agent forecast |
+| `--other_agents` | `log` (default) \| `idm` | log replay or reactive IDM agents (names get `IDM_`) |
 | `--mf_mode` | `expected_independent` (default) \| `top1` \| `worst_case_independent` | multi-future WM scoring |
 | `--mf_collision` | `mean_uniform` \| `mean_learned` \| `gaussian_uniform` \| `gaussian_learned` | MF collision ablation (fail1500 only) |
 | `--M` | 8 | samples per mode for `gaussian_*` |
 | `--mf_seed` | = `--seed` | Gaussian sampling seed (combined with WOMD scenario id + timestep) |
 | `--ablation_subdir` | — | e.g. `_smoke_n10` for small ablation test runs |
+| `--disc_ckpt` | — | Diffusion-ES with a trained discriminator as the complete ES reward |
 | `--seed` | 0 | planner seed |
 | `--num_scenarios` | 100000 (all) | cap scenes, e.g. 10 for a smoke test |
-| `--num_worlds` | 5 (probe250: 1) | scenes simulated in parallel |
+| `--num_worlds` | 5 | scenes simulated in parallel |
 | `--it` / `--pop` / `--elite` | 4 / 64 / 8 | ES iterations / population / elites |
 | `--rs` | 20 | FM resample ODE steps |
 | `--t_start` | 0.2 | FM resample start time (written into names verbatim, e.g. `0.20`) |
 | `--fm_steps` / `--solver` | 50 / `euler` | FM full-sample ODE steps / solver |
 | `--resample_timesteps` | 5 | Diffusion resample timesteps |
-| `--wm_refresh` | 10 | WM refresh interval (steps) |
 | `--wm_ckpt` | see §8 | override the WM checkpoint |
-| `--num_collision_worlds` | 8 | `wm_gau` Monte-Carlo samples |
-| `--tag_suffix` | — | probe250: appended to the run tag (Phase-2 config name) |
 | `--run_suffix` | — | appended to any run name |
-| `--probe_n` / `--probe_seed` | 250 / 0 | probe subset to use |
+| `--exp_root` | — | put the run under `<root>/<run name>` |
 | `--dry_run` | — | print jobs, submit nothing |
 | `--exclude` | — | `sbatch --exclude`, e.g. `gpu26,gpu31` |
 
-Fixed in all runs: ego replans every 10 steps, WM device `auto`, collision
-sample seed 0. A crashed run resumes into the same `simulation_*` folder (up to
-3 retries) and skips finished scenes.
+Fixed in all runs: ego replans every 10 steps, WM device `auto`. A crashed run
+resumes into the same `simulation_*` folder (up to 3 retries) and skips finished scenes.
 
 You can also run one job directly: `sbatch slurm/sim/run_es.sh --subset ... --planner ... --forecast ...`,
 or inspect it with `bash slurm/sim/run_es.sh ... --print_cmd`.
@@ -147,23 +156,22 @@ or inspect it with `bash slurm/sim/run_es.sh ... --print_cmd`.
 
 ## 5. Outputs
 
-Run names and folders are the same as before the reorganisation, so existing
-results remain comparable.
-
 | Subset / planner / forecast | Output dir |
 |---|---|
 | fail1500, FM-ES, any forecast | `Flow_matching_sim/es_fm_<forecast>_fail1500_it<N>_rs<R>_p<P>_e<E>/` |
 | fail1500, Diffusion-ES, cv/gt | `immediate_exp/es_diffusion_<forecast>_fail1500/` |
 | fail1500, Diffusion-ES, WM | `world_model_sim/es_diffusion_<wm tag>_fail1500/` |
+| fail1500, IDM | `{Diffusion_ES_sim \| Flow_matching_sim}/es_*_IDM_*` |
 | fail1500, MF collision ablation | `{immediate_exp \| Flow_matching_sim}/mf_multiSampling_collision_ablation/[<subdir>/]<variant>/seed_<S>/` (Diffusion vs FM never mixed) |
 | trainval, cv/gt | `immediate_exp/es_{diffusion,fm}_<forecast>/` |
-| trainval, WM | `world_model_sim/es_{diffusion,fm}_<wm tag>_r<refresh>/` |
-| probe250 | `Flow_matching_sim/fm_hparam_probe_runs/<tag>/` |
+| trainval, WM | `world_model_sim/es_{diffusion,fm}_<wm tag>_r10/` |
+| val10 | `{Diffusion_ES_sim \| Flow_matching_sim}/es_*_val10*/` |
+| discriminator reward | `es_discriminator/closed_loop/es_diffusion_[IDM_]discriminator*/` (or `--exp_root`) |
+| plain diffusion / FM | `{diffusion_sim \| Flow_matching_sim}/{diffusion,fm}_only[_IDM]_<subset>_seed<S>/` |
 
 All roots are under `/zfsauton/scratch/sbellad/`. WM tags carry the checkpoint
-epoch and mode, e.g. `wm_mf_epoch0450_expected_independent`, `wm_det_epoch0500`,
-`wm_gau_epoch0370_k8`. Non-default ES/FM budgets are appended to the name
-(e.g. `_t0.3`, `_n30`, `_it6_rt5_p64_e8`).
+epoch and mode, e.g. `wm_mf_epoch0450_expected_independent`. Non-default ES/FM
+budgets are appended to the name (e.g. `_t0.3`, `_n30`, `_it6_rt5_p64_e8`).
 
 Inside each run folder: `simulation_<planner>_<split>_<tag>_<stamp>/` with one
 JSON per scene (`success`, `overlap`, `offroad`, `goal_reached`, `goal_xy`, ...)
@@ -174,38 +182,33 @@ Slurm stdout is `<log dir>/<run name>_<jobid>.out`.
 
 ## 6. Experiment log
 
-Every experiment run so far, with the command that reproduces it. Success rates
-are on all 1500 fail1500 scenes unless noted. The original script for each row
-is in `legacy/` (column "was").
+Success rates are on all 1500 fail1500 scenes unless noted. Rows marked "removed"
+used the deterministic or single-future Gaussian WM, which are no longer in the repo.
 
 ### fail1500 — forecast comparison
 
-Success % (overlap / offroad failure counts). Commands are relative to `slurm/sim/`.
+Success % (overlap / offroad failure counts).
 
 | Forecast | Diffusion-ES (it4) | FM-ES it4/rs20 | FM-ES it6/rs40 |
 |---|---|---|---|
 | GT | 52.27 (183 / 414) | 51.13 (200 / 412) | 52.20 (191 / 404) |
 | CV | 46.20 (264 / 435) | 44.93 (275 / 439) | 46.00 (270 / 425) |
-| det WM (`wm_det`) | 47.33 (255 / 424) | 45.20 (275 / 435) | 46.20 (270 / 423) |
+| det WM (removed) | 47.33 (255 / 424) | 45.20 (275 / 435) | 46.20 (270 / 423) |
 | MF WM expected_independent | 50.47 (205 / 415) | 48.20 (232 / 425) | 48.87 (226 / 415) |
 | MF WM top1 | 47.60 (251 / 426) | | |
 | MF WM worst_case_independent | 44.33 (268 / 462) | | |
-| Gaussian WM K=8 (`wm_gau`) | 47.20 (230 / 434) | | |
-| Gaussian WM mean (`wm_gau_mean`) | 48.00 (249 / 427) | | |
+| Gaussian WM K=8 (removed) | 47.20 (230 / 434) | | |
+| Gaussian WM mean (removed) | 48.00 (249 / 427) | | |
 
 FM-ES GT budget sweep: it4/rs5/p64 49.27, it6/rs5/p64 49.60, it4/rs5/p128/e16 51.33, it6/rs5/p128/e16 51.20.
 
-| Runs | Command | Was |
-|---|---|---|
-| Diffusion-ES GT, CV, det WM | `fail1500.sh --planner diffusion --forecast gt,cv,wm_det` | `legacy/sim/slurm_es_failure_subset_1500.sh es {gt,cv,wm_det}` |
-| Diffusion-ES MF WM | `fail1500.sh --planner diffusion --forecast wm_mf --mf_mode expected_independent,top1,worst_case_independent` | same, `es wm_mf <mode>` |
-| Diffusion-ES Gaussian WM | `fail1500.sh --planner diffusion --forecast wm_gau,wm_gau_mean` | same, `es wm_gau{,_mean}` |
-| FM-ES it4/rs20 | `fail1500.sh --planner fm --forecast gt,cv,wm_det,wm_mf` | `legacy/sim/slurm_submit_es_fm_fail1500{,_cv_wm}.sh` |
-| FM-ES it6/rs40 | `fail1500.sh --planner fm --forecast gt,cv,wm_det,wm_mf --it 6 --rs 40` | `legacy/sim/slurm_submit_es_fm_fail1500_{it6_rs40,cv_wm_it6_rs40}.sh`, `slurm_es_fm_fail1500_it6_rs40.sh` |
-| FM-ES rs5 sweep | `fail1500.sh --planner fm --forecast gt --rs 5 --it 4,6` and `... --pop 128 --elite 16` | `legacy/sim/slurm_submit_es_fm_fail1500_rs5_p128.sh`, `slurm_es_fm_fail1500_{it4,it6}_rs5_p128.sh` |
-
-Note: the Diffusion-ES det-WM run lives in `immediate_exp/es_diffusion_wm10_fail1500`
-(older naming); a fresh `--forecast wm_det` run writes `world_model_sim/es_diffusion_wm_det_epoch0500_fail1500`.
+| Runs | Command (`bash slurm/sim/submit.sh es --subset fail1500 ...`) |
+|---|---|
+| Diffusion-ES GT, CV | `--planner diffusion --forecast gt,cv` |
+| Diffusion-ES MF WM | `--planner diffusion --forecast wm_mf --mf_mode expected_independent,top1,worst_case_independent` |
+| FM-ES it4/rs20 | `--planner fm --forecast gt,cv,wm_mf` |
+| FM-ES it6/rs40 | `--planner fm --forecast gt,cv,wm_mf --it 6 --rs 40` |
+| FM-ES rs5 sweep | `--planner fm --forecast gt --rs 5 --it 4,6` and `... --pop 128 --elite 16` |
 
 Findings: the MF WM is the best non-GT forecast for both planners. FM-ES at
 it6/rs40 vs it4/rs20 is significantly better for CV and det WM (McNemar p ≈ 0.003),
@@ -214,7 +217,7 @@ and is not significantly behind Diffusion-ES (p = 0.88 CV, 0.23 det WM, 0.08 MF 
 ### fail1500 — MF collision ablation (Diffusion-ES, it4)
 
 ```bash
-bash slurm/sim/fail1500.sh --planner diffusion --forecast wm_mf \
+bash slurm/sim/submit.sh es --subset fail1500 --planner diffusion --forecast wm_mf \
   --mf_collision mean_uniform,gaussian_uniform,gaussian_learned --M 8
 # full grid: --mf_collision mean_uniform,mean_learned,gaussian_uniform,gaussian_learned --M 4,8,16
 # FM-ES:     same with --planner fm
@@ -233,81 +236,55 @@ M = 4 and 16 have not been run yet.
 Uniform vs learned mode weights: no difference (learned probabilities are near
 uniform). Gaussian sampling with the predicted σ makes the planner too
 conservative (many more missed goals, barely fewer collisions).
-Was: `legacy/sim/slurm_submit_mf_collision_ablation.sh`.
 
 ### fail1500 — data-move re-check (2026-10-03)
 
 Diffusion-ES GT rerun after the WOMD move, written to `immediate_exp/_womd_path_recheck/`:
-52.20 vs 52.27, 1499/1500 scenes with the same outcome. Was: `legacy/sim/slurm_resubmit_after_womd_move.sh`
-(which also has the scene-by-scene `compare` mode).
+52.20 vs 52.27, 1499/1500 scenes with the same outcome.
 
-### probe250 — FM hyper-parameter probe (GT forecast)
-
-```bash
-bash slurm/sim/probe250.sh build                     # once (subset already exists)
-bash slurm/sim/probe250.sh --planner diffusion --forecast gt                                  # Diff reference
-bash slurm/sim/probe250.sh --planner fm --forecast gt --t_start 0.05,0.15,0.20,0.40,0.5,0.6,0.8   # Phase 1
-bash slurm/sim/probe250.sh --planner fm --forecast gt --t_start 0.20 --it 6 --rs 20 --tag_suffix it6_rs20   # Phase 2
-bash slurm/sim/probe250.sh --planner fm --forecast gt --t_start 0.20 --it 4 --rs 40 --tag_suffix it4_rs40
-bash slurm/sim/probe250.sh --planner fm --forecast gt --t_start 0.20 --it 6 --rs 40 --tag_suffix it6_rs40
-python scripts/summarize_fm_hparam_probe.py
-```
+### FM hyper-parameter probe (250 fail1500 scenes, GT forecast)
 
 Phase 1 picked t_start 0.2; Phase 2 picked it6/rs40 (used on fail1500 above).
-Was: `legacy/sim/slurm_fm_hparam_probe.sh {diff, fm <t>, phase2 <cfg>, sweep*}`.
+Results: `/zfsauton/scratch/sbellad/Flow_matching_sim/fm_hparam_probe_runs/`.
 
 ### trainval — shards 00+01
 
 ```bash
-bash slurm/sim/trainval.sh --planner diffusion --forecast cv,gt,wm_det
-bash slurm/sim/trainval.sh --planner diffusion --forecast wm --wm_refresh 10,20,50
-bash slurm/sim/trainval.sh --planner diffusion --forecast wm_mf --mf_mode expected_independent,top1,worst_case_independent
-bash slurm/sim/trainval.sh --planner diffusion --forecast wm_gau,wm_gau_mean
-bash slurm/sim/trainval.sh --planner fm --forecast cv,gt
+bash slurm/sim/submit.sh es --subset trainval --planner diffusion --forecast cv,gt
+bash slurm/sim/submit.sh es --subset trainval --planner diffusion --forecast wm_mf --mf_mode expected_independent,top1,worst_case_independent
+bash slurm/sim/submit.sh es --subset trainval --planner fm --forecast cv,gt
 ```
 
-Was: `legacy/sim/slurm_es_baseline.sh` (Diffusion) and `legacy/sim/slurm_es_fm_baseline.sh` (FM).
-FM-ES with a WM on trainval is new (`--planner fm --forecast wm_mf`) and writes to `world_model_sim/`.
-
-### About `legacy/`
-
-The legacy simulation scripts still work unchanged (they were only re-pointed to
-call each other under `legacy/sim/`), e.g. `bash legacy/sim/slurm_submit_mf_collision_ablation.sh es`.
-Their trainval scripts use the deleted WOMD path; use `slurm/sim/trainval.sh` instead.
-The legacy train/annotation `*_submit.sh` scripts call their job script by bare
-file name, so run them from inside their folder; `slurm/train/` replaces them.
-
-61 legacy configurations (every row in this section) were checked to be identical (same `run_simulation.py`
-arguments, run name and output dir) to what the legacy scripts produced; the new
-scripts additionally pass `--seed 0` / `--fm_solver euler` explicitly where the
-old ones relied on those defaults.
+FM-ES with a WM on trainval (`--planner fm --forecast wm_mf`) writes to `world_model_sim/`.
 
 ---
 
 ## 7. Training
 
-All training scripts submit themselves when run with `bash`.
-
 ```bash
-bash slurm/train/mf_wm.sh                       # multi-future Gaussian WM
+bash slurm/train/mf_wm.sh                       # multi-future Gaussian WM (submits itself)
 NUM_MODES=8 EPOCHS=300 bash slurm/train/mf_wm.sh
-bash slurm/train/det_wm.sh                      # deterministic WM
 bash slurm/train/diffusion.sh pretrain [--subgoal] [--tag T] [--resume_path P]
 bash slurm/train/diffusion.sh train --pretrained_ckpt P [--tag T]
 bash slurm/train/vla.sh pretrain [--subgoal] [--tag T]
 bash slurm/train/vla.sh finetune --scene_tokenizer_ckpt P [--subgoal] [--tag T]
+
+# discriminator (details: es_discriminator/README.md)
+sbatch slurm/train/discriminator_data.sh --source fail1500
+sbatch --array=2-11%2 --gres=gpu:a6000:1 --time=16:00:00 slurm/train/discriminator_data.sh --source womd
+sbatch slurm/train/train_wm_discriminator.sh --data fail1500_plus_womd_train_s02_11
 ```
 
 WM hyper-parameters are environment variables (`EPOCHS`, `STEPS_PER_EPOCH`,
 `VAL_STEPS`, `BATCH_SIZE`, `ANCHOR_STEPS`, `HISTORY_STEPS`, `FUTURE_STEPS`,
 `HIDDEN_DIM`, `MAX_RANGE`, `NUM_MODES`, `SIGMA_EPS`, `CACHE_DIR`, `SAVE_DIR`, `WANDB_*`).
-Checkpoints: `/zfsauton/scratch/sbellad/world_model/{ckpts,ckpts_multifuture_gaussian}/`.
+Checkpoints: `/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/`.
 Policy training logs go to `<repo>/logs/`.
 
 Quick WM smoke test before a long run:
 
 ```bash
-cd multiFuture_GaussianWorldModel   # or train_deterministic_world_model
+cd multiFuture_GaussianWorldModel
 python train_world_model.py --cache_dir /zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz \
   --save_dir /zfsauton/scratch/sbellad/world_model/smoke --device cuda \
   --epochs 1 --steps_per_epoch 10 --val_steps 5 --batch_size 4 --anchor_steps 20,30,40 --amp
@@ -315,16 +292,14 @@ python train_world_model.py --cache_dir /zfsauton/scratch/mineuih/waymax_rs/sim_
 
 ---
 
-## 8. World models
+## 8. World model
 
 The WM replaces CV/GT at the same interface: it forecasts other agents' future
 `[x, y, yaw, length, width]` and the existing scorer computes collision/offroad/goal.
 
 | Forecast | Model | Default checkpoint | Scoring |
 |---|---|---|---|
-| `wm_det` | deterministic WM (`model/world_model`, "production" backend) | `world_model/ckpts/world_model_20260912_170741/epoch_0500.pt` | SAT on one predicted future |
 | `wm_mf` | multi-future Gaussian WM, K=6 modes (`multiFuture_GaussianWorldModel`) | `world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20260916_200620/epoch_0450.pt` | per-agent risk over modes (see `--mf_mode`, `--mf_collision`) |
-| `wm_gau`, `wm_gau_mean` | single-future Gaussian WM (training code removed; inference kept) | `world_model/ckpts_gaussian/gaussian_world_model_20260916_194054/epoch_0370.pt` | K=8 Monte-Carlo / mean only |
 
 Inputs: 2 s of history (10 samples at 0.2 s) for every agent in the ego frame,
 map polylines and traffic lights. Output: 25 future samples (5 s), interpolated
@@ -337,31 +312,11 @@ and the mode weights with learned probabilities or uniform 1/K. Samples are
 drawn once per WM prediction and shared by all ego candidates; the RNG is seeded
 per scene from the WOMD `scenario/id`, so results do not depend on batch composition.
 
-Background and the original V1 design notes: `legacy/docs/WORLD_MODEL_INSTRUCTIONS.md`;
-change history: `train_deterministic_world_model/WORLD_MODEL_CHANGELOG.md`.
-
----
-
-## 9. Analysis and evaluation
-
-| Tool | Command |
-|---|---|
-| MF WM ADE/FDE per anchor vs CV | `sbatch multiFuture_GaussianWorldModel/evaluation/slurm_evaluate_per_anchor.sh` |
-| MF collision-method validation | `sbatch multiFuture_GaussianWorldModel/evaluation/slurm_validate_mf_collision_methods.sh` |
-| Mode-probability analysis | `python multiFuture_GaussianWorldModel/evaluation/evaluate_mode_probs.py` |
-| GT-filtered fail1500 re-scoring | `bash slurm/sim/fail1500_gt_filter.sh` |
-| FM probe summary | `python scripts/summarize_fm_hparam_probe.py` |
-
-One-off investigations from September (CV vs WM forecast comparison, WM overlap
-gap diagnosis, collider analysis, forecast visualisation, Diff-OK/FM-fail viewer
-export) are in `legacy/analysis/`; they still run with `sbatch legacy/analysis/<script>.sh`
-because they `cd` to the repo root.
-
 Visualisation: `import viz as visualization` instead of `from waymax import visualization`.
 
 ---
 
-## 10. Cluster notes
+## 9. Cluster notes
 
 - Submit from **rhea or lov4**; `sbatch` is denied on lov1.
 - Never use `sbatch --export=...` (breaks on this cluster); all scripts here
@@ -372,7 +327,7 @@ Visualisation: `import viz as visualization` instead of `from waymax import visu
 
 ---
 
-## 11. Lane graphs and goal-reaching (original setup)
+## 10. Lane graphs and goal-reaching (original setup)
 
 The scorer needs pre-extracted lane graphs. `scripts/extract_roadgraph.py`
 requires the `waymo-open-dataset` protos:

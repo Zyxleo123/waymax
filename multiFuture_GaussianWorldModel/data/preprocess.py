@@ -193,6 +193,10 @@ def _build_map_features(
     max_points_per_segment = int(cfg.max_points_per_segment)
     feat_dim = 2 + 2 + cfg.num_map_type_classes
     sentinel_id = jnp.iinfo(jnp.int32).max
+    map_selection = str(getattr(cfg, "map_selection", "legacy"))
+    if map_selection not in ("legacy", "nearest_even"):
+        raise ValueError(f"map_selection must be 'legacy' or 'nearest_even', got {map_selection!r}")
+    nearest_even = map_selection == "nearest_even"
 
     def _build_for_batch(batch_idx: int) -> tuple[jax.Array, jax.Array]:
         xy = jnp.stack([x_bm[batch_idx], y_bm[batch_idx]], axis=-1)
@@ -214,32 +218,74 @@ def _build_map_features(
         def _build(_: None) -> tuple[jax.Array, jax.Array]:
             sort_ids = jnp.where(valid_and_range, ids, sentinel_id)
             sort_dist = jnp.where(valid_and_range, dist, jnp.inf)
-            order = jnp.lexsort((sort_dist, sort_ids))
-
-            sort_ids = sort_ids[order]
-            sort_xy = xy[order]
-            sort_dirs = dirs[order]
-            sort_types = types[order]
-
-            unique_ids, counts = jnp.unique(
-                sort_ids,
-                size=max_segments + 1,
-                fill_value=sentinel_id,
-                return_counts=True,
-            )
-            unique_ids = unique_ids[:max_segments]
-            counts = counts[:max_segments]
-            starts = jnp.concatenate(
-                [jnp.array([0], dtype=jnp.int32), jnp.cumsum(counts[:-1], dtype=jnp.int32)],
-                axis=0,
-            )
-
-            pad = max_points_per_segment
-            sort_xy = jnp.pad(sort_xy, ((0, pad), (0, 0)))
-            sort_dirs = jnp.pad(sort_dirs, ((0, pad), (0, 0)))
-            sort_types = jnp.pad(sort_types, ((0, pad),))
-
             point_rank = jnp.arange(max_points_per_segment, dtype=jnp.int32)
+
+            if nearest_even:
+                # Stable sort by ID keeps each polyline's points in road-graph order.
+                order = jnp.argsort(sort_ids, stable=True)
+                sort_ids = sort_ids[order]
+                sort_dist = sort_dist[order]
+                sort_xy = xy[order]
+                sort_dirs = dirs[order]
+                sort_types = types[order]
+
+                num_points = sort_ids.shape[0]
+                point_idx_all = jnp.arange(num_points, dtype=jnp.int32)
+                new_group = jnp.concatenate([jnp.array([True]), sort_ids[1:] != sort_ids[:-1]])
+                group = jnp.cumsum(new_group.astype(jnp.int32)) - 1
+                group_ids = jax.ops.segment_max(sort_ids, group, num_segments=num_points)
+                group_starts = jax.ops.segment_min(point_idx_all, group, num_segments=num_points)
+                group_counts = jax.ops.segment_sum(jnp.ones_like(group), group, num_segments=num_points)
+                group_min_dist = jax.ops.segment_min(sort_dist, group, num_segments=num_points)
+                group_ok = (group_counts > 0) & (group_ids != sentinel_id)
+                group_min_dist = jnp.where(group_ok, group_min_dist, jnp.inf)
+
+                pick = jnp.argsort(group_min_dist, stable=True)[:max_segments]
+                unique_ids = jnp.where(group_ok[pick], group_ids[pick], sentinel_id)
+                starts = group_starts[pick]
+                counts = jnp.where(group_ok[pick], group_counts[pick], 0)
+                stride_den = max(max_points_per_segment - 1, 1)
+
+                def _gather(start: jax.Array, count: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
+                    offsets = jnp.where(
+                        count > max_points_per_segment,
+                        (point_rank * (count - 1)) // stride_den,
+                        point_rank,
+                    )
+                    point_idx = jnp.clip(start + offsets, 0, num_points - 1)
+                    return sort_xy[point_idx], sort_dirs[point_idx], sort_types[point_idx]
+            else:
+                order = jnp.lexsort((sort_dist, sort_ids))
+
+                sort_ids = sort_ids[order]
+                sort_xy = xy[order]
+                sort_dirs = dirs[order]
+                sort_types = types[order]
+
+                unique_ids, counts = jnp.unique(
+                    sort_ids,
+                    size=max_segments + 1,
+                    fill_value=sentinel_id,
+                    return_counts=True,
+                )
+                unique_ids = unique_ids[:max_segments]
+                counts = counts[:max_segments]
+                starts = jnp.concatenate(
+                    [jnp.array([0], dtype=jnp.int32), jnp.cumsum(counts[:-1], dtype=jnp.int32)],
+                    axis=0,
+                )
+
+                pad = max_points_per_segment
+                sort_xy = jnp.pad(sort_xy, ((0, pad), (0, 0)))
+                sort_dirs = jnp.pad(sort_dirs, ((0, pad), (0, 0)))
+                sort_types = jnp.pad(sort_types, ((0, pad),))
+
+                def _gather(start: jax.Array, count: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
+                    return (
+                        jax.lax.dynamic_slice(sort_xy, (start, 0), (max_points_per_segment, 2)),
+                        jax.lax.dynamic_slice(sort_dirs, (start, 0), (max_points_per_segment, 2)),
+                        jax.lax.dynamic_slice(sort_types, (start,), (max_points_per_segment,)),
+                    )
 
             def _build_segment(seg_idx: jax.Array) -> tuple[jax.Array, jax.Array]:
                 seg_id = unique_ids[seg_idx]
@@ -247,9 +293,7 @@ def _build_map_features(
                 start = starts[seg_idx]
 
                 def _compute(_: None) -> tuple[jax.Array, jax.Array]:
-                    seg_xy = jax.lax.dynamic_slice(sort_xy, (start, 0), (max_points_per_segment, 2))
-                    seg_dirs = jax.lax.dynamic_slice(sort_dirs, (start, 0), (max_points_per_segment, 2))
-                    seg_types = jax.lax.dynamic_slice(sort_types, (start,), (max_points_per_segment,))
+                    seg_xy, seg_dirs, seg_types = _gather(start, count)
 
                     xy_rel = _rotate_xy(seg_xy - origin_xy_b2[batch_idx][None, :], heading_b[batch_idx]) / cfg.max_range
                     dir_rel = _rotate_xy(seg_dirs, heading_b[batch_idx])

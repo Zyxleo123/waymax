@@ -1,0 +1,111 @@
+{
+ "data_dir": "/zfsauton/scratch/sbellad/es_discriminator/training_sets/fail1500_plus_womd_train_s02_11/es_candidates",
+ "split": "/zfsauton/scratch/sbellad/es_discriminator/training_sets/fail1500_plus_womd_train_s02_11/scenario_split_seed0.json",
+ "invalid_at_start": "/zfsauton/scratch/sbellad/es_discriminator/training_sets/fail1500_plus_womd_train_s02_11/invalid_at_start.json",
+ "output_dir": "/zfsauton/scratch/sbellad/es_discriminator/safety_progress/safety_progress_v3_A8_20261018_165128_88423",
+ "no_expert_filter": false,
+ "max_files": 0,
+ "max_train_groups": 0,
+ "max_eval_groups": 0,
+ "max_steps_per_epoch": 0,
+ "epochs": 30,
+ "batch_groups": 16,
+ "lr": 0.0003,
+ "weight_decay": 0.0001,
+ "warmup_steps": 200,
+ "hidden": 128,
+ "heads": 4,
+ "dropout": 0.1,
+ "pos_scale": 20.0,
+ "vel_scale": 5.0,
+ "seed": 0,
+ "split_seed": 0,
+ "device": "auto",
+ "amp": false,
+ "n_boot": 1000,
+ "progress_key": "goal_gain",
+ "progress_margin": 2.0,
+ "log_every": 50,
+ "wandb_project": "discriminator",
+ "wandb_entity": "scbellad2025-carnegie-mellon-university",
+ "wandb_name": "safety_progress_v3_A8",
+ "wandb_mode": "online",
+ "wm_dir": "/zfsauton/scratch/sbellad/es_discriminator/training_sets/fail1500_plus_womd_train_s02_11/wm_predictions",
+ "edge_dir": "/zfsauton/scratch/sbellad/es_discriminator/training_sets/fail1500_plus_womd_train_s02_11/road_edges",
+ "train_cands": 64,
+ "eval_chunk": 64,
+ "select_key": "",
+ "select_mode": "",
+ "ablation": "A8",
+ "max_pairs": 512,
+ "safety_frac": 0.8,
+ "method": "safety_progress",
+ "data": {
+  "batch_files": 1260,
+  "groups": 50400,
+  "candidates_per_group": 320,
+  "filters": {
+   "total_groups": 50400,
+   "remaining_after": {
+    "group_valid": 50400,
+    "not_invalid_at_start_scene": 48944,
+    "replan_pose_clean": 48157,
+    "logged_expert_future_clean": 47249,
+    "has_finite_ade": 47249
+   }
+  },
+  "train_groups": 33041,
+  "val_groups": 7194,
+  "prediction_groups": {
+   "val": 7712,
+   "test": 7552
+  },
+  "scenes_per_split": {
+   "train": 4392,
+   "val": 964,
+   "test": 944
+  },
+  "load_seconds": 483.1,
+  "device": "cuda",
+  "bf16_autocast": false,
+  "wm_variant": "full_gaussian",
+  "train_cands": 64,
+  "selection": {
+   "key": "discriminator/unsafe",
+   "mode": "min",
+   "split": "val"
+  },
+  "parameters": 466793,
+  "trainable_parameters": 466793,
+  "ablation": "A8"
+ },
+ "data_config": {
+  "anchors": [
+   10,
+   20,
+   30,
+   40
+  ],
+  "anchors_per_scene": 3,
+  "horizon": 25,
+  "future_stride": 2,
+  "history": 5,
+  "history_stride": 2,
+  "max_agents": 16,
+  "max_map_points": 256,
+  "map_point_stride": 6,
+  "max_lights": 16,
+  "max_agent_distance_m": 80.0,
+  "max_map_distance_m": 80.0,
+  "negative_per_anchor": 2,
+  "benign_probability": 0.25,
+  "negative_strength": 1.0,
+  "residual_fraction": 0.7,
+  "residual_min_percentile": 25.0,
+  "benign_residual_scale": [
+   0.1,
+   0.2
+  ],
+  "dt": 0.2
+ }
+}

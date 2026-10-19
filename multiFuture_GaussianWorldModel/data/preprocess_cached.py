@@ -288,6 +288,13 @@ def resample_trajectory_timebase_numpy(
 	return np.stack(outputs, axis=0)
 
 
+def _use_nearest_even(cfg: PreprocessConfig) -> bool:
+	mode = str(getattr(cfg, "map_selection", "legacy"))
+	if mode not in ("legacy", "nearest_even"):
+		raise ValueError(f"map_selection must be 'legacy' or 'nearest_even', got {mode!r}")
+	return mode == "nearest_even"
+
+
 def _build_map_features(
 	state: Mapping[str, np.ndarray],
 	origin_xy_b2: np.ndarray,
@@ -308,6 +315,7 @@ def _build_map_features(
 	max_points_per_segment = int(cfg.max_points_per_segment)
 	feat_dim = 2 + 2 + int(cfg.num_map_type_classes)
 	sentinel_id = np.iinfo(np.int32).max
+	nearest_even = _use_nearest_even(cfg)
 
 	feats = np.zeros((x_bm.shape[0], max_segments, max_points_per_segment, feat_dim), dtype=np.float32)
 	valids = np.zeros((x_bm.shape[0], max_segments, max_points_per_segment), dtype=bool)
@@ -330,40 +338,47 @@ def _build_map_features(
 
 		sort_ids = np.where(valid_and_range, point_ids, sentinel_id)
 		sort_dist = np.where(valid_and_range, dist, np.inf)
-		order = np.lexsort((sort_dist, sort_ids))
+		if nearest_even:
+			# Stable sort by ID keeps each polyline's points in road-graph order.
+			order = np.argsort(sort_ids, kind="stable")
+		else:
+			order = np.lexsort((sort_dist, sort_ids))
 
 		sort_ids = sort_ids[order]
+		sort_dist = sort_dist[order]
 		sort_xy = xy[order]
 		sort_dirs = dirs[order]
 		sort_types = types[order]
 
-		unique_ids, counts = np.unique(sort_ids, return_counts=True)
+		unique_ids, starts, counts = np.unique(sort_ids, return_index=True, return_counts=True)
 		keep = unique_ids != sentinel_id
-		unique_ids = unique_ids[keep][:max_segments]
-		counts = counts[keep][:max_segments]
+		unique_ids, starts, counts = unique_ids[keep], starts[keep], counts[keep]
 		if unique_ids.size == 0:
 			continue
+		if nearest_even:
+			pick = np.argsort(np.minimum.reduceat(sort_dist, starts), kind="stable")[:max_segments]
+		else:
+			pick = np.arange(min(max_segments, unique_ids.size))
+		unique_ids, starts, counts = unique_ids[pick], starts[pick], counts[pick]
 
-		starts = np.concatenate([
-			np.array([0], dtype=np.int32),
-			np.cumsum(counts[:-1], dtype=np.int32),
-		], axis=0)
 		point_rank = np.arange(max_points_per_segment, dtype=np.int32)
+		stride_den = max(max_points_per_segment - 1, 1)
 
 		for seg_idx, (seg_id, count, start) in enumerate(zip(unique_ids, counts, starts, strict=False)):
-			if seg_id == sentinel_id or count <= 0:
-				continue
+			count = int(count)
 			start = int(start)
-			end = min(start + max_points_per_segment, sort_xy.shape[0])
+			if count > max_points_per_segment and nearest_even:
+				point_idx = start + (point_rank * (count - 1)) // stride_den
+			else:
+				point_idx = start + point_rank[:min(count, max_points_per_segment)]
 
 			seg_xy = np.zeros((max_points_per_segment, 2), dtype=np.float32)
 			seg_dirs = np.zeros((max_points_per_segment, 2), dtype=np.float32)
 			seg_types = np.zeros((max_points_per_segment,), dtype=np.int32)
-			span = end - start
-			if span > 0:
-				seg_xy[:span] = sort_xy[start:end]
-				seg_dirs[:span] = sort_dirs[start:end]
-				seg_types[:span] = sort_types[start:end]
+			span = point_idx.shape[0]
+			seg_xy[:span] = sort_xy[point_idx]
+			seg_dirs[:span] = sort_dirs[point_idx]
+			seg_types[:span] = sort_types[point_idx]
 
 			xy_rel = _rotate_xy(seg_xy - origin_xy_b2[batch_idx][None, :], heading_b[batch_idx]) / float(cfg.max_range)
 			dir_rel = _rotate_xy(seg_dirs, heading_b[batch_idx])

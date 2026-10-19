@@ -24,22 +24,32 @@ class _MLP(nn.Module):
 
 
 class TrajectoryDiscriminator(nn.Module):
-    def __init__(self, hidden: int = 96, heads: int = 4, dropout: float = 0.1) -> None:
+    def __init__(self, hidden: int = 96, heads: int = 4, dropout: float = 0.1, *,
+                 agent_tokens: bool = True, map_tokens: bool = True, scene_attention: bool = True) -> None:
+        """`agent_tokens` / `map_tokens` = False drop the historical-agent / generic-map tokens from
+        the scene tokens (and their encoders); `scene_attention` = False drops the candidate-to-scene
+        cross-attention. For ablations."""
         super().__init__()
         if hidden % heads:
             raise ValueError("hidden must be divisible by heads")
         self.hidden = int(hidden)
         self.heads = int(heads)
         self.dropout = float(dropout)
-        self.agent_embed = _MLP(8, hidden)
-        self.map_embed = _MLP(5, hidden)
+        self.agent_tokens = bool(agent_tokens)
+        self.map_tokens = bool(map_tokens)
+        self.scene_attention = bool(scene_attention)
+        if self.agent_tokens:
+            self.agent_embed = _MLP(8, hidden)
+        if self.map_tokens:
+            self.map_embed = _MLP(5, hidden)
         self.light_embed = _MLP(4, hidden)
         self.goal_embed = _MLP(4, hidden)  # [goal_xy, current_ego_vxy]
         self.traj_embed = _MLP(6, hidden)
         self.traj_gru = nn.GRU(hidden, hidden, batch_first=True)
-        self.cross_attn = nn.MultiheadAttention(
-            hidden, heads, dropout=dropout, batch_first=True
-        )
+        if self.scene_attention:
+            self.cross_attn = nn.MultiheadAttention(
+                hidden, heads, dropout=dropout, batch_first=True
+            )
         self.head = nn.Sequential(
             nn.LayerNorm(3 * hidden),
             nn.Linear(3 * hidden, hidden), nn.GELU(), nn.Dropout(dropout),
@@ -48,23 +58,26 @@ class TrajectoryDiscriminator(nn.Module):
 
     def _encode_scene(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         bsz = batch["agents"].shape[0]
-        agent_hist_valid = batch["agent_mask"].bool()
-        encoded_hist = self.agent_embed(batch["agents"])
-        denom = agent_hist_valid.sum(dim=2).clamp(min=1).unsqueeze(-1)
-        agent_tokens = (encoded_hist * agent_hist_valid.unsqueeze(-1)).sum(dim=2) / denom
-        agent_valid = agent_hist_valid.any(dim=2)
+        parts, masks = [], []
+        if self.agent_tokens:
+            agent_hist_valid = batch["agent_mask"].bool()
+            encoded_hist = self.agent_embed(batch["agents"])
+            denom = agent_hist_valid.sum(dim=2).clamp(min=1).unsqueeze(-1)
+            parts.append((encoded_hist * agent_hist_valid.unsqueeze(-1)).sum(dim=2) / denom)
+            masks.append(agent_hist_valid.any(dim=2))
+        if self.map_tokens:
+            parts.append(self.map_embed(batch["map"]))
+            masks.append(batch["map_mask"].bool())
+        parts.append(self.light_embed(batch["lights"]))
+        masks.append(batch["lights_mask"].bool())
+        goal_token = self._goal_token(batch)
+        parts.append(goal_token)
+        masks.append(torch.ones((bsz, 1), dtype=torch.bool, device=goal_token.device))
+        return torch.cat(parts, dim=1), torch.cat(masks, dim=1), goal_token
 
-        map_tokens = self.map_embed(batch["map"])
-        map_valid = batch["map_mask"].bool()
-        light_tokens = self.light_embed(batch["lights"])
-        light_valid = batch["lights_mask"].bool()
-        goal_token = self.goal_embed(torch.cat([batch["goal"], batch["ego_vel"]], dim=-1)).unsqueeze(1)
-        tokens = torch.cat([agent_tokens, map_tokens, light_tokens, goal_token], dim=1)
-        valid = torch.cat([
-            agent_valid, map_valid, light_valid,
-            torch.ones((bsz, 1), dtype=torch.bool, device=tokens.device),
-        ], dim=1)
-        return tokens, valid, goal_token
+    def _goal_token(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+        """[B,1,H] embedding of [goal_xy, current_ego_vxy]."""
+        return self.goal_embed(torch.cat([batch["goal"], batch["ego_vel"]], dim=-1)).unsqueeze(1)
 
 
 def path_yaw_torch(xy: torch.Tensor, fallback_yaw: torch.Tensor, min_step_m: float = 0.05) -> torch.Tensor:

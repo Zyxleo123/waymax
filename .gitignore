@@ -55,3 +55,9 @@ old/
 *.sqlite
 
 waymo-open-dataset/
+
+# trained model binaries and the trainval data copy (READMEs and configs stay tracked)
+trained_models/**/*.pt
+trained_models/diffusion/*/epoch_*/
+trainval_shards/
+!trained_models/**/*.json
