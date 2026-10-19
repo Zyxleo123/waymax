@@ -1,14 +1,14 @@
 # Closed loop: ft_rule_hdg scorer vs baselines
 
-Generated 2026-10-19 08:00. Run: `/zfsauton/scratch/ishanj/anchor_wm/closed_loop_val/val0-9_es_anchorwm_ft_rule_hdg_20261019_014026_best_reward_scorer_offmargin_tiebreak`
+Generated 2026-10-19 08:20. Run: `/zfsauton/scratch/ishanj/anchor_wm/closed_loop_val/val0-9_es_anchorwm_ft_rule_hdg_20261019_014026_best_reward_scorer_offmargin_tiebreak`
 
-**2876 scenes done, target 10 shards** (partial); paired comparisons use the 2876 scenes every run has.
+**2916 scenes done, target 10 shards** (final); paired comparisons use the 2916 scenes every run has.
 
-## all (n = 2876)
+## all (n = 2916)
 
 | Reward | Success | Overlap | Offroad | Goal reached | Median goal dist |
 |---|---|---|---|---|---|
-| ft_rule_hdg scorer | 98.6% | 0.3% | 1.0% | 100.0% | 0.13 m |
+| ft_rule_hdg scorer | 98.6% | 0.4% | 1.0% | 100.0% | 0.13 m |
 | MF+rule | 98.5% | 0.3% | 0.9% | 99.7% | 0.12 m |
 
 | ft_rule_hdg scorer minus | Δ success (pts) | 95% CI | Fixed / broken |
@@ -114,13 +114,13 @@ Generated 2026-10-19 08:00. Run: `/zfsauton/scratch/ishanj/anchor_wm/closed_loop
 |---|---|---|---|
 | MF+rule | +0.4 | -1.1 to +1.8 | 3 / 2 |
 
-## shard 00009 (n = 255)
+## shard 00009 (n = 295)
 
 | Reward | Success | Overlap | Offroad | Goal reached | Median goal dist |
 |---|---|---|---|---|---|
-| ft_rule_hdg scorer | 98.4% | 0.4% | 1.2% | 100.0% | 0.14 m |
-| MF+rule | 98.0% | 0.4% | 1.6% | 99.6% | 0.13 m |
+| ft_rule_hdg scorer | 98.3% | 0.7% | 1.0% | 100.0% | 0.13 m |
+| MF+rule | 98.0% | 0.7% | 1.4% | 99.7% | 0.13 m |
 
 | ft_rule_hdg scorer minus | Δ success (pts) | 95% CI | Fixed / broken |
 |---|---|---|---|
-| MF+rule | +0.4 | +0.0 to +1.2 | 1 / 0 |
+| MF+rule | +0.3 | +0.0 to +1.0 | 1 / 0 |

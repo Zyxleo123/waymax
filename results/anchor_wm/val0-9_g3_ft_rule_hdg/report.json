@@ -1,34 +1,34 @@
 {
- "generated": "2026-10-19 08:00",
+ "generated": "2026-10-19 08:20",
  "run_dir": "/zfsauton/scratch/ishanj/anchor_wm/closed_loop_val/val0-9_es_anchorwm_ft_rule_hdg_20261019_014026_best_reward_scorer_offmargin_tiebreak",
- "scenes_done": 2876,
+ "scenes_done": 2916,
  "expected": 1500,
- "complete": false,
+ "complete": true,
  "splits": {
   "all": {
-   "n": 2876,
+   "n": 2916,
    "metrics": {
     "ft_rule_hdg scorer": {
-     "success": 0.9860917941585535,
-     "overlap": 0.0034770514603616135,
-     "offroad": 0.010083449235048678,
-     "goal_reached": 0.9996522948539638,
-     "goal_dist_median_m": 0.13499002158641815
+     "success": 0.9859396433470508,
+     "overlap": 0.0037722908093278463,
+     "offroad": 0.009945130315500686,
+     "goal_reached": 0.9996570644718793,
+     "goal_dist_median_m": 0.13414141535758972
     },
     "MF+rule": {
-     "success": 0.9853963838664812,
-     "overlap": 0.003129346314325452,
-     "offroad": 0.009040333796940195,
-     "goal_reached": 0.9968706536856745,
-     "goal_dist_median_m": 0.12372908368706703
+     "success": 0.9852537722908093,
+     "overlap": 0.003429355281207133,
+     "offroad": 0.008916323731138546,
+     "goal_reached": 0.9969135802469136,
+     "goal_dist_median_m": 0.1234305389225483
     }
    },
    "ft_rule_hdg scorer minus": {
     "MF+rule": {
-     "delta_pts": 0.06954102920723226,
+     "delta_pts": 0.06858710562414265,
      "ci95": [
-      -0.2086230876216968,
-      0.34770514603616137
+      -0.24005486968449932,
+      0.3429355281207133
      ],
      "fixed": 10,
      "broken": 8
@@ -306,29 +306,29 @@
    }
   },
   "shard 00009": {
-   "n": 255,
+   "n": 295,
    "metrics": {
     "ft_rule_hdg scorer": {
-     "success": 0.984313725490196,
-     "overlap": 0.00392156862745098,
-     "offroad": 0.011764705882352941,
+     "success": 0.9830508474576272,
+     "overlap": 0.006779661016949152,
+     "offroad": 0.010169491525423728,
      "goal_reached": 1.0,
-     "goal_dist_median_m": 0.13537371158599854
+     "goal_dist_median_m": 0.1318632960319519
     },
     "MF+rule": {
-     "success": 0.9803921568627451,
-     "overlap": 0.00392156862745098,
-     "offroad": 0.01568627450980392,
-     "goal_reached": 0.996078431372549,
-     "goal_dist_median_m": 0.13348956406116486
+     "success": 0.9796610169491525,
+     "overlap": 0.006779661016949152,
+     "offroad": 0.013559322033898305,
+     "goal_reached": 0.9966101694915255,
+     "goal_dist_median_m": 0.1269615739583969
     }
    },
    "ft_rule_hdg scorer minus": {
     "MF+rule": {
-     "delta_pts": 0.39215686274509803,
+     "delta_pts": 0.3389830508474576,
      "ci95": [
       0.0,
-      1.1764705882352942
+      1.0169491525423728
      ],
      "fixed": 1,
      "broken": 0
