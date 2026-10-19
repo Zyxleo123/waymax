@@ -220,14 +220,23 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                 if curr_scenario_index >= num_records and _advance_tfrecord():
                     continue
                 break
-        # A shard's last batch can be short; planner/batch_dims expect num_worlds, so pad it with
-        # copies of its last scenario and keep only the first num_real results.
+        # A shard's last batch can be short; planner/batch_dims expect num_worlds, so pad the loaded
+        # state with copies of its last scenario and keep only the first num_real results. (The loader
+        # deduplicates indices, so the padding has to happen after loading.)
         num_real = len(scenario_indices)
-        scenario_indices = scenario_indices + [scenario_indices[-1]] * (int(args.num_worlds) - num_real)
         try:
             sim_state, _, scenario_ids = load_scenario_state_batch_fast(
                 ds_cfg, scenario_indices, return_scenario_ids=True
             )
+            num_pad = int(args.num_worlds) - num_real
+            if num_pad > 0:
+                sim_state = jax.tree_util.tree_map(
+                    lambda x: jnp.concatenate([x, jnp.repeat(x[-1:], num_pad, axis=0)], axis=0)
+                    if getattr(x, "ndim", 0) > 0 and x.shape[0] == num_real else x,
+                    sim_state,
+                )
+                scenario_indices = scenario_indices + [scenario_indices[-1]] * num_pad
+                scenario_ids = list(scenario_ids) + [scenario_ids[-1]] * num_pad
         except Exception as e:
             print(f"Error loading scenarios {scenario_indices} from {os.path.basename(tfrecord_path)}: {e}")
             if not _advance_tfrecord():
