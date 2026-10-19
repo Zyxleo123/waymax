@@ -43,11 +43,11 @@
 #   bash rl/diffusion_ft/slurm/submit_pace.sh
 #   DFT_PACE_ARMS="base,pace10=bank@p10:always:20" bash ...        # drop the dose point
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
-PACE_DIR="${DFT_PACE_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/pace_${STAMP}}"
-SPLITS3="${DFT_SPLITS3_JSON:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json}"
-RUN=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
+PACE_DIR="${DFT_PACE_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/pace_${STAMP}}"
+SPLITS3="${DFT_SPLITS3_JSON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json}"
+RUN=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
 REPEATS="${DFT_SELECT_REPEATS:-4}"
 [[ -n "${DFT_SELECT_SMOKE:-}" ]] && REPEATS=1
 mkdir -p "$PACE_DIR/gate" "$ROOT/logs/dft"

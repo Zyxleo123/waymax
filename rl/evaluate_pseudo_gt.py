@@ -14,9 +14,9 @@ tfexample scene (same map as the original failure JSON).
 Example::
 
     python -m rl.evaluate_pseudo_gt \\
-        --pseudo-gt-dir /zfsauton/scratch/yixiz/pseudo_gt/repro_sac_v2 \\
-        --run-dir /zfsauton/scratch/yixiz/waymax_rs/vmax_repro/repro_sac_v2 \\
-        --failure-dir /zfsauton/scratch/mineuih/waymax_rs/failure_samples
+        --pseudo-gt-dir /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/pseudo_gt/repro_sac_v2 \\
+        --run-dir /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/vmax_repro/repro_sac_v2 \\
+        --failure-dir /data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/failure_samples
 """
 
 from __future__ import annotations
@@ -68,10 +68,10 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--pseudo-gt-dir", required=True)
     p.add_argument("--run-dir", required=True, help="V-Max run dir for termination_keys.")
-    p.add_argument("--failure-dir", default="/zfsauton/scratch/mineuih/waymax_rs/failure_samples")
+    p.add_argument("--failure-dir", default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/failure_samples")
     p.add_argument(
         "--lane-graph-dir",
-        default="/zfsauton/scratch/mineuih/waymax_rs/lane_graphs",
+        default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs",
     )
     p.add_argument("--goal-threshold-m", type=float, default=2.0)
     p.add_argument("--limit", type=int, default=None)

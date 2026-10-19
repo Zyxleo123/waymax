@@ -8,14 +8,14 @@
 #   bash rl/diffusion_ft/slurm/submit_test_reactive_npc.sh
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 mkdir -p "$ROOT/logs/dft/env"
 
 STAMP="$(date +%Y%m%d_%H%M%S)"
 ENVF="$ROOT/logs/dft/env/reactunit_${STAMP}.env"
 {
-  echo "DFT_TFRECORD=${DFT_TFRECORD:-/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord}"
+  echo "DFT_TFRECORD=${DFT_TFRECORD:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord}"
   echo "DFT_INDICES=${DFT_INDICES:-0-7}"
   echo "DFT_REACTIVE=${DFT_REACTIVE:-idm_brake}"
 } > "$ENVF"

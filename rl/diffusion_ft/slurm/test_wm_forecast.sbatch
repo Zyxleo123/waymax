@@ -1,14 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=dft_wm_gate
-#SBATCH --partition=cpu
-#SBATCH --qos=qos_cpu
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_cpu_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G
 #SBATCH --time=2:00:00
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
 #
 # Gates for the learned world-model neighbour sources (rl/diffusion_ft/
 # world_model_forecast.py, tests/test_wm_forecast.py): vendored-import isolation,
@@ -24,7 +24,7 @@
 # Config arrives as a positional env FILE. Never `sbatch --export`.
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"; mkdir -p "$ROOT/logs/dft"
 for arg in "$@"; do
   if [[ -f "$arg" ]]; then
@@ -33,11 +33,11 @@ for arg in "$@"; do
   elif [[ "$arg" == *=* ]]; then export "${arg?}"; fi
 done
 
-PY="${DFT_PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
+PY="${DFT_PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 export PYTHONUNBUFFERED=1 JAX_PLATFORMS=cpu TF_CPP_MIN_LOG_LEVEL=2 CUDA_VISIBLE_DEVICES=""
-DFT_SPLITS_JSON="${DFT_SPLITS_JSON:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json}"
-DFT_SHARD_GLOB="${DFT_SHARD_GLOB:-/zfsauton/datasets/womd/tf_example/training/training_tfexample.tfrecord-*}"
-DFT_INDEX_DIR="${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
+DFT_SPLITS_JSON="${DFT_SPLITS_JSON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json}"
+DFT_SHARD_GLOB="${DFT_SHARD_GLOB:-/data/user_data/yixiz/autonlab/zfsauton/datasets/womd/tf_example/training/training_tfexample.tfrecord-*}"
+DFT_INDEX_DIR="${DFT_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
 DFT_GATE_VERDICT="${DFT_GATE_VERDICT:?set DFT_GATE_VERDICT (where the verdict goes)}"
 DFT_WM_JSON="${DFT_WM_JSON:-$(dirname "$DFT_GATE_VERDICT")/test_wm_forecast.json}"
 DFT_WM_GATE_SCENES="${DFT_WM_GATE_SCENES:-8}"

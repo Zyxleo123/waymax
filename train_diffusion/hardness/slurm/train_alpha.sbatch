@@ -1,16 +1,17 @@
 #!/bin/bash
 #SBATCH --job-name=hrd_train
-#SBATCH --partition=general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:a5000:1
+#SBATCH --gres=gpu:A6000:1
 # 8, not 16: the loader runs num_workers=0, so 4 arms pack onto gpu28's 48 CPUs
 # (4 GPUs) instead of only 3 at 16 each.
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=128G
 #SBATCH --time=24:00:00
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%j.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%j.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%j.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%j.out
 #
 # Phase 2, stage 3: one arm of the alpha sweep.
 #
@@ -21,7 +22,7 @@
 # process with NO Python traceback, which reads as a mysterious silent FAILED.
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 mkdir -p "$ROOT/logs/hardness"
 
@@ -34,7 +35,7 @@ for arg in "$@"; do
   fi
 done
 
-export PYTHON="${PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
+export PYTHON="${PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 export PYTHONUNBUFFERED=1
 # 24G a5000 headroom: grow the GPU allocation on demand instead of grabbing 75%
 # up front, so training + the closed-loop eval's waymax rollout coexist.
@@ -49,8 +50,8 @@ HRD_ALPHA="${HRD_ALPHA:-0.0}"
 HRD_EXCLUDE_DIRTY="${HRD_EXCLUDE_DIRTY:-1}"
 HRD_WEIGHT_CLIP="${HRD_WEIGHT_CLIP:-10.0}"
 HRD_CKPT="${HRD_CKPT:?set HRD_CKPT to the pretrained diffusion checkpoint}"
-HRD_CACHE_DIR="${HRD_CACHE_DIR:-/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/}"
-HRD_SAVE_DIR="${HRD_SAVE_DIR:-/zfsauton/scratch/yixiz/waymax_rs/hardness_sweep}"
+HRD_CACHE_DIR="${HRD_CACHE_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/}"
+HRD_SAVE_DIR="${HRD_SAVE_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/hardness_sweep}"
 HRD_EPOCHS="${HRD_EPOCHS:-20}"
 HRD_STEPS="${HRD_STEPS:-1000}"
 HRD_SEED="${HRD_SEED:-0}"
@@ -61,11 +62,11 @@ HRD_SHUFFLE_SEED="${HRD_SHUFFLE_SEED:-0}"
 # the 218-scene failure set (headroom) and a held-out WOMD slice (general drift).
 # Set HRD_EVAL_EVERY=0 to disable.
 HRD_EVAL_EVERY="${HRD_EVAL_EVERY:-5}"
-HRD_EVAL_TFRECORD_DIR="${HRD_EVAL_TFRECORD_DIR:-/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures}"
+HRD_EVAL_TFRECORD_DIR="${HRD_EVAL_TFRECORD_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures}"
 HRD_EVAL_NUM="${HRD_EVAL_NUM:-218}"
-HRD_EVAL2_TFRECORD_DIR="${HRD_EVAL2_TFRECORD_DIR:-/zfsauton/scratch/eshau/womd/tf_example/training}"
+HRD_EVAL2_TFRECORD_DIR="${HRD_EVAL2_TFRECORD_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training}"
 HRD_EVAL2_NUM="${HRD_EVAL2_NUM:-200}"
-HRD_EVAL_LANE_GRAPH_DIR="${HRD_EVAL_LANE_GRAPH_DIR:-/zfsauton/scratch/mineuih/waymax_rs/lane_graphs}"
+HRD_EVAL_LANE_GRAPH_DIR="${HRD_EVAL_LANE_GRAPH_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs}"
 
 RISK_ARGS=()
 if [[ "$HRD_ALPHA" != "0.0" || "$HRD_EXCLUDE_DIRTY" == "1" ]]; then

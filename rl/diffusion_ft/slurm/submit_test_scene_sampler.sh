@@ -7,13 +7,13 @@
 # any full-corpus training run.
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 ENV_DIR="$ROOT/logs/dft/env"
 mkdir -p "$ENV_DIR" "$ROOT/logs/dft"
 ENV_FILE="$ENV_DIR/sampler_gate_$(date +%Y%m%d_%H%M%S).env"
 
-echo "DFT_INDEX_DIR=${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}" > "$ENV_FILE"
+echo "DFT_INDEX_DIR=${DFT_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}" > "$ENV_FILE"
 echo "Wrote env file: $ENV_FILE"; cat "$ENV_FILE"
 
 SB_FLAGS=()

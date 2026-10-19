@@ -214,7 +214,7 @@ def main(argv=None):
     p.add_argument("--splits_json", required=True)
     p.add_argument("--splits", default="failure_heldout,success_heldout")
     p.add_argument("--shard_glob",
-                   default="/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*")
+                   default="/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*")
     p.add_argument("--index_dir", default=DEFAULT_INDEX_DIR)
     p.add_argument("--ckpt", default=DEFAULT_CHECKPOINT_PATH)
     p.add_argument("--n_calib", type=int, default=32, help="scenes per split for G1")

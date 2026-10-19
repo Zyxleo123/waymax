@@ -37,8 +37,8 @@ import sys
 
 import numpy as np
 
-DEFAULT_TRACE = "/zfsauton/scratch/yixiz/failure_womd_trace.json"
-DEFAULT_TFRECORD = "/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord"
+DEFAULT_TRACE = "/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/failure_womd_trace.json"
+DEFAULT_TFRECORD = "/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord"
 
 
 def build_entries(trace_path: str) -> list[list]:
@@ -113,7 +113,7 @@ def main() -> int:
     parser.add_argument("--tfrecord", default=DEFAULT_TFRECORD)
     parser.add_argument(
         "--source-dir",
-        default="/zfsauton/scratch/eshau/womd/tf_example/training",
+        default="/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training",
         help="directory holding the WOMD shards the failures were traced back to",
     )
     parser.add_argument("--output", default=None, help="default: <tfrecord>.lanegraph_map.json")

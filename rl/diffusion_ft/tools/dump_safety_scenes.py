@@ -179,7 +179,7 @@ def python_probes(cfg, ego_box_5, ego_z, roadgraph_points, other_box_n5,
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--tfrecord",
-                   default="/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord")
+                   default="/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord")
     p.add_argument("--indices", default="0,1,2,3,4,5")
     p.add_argument("--out_dir", required=True)
     p.add_argument("--radius", type=float, default=70.0,

@@ -320,7 +320,7 @@ def check_sac_buffer_semantics(source: ScenarioSource) -> bool:
 
 def main():
     p = argparse.ArgumentParser(description="Deep sanity-check SB3 SAC pipeline.")
-    p.add_argument("--failure-dir", default="/zfsauton/scratch/mineuih/waymax_rs/failure_samples")
+    p.add_argument("--failure-dir", default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/failure_samples")
     p.add_argument("--limit", type=int, default=20)
     args = p.parse_args()
 

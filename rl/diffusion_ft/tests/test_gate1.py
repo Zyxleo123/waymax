@@ -43,7 +43,7 @@ import numpy as np
 # under login-node watchdog limits). Set before any jit fires.
 _CACHE_DIR = os.environ.get(
     "JAX_COMPILATION_CACHE_DIR",
-    "/zfsauton/scratch/yixiz/waymax_rs/.jax_compilation_cache",
+    "/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/.jax_compilation_cache",
 )
 try:
     jax.config.update("jax_compilation_cache_dir", _CACHE_DIR)
@@ -113,7 +113,7 @@ def _cfg():
     ckpt = os.environ.get("DFT_CKPT", DEFAULT_CHECKPOINT_PATH)
     tfr = os.environ.get(
         "DFT_TFRECORD",
-        "/zfsauton/scratch/eshau/womd/tf_example/training/"
+        "/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/"
         "training_tfexample.tfrecord-00000-of-01000",
     )
     indices = [int(x) for x in os.environ.get("DFT_INDICES", "0,1,2,3").split(",") if x.strip()]

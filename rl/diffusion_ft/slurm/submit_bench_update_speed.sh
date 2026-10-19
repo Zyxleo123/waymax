@@ -8,7 +8,7 @@
 #   DFT_INDICES=0,1,2,3 DFT_PPO_EPOCHS=2 bash rl/diffusion_ft/slurm/submit_bench_update_speed.sh
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 ENV_DIR="$ROOT/logs/dft/env"
 mkdir -p "$ENV_DIR"

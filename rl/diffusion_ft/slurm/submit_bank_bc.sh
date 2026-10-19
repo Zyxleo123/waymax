@@ -62,11 +62,11 @@
 #   DFT_BCD_DATA_FROM=$ZFS/.../bank_bc/20260928_121223_39589 DFT_BCD_SWITCH_SHARE=0.5 \
 #     DFT_BCD_TAG=bcsw50 bash rl/diffusion_ft/slurm/submit_bank_bc.sh
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
-OUT="${DFT_BCD_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/bank_bc/${STAMP}}"
-REF=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/retrain_worlddt/20260924_235925_2645687
-SPLITS3=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json
+OUT="${DFT_BCD_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/bank_bc/${STAMP}}"
+REF=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/retrain_worlddt/20260924_235925_2645687
+SPLITS3=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json
 ARM="b_l24_r20"
 L24="lat0.1,lat-0.1,lat0.175,lat-0.175,lat0.25,lat-0.25,lat0.325,lat-0.325,\
 lat0.4,lat-0.4,lat0.5,lat-0.5,lat0.6,lat-0.6,lat0.75,lat-0.75,\
@@ -136,7 +136,7 @@ for t in ${TASKS[@]+"${TASKS[@]}"}; do
   i=$((i + 1))
 done
 if [[ -z "$DATA_FROM" ]]; then
-  CID=$(sb --parsable --exclude=gpu28 --array="0-$((i - 1))%3" --job-name=dft_bcd_collect \
+  CID=$(sb --parsable --array="0-$((i - 1))%3" --job-name=dft_bcd_collect \
     rl/diffusion_ft/slurm/select_eval.sbatch "$OUT/collect/env")
   echo "collect -> array $CID ($i tasks, GPU) -> $OUT/collect/tasks/*/bc_data/$ARM/"
   DATA="$OUT/collect/tasks/*/bc_data/$ARM/*.npz"

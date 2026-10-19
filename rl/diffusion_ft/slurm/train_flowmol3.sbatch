@@ -1,16 +1,17 @@
 #!/bin/bash
 #SBATCH --job-name=dft_fm3
-#SBATCH --partition=general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:A6000:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=96G
 #SBATCH --time=24:00:00
 #SBATCH --requeue
 #SBATCH --open-mode=append
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%A_%a.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%A_%a.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%A_%a.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%A_%a.out
 #
 # FlowMol3 (arXiv 2508.12629) inference-OOD fine-tune of the 6/16 base diffusion
 # checkpoint: self-conditioning and late-stage geometry distortion, as a 2x2
@@ -44,7 +45,7 @@
 # requeue-holds the job.
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"; mkdir -p "$ROOT/logs/dft"
 
 for arg in "$@"; do
@@ -64,15 +65,15 @@ for arg in "$@"; do
   elif [[ "$arg" == *=* ]]; then export "${arg?}"; fi
 done
 
-PY="${DFT_PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
+PY="${DFT_PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 export PYTHONUNBUFFERED=1
 export TF_CPP_MIN_LOG_LEVEL="${TF_CPP_MIN_LOG_LEVEL:-2}"
 export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.95}"
 
 FM3_ARM="${FM3_ARM:?set FM3_ARM}"
 FM3_SAVE_DIR="${FM3_SAVE_DIR:?set FM3_SAVE_DIR}"
-FM3_INIT_FROM="${FM3_INIT_FROM:-/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
-FM3_TFRECORD="${FM3_TFRECORD:-/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord@1000}"
+FM3_INIT_FROM="${FM3_INIT_FROM:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
+FM3_TFRECORD="${FM3_TFRECORD:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord@1000}"
 
 # ---- fine-tune budget -------------------------------------------------------
 # A FINE-TUNE, not a pretrain: the base ran 500 epochs x 1000 steps. The lr is an

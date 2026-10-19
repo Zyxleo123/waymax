@@ -1,13 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=dft_gate2b
-#SBATCH --partition=cpu
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_cpu_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=1:00:00
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
 #
 # Gate 2b (RL-actor) unit gates. The model here is a tiny synthetic UNet, so this
 # is CPU-only work and belongs on the `cpu` partition -- asking for a GPU would
@@ -21,7 +22,7 @@
 # which triggers user-env retrieval and requeue-hold on this cluster).
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 mkdir -p "$ROOT/logs/dft"
 
@@ -34,12 +35,12 @@ for arg in "$@"; do
   fi
 done
 
-export PYTHON="${PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
+export PYTHON="${PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 export PYTHONUNBUFFERED=1
 export TF_CPP_MIN_LOG_LEVEL="${TF_CPP_MIN_LOG_LEVEL:-2}"
 export JAX_PLATFORMS="${JAX_PLATFORMS:-cpu}"
 export CUDA_VISIBLE_DEVICES=""
-export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-/zfsauton/scratch/yixiz/waymax_rs/.jax_compilation_cache}"
+export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/.jax_compilation_cache}"
 
 echo "host=${SLURMD_NODENAME:-unknown}  root=$ROOT"
 "$PYTHON" -c "import jax; print('jax devices:', jax.devices())"

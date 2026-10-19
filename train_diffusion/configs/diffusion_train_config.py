@@ -34,14 +34,14 @@ class DiffusionTrainConfig:
 	# Primary eval set (logged under eval/<eval_tag>/...).
 	eval_tag: str = "failures"
 	eval_tfrecord_dir: str | None = None
-	eval_lane_graph_dir: str = "/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
+	eval_lane_graph_dir: str = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
 	eval_scenario_indices: str | None = None
 	eval_num_scenarios: int = 200
 	# Optional secondary eval set (logged under eval/<eval2_tag>/...); set
 	# eval2_tfrecord_dir to enable it. The rollout settings below are shared.
 	eval2_tag: str = "womd"
 	eval2_tfrecord_dir: str | None = None
-	eval2_lane_graph_dir: str = "/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
+	eval2_lane_graph_dir: str = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
 	eval2_scenario_indices: str | None = None
 	eval2_num_scenarios: int = 200
 	eval_num_worlds: int = 10
@@ -54,7 +54,7 @@ class DiffusionTrainConfig:
 	eval_seed: int = 0
 	eval_visualize_mode: str = "none"
 
-	save_dir: str = "/zfsauton/scratch/mineuih/waymax_rs/vla/train_diffusion"
+	save_dir: str = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/train_diffusion"
 	epochs: int = 20
 	steps_per_epoch: int = 1000
 	save_every: int = 5
@@ -82,7 +82,7 @@ class DiffusionTrainConfig:
 def parse_args() -> DiffusionTrainConfig:
 	parser = argparse.ArgumentParser()
 
-	parser.add_argument("--cache_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/")
+	parser.add_argument("--cache_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/")
 	parser.add_argument("--file_indices", type=int, nargs="*", default=None)
 	parser.add_argument("--cache_batch_size", type=int, default=64)
 	parser.add_argument("--shuffle_seed", type=int, default=0)
@@ -110,7 +110,7 @@ def parse_args() -> DiffusionTrainConfig:
 		help="wandb sub-namespace for the primary eval set: eval/<tag>/...")
 	parser.add_argument("--eval_tfrecord_dir", type=str, default=None,
 		help="dir of tfrecords to eval on (e.g. the failure set); required when eval_every>0")
-	parser.add_argument("--eval_lane_graph_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/lane_graphs")
+	parser.add_argument("--eval_lane_graph_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs")
 	parser.add_argument("--eval_scenario_indices", type=str, default=None,
 		help="comma-separated scenario indices; omit to sweep the first eval_num_scenarios")
 	parser.add_argument("--eval_num_scenarios", type=int, default=200)
@@ -118,7 +118,7 @@ def parse_args() -> DiffusionTrainConfig:
 		help="wandb sub-namespace for the optional secondary eval set")
 	parser.add_argument("--eval2_tfrecord_dir", type=str, default=None,
 		help="enable a second eval set (e.g. held-out WOMD shards); omit to disable")
-	parser.add_argument("--eval2_lane_graph_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/lane_graphs")
+	parser.add_argument("--eval2_lane_graph_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs")
 	parser.add_argument("--eval2_scenario_indices", type=str, default=None)
 	parser.add_argument("--eval2_num_scenarios", type=int, default=200)
 	parser.add_argument("--eval_num_worlds", type=int, default=10)
@@ -133,7 +133,7 @@ def parse_args() -> DiffusionTrainConfig:
 	parser.add_argument("--eval_visualize_mode", type=str, default="none",
 		choices=["all", "success", "failure", "none"])
 
-	parser.add_argument("--save_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/vla/train_diffusion")
+	parser.add_argument("--save_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/train_diffusion")
 	parser.add_argument("--epochs", type=int, default=500)
 	parser.add_argument("--steps_per_epoch", type=int, default=1000)
 	parser.add_argument("--save_every", type=int, default=10)
@@ -147,7 +147,7 @@ def parse_args() -> DiffusionTrainConfig:
 	parser.add_argument("--grad_clip_norm", type=float, default=1.0)
 	parser.add_argument("--ema_decay", type=float, default=0.999)
 
-	parser.add_argument("--jax_compilation_cache_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/vla/.jax_compilation_cache")
+	parser.add_argument("--jax_compilation_cache_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/.jax_compilation_cache")
 
 	parser.add_argument("--wandb_project", type=str, default="train_diffusion")
 	parser.add_argument("--wandb_name", type=str, default="train_diffusion")

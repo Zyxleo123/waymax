@@ -11,7 +11,7 @@
 #     DFT_INDICES=0,1,2,3,4,5 bash rl/diffusion_ft/slurm/submit_gate1.sh
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 
 ENV_DIR="$ROOT/logs/dft/env"
@@ -20,8 +20,8 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 ENV_FILE="$ENV_DIR/gate1_${STAMP}.env"
 
 {
-  echo "DFT_CKPT=${DFT_CKPT:-/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
-  echo "DFT_TFRECORD=${DFT_TFRECORD:-/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-00000-of-01000}"
+  echo "DFT_CKPT=${DFT_CKPT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
+  echo "DFT_TFRECORD=${DFT_TFRECORD:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-00000-of-01000}"
   echo "DFT_INDICES=${DFT_INDICES:-0,1,2,3}"
   # GPU has no ~60s login-node watchdog: run all six gates over full episodes.
   echo "DFT_GATES=${DFT_GATES:-1,2,3,4,5,6}"

@@ -21,11 +21,11 @@
 # where RUN_DIR is a submit_val_posthoc.sh output dir (holds <split>_splits.json
 # and select/). All runs must share one splits file (same scenes).
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 for v in $(compgen -v SLURM_); do unset "$v"; done
 (( $# > 0 )) || { echo "usage: $0 RUN_DIR [RUN_DIR ...]" >&2; exit 1; }
 SPLIT="${DFT_VAL_SPLIT:-val10}"
-EXCLUDE="${DFT_EXCLUDE-gpu28}"        # a5000
+EXCLUDE="${DFT_EXCLUDE-}"        # a5000
 sb() { env -i HOME="$HOME" PATH="$PATH" USER="${USER:-}" sbatch "$@"; }
 kv() { printf "%s='%s'\n" "$1" "${2//\'/\'\\\'\'}"; }
 

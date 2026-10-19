@@ -241,6 +241,6 @@ def load_diffusion_checkpoint(
 # single source of truth (see also ``reference_es_checkpoint`` /
 # ``reference_diffusion_ckpt_contract`` in project memory).
 DEFAULT_CHECKPOINT_PATH = (
-    "/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/"
+    "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/"
     "pretrain_diffusion_without_subgoal_20260616_013642/latest"
 )

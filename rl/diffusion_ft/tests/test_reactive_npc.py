@@ -89,7 +89,7 @@ def build_env(ckpt, n_obj, sim_agents, replan):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--tfrecord", type=str,
-                   default="/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord")
+                   default="/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord")
     p.add_argument("--indices", type=str, default="0-7")
     p.add_argument("--ckpt", type=str, default=DEFAULT_CHECKPOINT_PATH)
     p.add_argument("--replan_interval_steps", type=int, default=10)

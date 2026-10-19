@@ -36,11 +36,11 @@
 #     bash rl/diffusion_ft/slurm/sweep_expert_ratio.sh
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 
 EXPERT_STEPS_GRID="${DFT_EXPERT_STEPS_GRID:-0 1 2 4 8 16}"
-BASE_OUT="${DFT_OUT_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/dppo_corpus}"
+BASE_OUT="${DFT_OUT_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/dppo_corpus}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 
 # ---- shared configuration for every arm -------------------------------------
@@ -51,7 +51,7 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 # DFT_TFRECORD/DFT_INDICES batch -- i.e. how this sweep is pointed at the failure
 # set. With `:-` an empty override silently reverts to the corpus. Same idiom as
 # DFT_EXCLUDE in sweep_reward.sh.
-export DFT_SHARD_GLOB="${DFT_SHARD_GLOB-/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*-of-01000}"
+export DFT_SHARD_GLOB="${DFT_SHARD_GLOB-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*-of-01000}"
 export DFT_SCENES_PER_ITER="${DFT_SCENES_PER_ITER:-32}"
 export DFT_EVAL_SCENES="${DFT_EVAL_SCENES:-32}"
 export DFT_RESAMPLE_EVERY="${DFT_RESAMPLE_EVERY:-1}"

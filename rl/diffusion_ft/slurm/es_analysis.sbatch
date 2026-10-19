@@ -1,14 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=dft_esan
-#SBATCH --partition=cpu
-#SBATCH --qos=qos_cpu
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_cpu_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8G
 #SBATCH --time=00:30:00
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
 #
 # Population-search read-out (rl/diffusion_ft/tools/es_analysis.py): the es_p1 ==
 # b_cv plumbing check, every arm paired against b_cv, and the per-replan ES
@@ -19,7 +19,7 @@
 # Gate inside the job: a scoring task with no rows is named and the job exits 0.
 # Config arrives as a positional env FILE. Never `sbatch --export`.
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"; mkdir -p "$ROOT/logs/dft"
 for arg in "$@"; do
   if [[ -f "$arg" ]]; then
@@ -27,7 +27,7 @@ for arg in "$@"; do
     source "$arg"
   elif [[ "$arg" == *=* ]]; then export "${arg?}"; fi
 done
-PY="${DFT_PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
+PY="${DFT_PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 SEL_DIR="${DFT_SELECT_DIR:?set DFT_SELECT_DIR}"
 REF="${DFT_ES_REF:-b_cv}"
 IDENT="${DFT_ES_IDENTITY-es_p1:b_cv}"

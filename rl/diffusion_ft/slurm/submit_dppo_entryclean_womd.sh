@@ -61,7 +61,7 @@
 #     bash rl/diffusion_ft/slurm/submit_dppo_entryclean_womd.sh
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 
 SEED_GRID="${DFT_SEED_GRID:-0 1 2}"
@@ -83,17 +83,17 @@ if [[ -n "$DFT_SCENE_IDS_JSON" ]]; then
 else
   REGIMES="${DFT_REGIMES:-fixed corpus}"
 fi
-BASE_OUT="${DFT_OUT_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/dppo_entryclean_womd}"
+BASE_OUT="${DFT_OUT_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/dppo_entryclean_womd}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 
-WOMD_DIR="/zfsauton/scratch/eshau/womd/tf_example/training"
+WOMD_DIR="/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training"
 WOMD_GLOB="$WOMD_DIR/training_tfexample.tfrecord-*-of-01000"
 export DFT_TFRECORD="${DFT_TFRECORD:-$WOMD_DIR/training_tfexample.tfrecord-00000-of-01000}"
 export DFT_INDICES="${DFT_INDICES:-$(seq -s, 0 31)}"
 # Raw WOMD tf_example route dims. 10x300 (ScenarioMax) here = zero valid routes.
 export DFT_NUM_PATHS="${DFT_NUM_PATHS:-45}"
 export DFT_NUM_POINTS_PER_PATH="${DFT_NUM_POINTS_PER_PATH:-800}"
-export DFT_INDEX_DIR="${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
+export DFT_INDEX_DIR="${DFT_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
 export DFT_SCENES_PER_ITER="${DFT_SCENES_PER_ITER:-32}"
 export DFT_EVAL_SCENES="${DFT_EVAL_SCENES:-32}"
 export DFT_RESAMPLE_EVERY="${DFT_RESAMPLE_EVERY:-1}"
@@ -137,7 +137,7 @@ export DFT_KEEP_CKPTS="${DFT_KEEP_CKPTS:-3}"
 
 # gpu28 is the 24 GB a5000; an arm died there in a 13.05 GiB eval transfer (job
 # 37156). Every arm that completed this config ran on a 48 GB a6000 (`general`).
-export DFT_EXCLUDE="${DFT_EXCLUDE-gpu28}"
+export DFT_EXCLUDE="${DFT_EXCLUDE-}"
 # Host RAM: 48G host-OOM'd a fixed-batch run ~58 iters in (job 31985), and the
 # corpus stream holds a prefetched batch on top of that.
 export DFT_MEM="${DFT_MEM:-96G}"

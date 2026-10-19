@@ -17,20 +17,20 @@
 # idle `myfree` claims the h200 is (measured 2026-08-21).
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 ENV_DIR="$ROOT/logs/dft/env"
 mkdir -p "$ENV_DIR"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 ENV_FILE="$ENV_DIR/sigsweep_${STAMP}.env"
 
-DFT_SWEEP_OUT="${DFT_SWEEP_OUT:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/sigma_sweep/${STAMP}}"
+DFT_SWEEP_OUT="${DFT_SWEEP_OUT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/sigma_sweep/${STAMP}}"
 
 # A list-valued variable travels fine because the config is a FILE, not an
 # `sbatch --export` list -- no comma encoding needed.
 {
-  echo "DFT_CKPT=${DFT_CKPT:-/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
-  echo "DFT_TFRECORD=${DFT_TFRECORD:-/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord}"
+  echo "DFT_CKPT=${DFT_CKPT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
+  echo "DFT_TFRECORD=${DFT_TFRECORD:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord}"
   echo "DFT_INDICES=${DFT_INDICES:-0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31}"
   echo "DFT_ARMS=${DFT_ARMS:-base=}"
   echo "DFT_DIAG_SEEDS=${DFT_DIAG_SEEDS:-4}"
@@ -55,14 +55,14 @@ DFT_SWEEP_OUT="${DFT_SWEEP_OUT:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/s
 echo "Wrote env file: $ENV_FILE"; cat "$ENV_FILE"
 
 # `general` runs qos_general as its default QOS, so no --qos flag is needed.
-DFT_PARTITION="${DFT_PARTITION:-general}"
+DFT_PARTITION="${DFT_PARTITION:-preempt}"
 DFT_QOS="${DFT_QOS:-}"
 # No-colon `-`: an explicitly EMPTY DFT_NODELIST must survive as "no pin". With
 # `:-` an empty override silently reverted to gpu28, which then contradicted a
-# gpu28 exclusion (`--nodelist=gpu28 --exclude=gpu28` -> an unsatisfiable job).
+# gpu28 exclusion (`` -> an unsatisfiable job).
 # Same idiom as DFT_EXCLUDE in sweep_reward.sh and DFT_SHARD_GLOB in
 # sweep_expert_ratio.sh.
-DFT_NODELIST="${DFT_NODELIST-gpu28}"
+DFT_NODELIST="${DFT_NODELIST-}"
 SB_FLAGS=(--partition="$DFT_PARTITION")
 [[ -n "$DFT_QOS" ]]      && SB_FLAGS+=(--qos="$DFT_QOS")
 [[ -n "$DFT_NODELIST" ]] && SB_FLAGS+=(--nodelist="$DFT_NODELIST")

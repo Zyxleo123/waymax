@@ -5,12 +5,12 @@
 #   DFT_N_SCENES=128 bash rl/diffusion_ft/slurm/submit_probe_drift.sh
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 ENV_DIR="$ROOT/logs/dft/env"; mkdir -p "$ENV_DIR"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 ENV_FILE="$ENV_DIR/drift_${STAMP}.env"
-OUT_DIR="${DFT_OUT_DIR:-/zfsauton/scratch/yixiz/waymax_rs/dft/drift_${STAMP}}"
+OUT_DIR="${DFT_OUT_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/dft/drift_${STAMP}}"
 
 {
   echo "DFT_OUT_DIR='${OUT_DIR}'"

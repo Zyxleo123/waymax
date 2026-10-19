@@ -11,12 +11,12 @@
 #   bash rl/diffusion_ft/slurm/submit_viz_scenes.sh
 #   DFT_RECOVERED="59208,60665" DFT_PRESERVED="8844,50" bash rl/diffusion_ft/slurm/submit_viz_scenes.sh
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 
-SEL=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select
+SEL=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select
 # Ramp-sweep run scored with --dump_traj; has base + c_r10 (=ship l24 geometry) + c_r20.
 DFT_SELECT_DIR="${DFT_SELECT_DIR:-$SEL/20260918_110957_3371380}"
-DFT_SPLITS_JSON="${DFT_SPLITS_JSON:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json}"
+DFT_SPLITS_JSON="${DFT_SPLITS_JSON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json}"
 DFT_VIZ_ARMS="${DFT_VIZ_ARMS:-base,c_r10,c_r20}"
 DFT_SOLVED_ARM="${DFT_SOLVED_ARM:-c_r10}"
 # Dump every arm, draw only these (empty = all). c_r20 is scored and kept in the
@@ -67,7 +67,7 @@ echo "env  -> $ENVF"
 echo "json -> $OUT_JSON"
 echo "html -> $OUT_HTML"
 
-DID=$(sb --parsable --exclude=gpu28 rl/diffusion_ft/slurm/dump_reach_from_select.sbatch "$ENVF")
+DID=$(sb --parsable rl/diffusion_ft/slurm/dump_reach_from_select.sbatch "$ENVF")
 VID=$(sb --parsable --dependency="afterok:${DID}" rl/diffusion_ft/slurm/viz_scenes.sbatch "$ENVF")
 echo "dump  -> job $DID (GPU a6000)"
 echo "html  -> job $VID (CPU, afterok:$DID)"

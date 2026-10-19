@@ -97,7 +97,7 @@ from rl.sac_callbacks import (
 )
 from rl.waymax_env import RewardConfig, WaymaxGymEnv
 
-DEFAULT_FAILURE_DIR = "/zfsauton/scratch/mineuih/waymax_rs/failure_samples"
+DEFAULT_FAILURE_DIR = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/failure_samples"
 
 # Reason groups, in the priority order used to assign a case with several tags to
 # a single primary group. "Fix the most upstream failure first": a case that did

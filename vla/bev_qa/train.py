@@ -23,8 +23,8 @@ from vla.bev_qa.model import BEVGemmaQA
 
 @dataclass(frozen=True)
 class TrainBEVQAConfig:
-    qa_dir: str = "/zfsauton/scratch/mineuih/waymax_rs/qa_dataset/"
-    img_root: str = "/zfsauton/scratch/eshau/imgs_past/"
+    qa_dir: str = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/qa_dataset/"
+    img_root: str = "/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/imgs_past/"
     output_dir: str = "/home/scratch/sbellad/waymax_rs/bev_qa_output_gemma"
     gemma_name: str = "google/gemma-4-E2B-it"
 
@@ -394,8 +394,8 @@ def _parse_file_indices(raw: str | None) -> list[int] | None:
 def parse_args() -> TrainBEVQAConfig:
     parser = argparse.ArgumentParser(description="Train BEV-Gemma QA adapter.")
 
-    parser.add_argument("--qa_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/qa_dataset/")
-    parser.add_argument("--img_root", type=str, default="/zfsauton/scratch/eshau/imgs_past/")
+    parser.add_argument("--qa_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/qa_dataset/")
+    parser.add_argument("--img_root", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/imgs_past/")
     parser.add_argument("--output_dir", type=str, default="/home/scratch/sbellad/waymax_rs/bev_qa_output_gemma")
     parser.add_argument("--gemma_name", type=str, default="google/gemma-4-E2B-it")
 

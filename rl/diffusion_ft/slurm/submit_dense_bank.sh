@@ -37,7 +37,7 @@
 #   DFT_SELECT_SMOKE=1 bash rl/diffusion_ft/slurm/submit_dense_bank.sh   # ~20 min, 4 scenes/split
 #   bash rl/diffusion_ft/slurm/submit_dense_bank.sh                      # the real ladder
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 
 L4="lat0.25,lat-0.25,lat0.5,lat-0.5"
 L8="lat0.15,lat-0.15,lat0.35,lat-0.35,lat0.6,lat-0.6,lat0.9,lat-0.9"
@@ -60,7 +60,7 @@ b_l16=bank@l16:cons:20,b_l24=bank@l24:cons:20,b_dense=bank@dense:cons:20"
 # edit head would have to beat, and it sat at 0.125-0.250 while 8 fixed edits sat
 # at 0.39.
 export DFT_FT_ARMS="${DFT_FT_ARMS:-bf_cons10=ft:cons:10}"
-RUN=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
+RUN=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
 export DFT_SELECT_CKPTS="${DFT_SELECT_CKPTS:-$RUN/base_s0/iter_000110}"
 
 echo "ladder:"

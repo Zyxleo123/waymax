@@ -1,14 +1,15 @@
 #!/bin/bash
 #SBATCH --job-name=vmh_rescore
-#SBATCH --partition=general
-#SBATCH --gres=gpu:a6000:1
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
+#SBATCH --gres=gpu:A6000:1
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=6:00:00
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/vmax_hardness/slurm-%x-%j.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/vmax_hardness/slurm-%x-%j.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/vmax_hardness/slurm-%x-%j.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/vmax_hardness/slurm-%x-%j.out
 #
 # Stage A: re-score a slice of the WOMD training shards with the PRETRAINED V-Max
 # SAC (model_best), emitting per-scene JSONs with (shard, scenario_idx) provenance
@@ -18,7 +19,7 @@
 # waymax rollout coexists with the loaded model. Resumable: existing JSONs skip.
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 mkdir -p "$ROOT/logs/vmax_hardness"
 # shellcheck source=/dev/null

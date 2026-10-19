@@ -40,11 +40,11 @@
 # Usage (from repo root, ON RHEA):
 #   bash rl/diffusion_ft/slurm/submit_edge_segment.sh
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
-OUT="${DFT_EDGESEG_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/edge_segment/${STAMP}}"
-REF=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/retrain_worlddt/20260924_235925_2645687
-SPLITS3=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json
+OUT="${DFT_EDGESEG_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/edge_segment/${STAMP}}"
+REF=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/retrain_worlddt/20260924_235925_2645687
+SPLITS3=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json
 ITER="${DFT_EVAL_ITER:-000110}"
 ARMS="base_s0 base_s1 base_s2"
 mkdir -p "$OUT" "$ROOT/logs/dft"

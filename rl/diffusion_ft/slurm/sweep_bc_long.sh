@@ -50,7 +50,7 @@
 # 0.95 in the sbatch; if an OOM ever recurs, `DFT_EXCLUDE=gpu28` is the fallback.
 # A crash is survivable here anyway -- the next array task resumes from `latest`.
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 ENV_DIR="$ROOT/logs/dft/env"; mkdir -p "$ENV_DIR" "$ROOT/logs/dft"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
 
@@ -64,12 +64,12 @@ NTASKS=$(( (DFT_DAYS * 24 + CHUNK_H - 1) / CHUNK_H ))
 # reached. ~16-20 s/iter plus eval => ~4000 iters/day.
 DFT_ITERS="${DFT_ITERS:-24000}"
 
-SPLITS_DIR="${DFT_SPLITS_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0}"
+SPLITS_DIR="${DFT_SPLITS_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0}"
 DFT_VERIFIED_JSON="${DFT_VERIFIED_JSON:-${SPLITS_DIR}/verified_seed777/eval_splits_verified.json}"
-BASE_OUT="${DFT_SWEEP_OUT:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/bc_long/${STAMP}}"
+BASE_OUT="${DFT_SWEEP_OUT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/bc_long/${STAMP}}"
 GROUP="${DFT_WANDB_GROUP:-bc_long_${STAMP}}"
-SHARD_GLOB="${DFT_SHARD_GLOB:-/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
-CKPT="${DFT_CKPT:-/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
+SHARD_GLOB="${DFT_SHARD_GLOB:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
+CKPT="${DFT_CKPT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
 
 [[ -s "$DFT_VERIFIED_JSON" ]] || {
   echo "no verified splits at $DFT_VERIFIED_JSON -- run submit_verified_safety.sh first" >&2
@@ -97,7 +97,7 @@ for BW in "${RUNGS[@]}"; do
     echo "DFT_OUT_DIR=$OUT_DIR"
     echo "DFT_CKPT=$CKPT"
     echo "DFT_SHARD_GLOB=$SHARD_GLOB"
-    echo "DFT_INDEX_DIR=${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
+    echo "DFT_INDEX_DIR=${DFT_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
     echo "DFT_SCENES_PER_ITER=${DFT_SCENES_PER_ITER:-16}"
     echo "DFT_EVAL_SCENES=${DFT_EVAL_SCENES:-16}"
     echo "DFT_DATA_SEED=${DFT_DATA_SEED:-0}"

@@ -8,10 +8,10 @@ read any record in O(1).
 Example::
 
     python -m rl.tfrecord_fast build \\
-        /zfsauton/scratch/yixiz/ScenarioMaxWaymo/training.tfrecord
+        /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymo/training.tfrecord
 
     python -m rl.tfrecord_fast read \\
-        /zfsauton/scratch/yixiz/ScenarioMaxWaymo/training.tfrecord 231012
+        /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymo/training.tfrecord 231012
 """
 
 from __future__ import annotations

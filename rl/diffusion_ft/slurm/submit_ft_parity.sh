@@ -30,7 +30,7 @@
 #   DFT_SELECT_SMOKE=1 bash rl/diffusion_ft/slurm/submit_ft_parity.sh
 #   bash rl/diffusion_ft/slurm/submit_ft_parity.sh
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 
 L24="lat0.1,lat-0.1,lat0.175,lat-0.175,lat0.25,lat-0.25,lat0.325,lat-0.325,\
 lat0.4,lat-0.4,lat0.5,lat-0.5,lat0.6,lat-0.6,lat0.75,lat-0.75,\
@@ -42,7 +42,7 @@ export DFT_SELECT_BANK="$L24"
 export DFT_BASE_ARMS="base,b_l24=bank@l24:cons:20"
 # Per-checkpoint arms: the fine-tune alone, and as the alternative at BOTH windows.
 export DFT_FT_ARMS="${DFT_FT_ARMS:-ft,bf_w10=ft:cons:10,bf_w20=ft:cons:20}"
-RUN=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
+RUN=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
 export DFT_SELECT_CKPTS="${DFT_SELECT_CKPTS:-$RUN/base_s0/iter_000110 \
 $RUN/base_s1/iter_000110 $RUN/base_s2/iter_000110}"
 

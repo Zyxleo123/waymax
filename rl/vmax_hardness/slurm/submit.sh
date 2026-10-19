@@ -15,7 +15,7 @@
 # env file is written and passed as a positional argument to each stage.
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 SLURM_DIR="$ROOT/rl/vmax_hardness/slurm"
 ENV_DIR="$ROOT/logs/vmax_hardness/env"
@@ -34,8 +34,8 @@ for v in PYTHON VMH_RUN_DIR VMH_BEST_CKPT VMH_SHARD_GLOB VMH_INDEX_DIR VMH_OUT \
 done
 echo "Wrote env file: $ENV_FILE"; cat "$ENV_FILE"; echo
 
-INDEX_DIR="${VMH_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
-SHARD_GLOB="${VMH_SHARD_GLOB:-/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*-of-01000}"
+INDEX_DIR="${VMH_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
+SHARD_GLOB="${VMH_SHARD_GLOB:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*-of-01000}"
 
 # Clean environment so no SLURM_* from an enclosing allocation leaks into sbatch.
 submit() { env -i HOME="$HOME" PATH="$PATH" USER="${USER:-}" sbatch "$@"; }

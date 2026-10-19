@@ -1,7 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=ckpteval-render
-#SBATCH --partition=general
-#SBATCH --gres=gpu:1
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
+#SBATCH --gres=gpu:A6000:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=12:00:00
@@ -19,9 +20,9 @@
 
 set -euo pipefail
 
-SUBMIT_DIR="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+SUBMIT_DIR="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 PREAMBLE="${SUBMIT_DIR}/V-Max/slurm/_ckpt_eval_preamble.sh"
-[ -f "${PREAMBLE}" ] || PREAMBLE=/zfsauton2/home/yixiz/waymax_rs/V-Max/slurm/_ckpt_eval_preamble.sh
+[ -f "${PREAMBLE}" ] || PREAMBLE=/home/yixiz/waymax_rs/V-Max/slurm/_ckpt_eval_preamble.sh
 # shellcheck source=/dev/null
 . "${PREAMBLE}" "$@"
 

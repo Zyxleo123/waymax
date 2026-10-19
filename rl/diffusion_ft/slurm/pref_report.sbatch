@@ -1,13 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=dft_pref_report
-#SBATCH --partition=cpu
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_cpu_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=2:00:00
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
 #
 # One Diffusion-DPO arm's paired comparisons, then the run-wide summary table
 # (submit_pref_dpo.sh step 5). Reads select rows only -> CPU partition.
@@ -22,7 +23,7 @@
 #
 # Config arrives as a positional env FILE (never --export).
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"; mkdir -p "$ROOT/logs/dft"
 for arg in "$@"; do
   if [[ -f "$arg" ]]; then
@@ -30,7 +31,7 @@ for arg in "$@"; do
     source "$arg"
   elif [[ "$arg" == *=* ]]; then export "${arg?}"; fi
 done
-PY="${DFT_PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
+PY="${DFT_PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 RUN="${DFT_PREF_RUN:?set DFT_PREF_RUN (submit_pref_dpo.sh output dir)}"
 EVAL="${DFT_PREF_EVAL:?set DFT_PREF_EVAL (the select dir of this arm)}"
 ITERS="${DFT_PREF_ITERS:?set DFT_PREF_ITERS (scored iterations)}"

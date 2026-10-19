@@ -60,12 +60,12 @@
 #   DFT_ARMS="base tau_lo tau_hi" bash rl/diffusion_ft/slurm/sweep_safety_ablation.sh
 #   DFT_MAX_CONCURRENT=2 DFT_ITERS=500 bash rl/diffusion_ft/slurm/sweep_safety_ablation.sh
 #   # resume/extend: re-run with the SAME out dir
-#   DFT_SWEEP_OUT=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/ablation/<STAMP> \
+#   DFT_SWEEP_OUT=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/ablation/<STAMP> \
 #     bash rl/diffusion_ft/slurm/sweep_safety_ablation.sh
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
-BASE_OUT="${DFT_SWEEP_OUT:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/ablation/${STAMP}}"
+BASE_OUT="${DFT_SWEEP_OUT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/ablation/${STAMP}}"
 # Array mode needs ONE directory holding <task_id>.env, and it must survive the
 # whole array (tasks 9..11 source it hours after submission), so it lives under
 # the sweep's own out dir rather than in the shared logs/dft/env scratch.
@@ -77,10 +77,10 @@ mkdir -p "$ENV_DIR" "$ROOT/logs/dft"
 # this with ONE line replaced. Anchor centre = the frozen-base KL at beta=100
 # success-only, which measured -0.004..-0.012 marginal against beta=0's
 # -0.02..-0.15 and the log-target bc300's -0.031 (2026-09-08).
-SPLITS_JSON="${DFT_SPLITS_JSON:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_verified.json}"
-CKPT="${DFT_CKPT:-/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
-GLOB="${DFT_SHARD_GLOB:-/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
-IDX="${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
+SPLITS_JSON="${DFT_SPLITS_JSON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_verified.json}"
+CKPT="${DFT_CKPT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
+GLOB="${DFT_SHARD_GLOB:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
+IDX="${DFT_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
 
 B_BASE_ANCHOR="${DFT_BASE_ANCHOR_WEIGHT:-100}"
 B_BC="${DFT_BC_WEIGHT:-0.0}"

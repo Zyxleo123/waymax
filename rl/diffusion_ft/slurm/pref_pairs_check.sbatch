@@ -1,13 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=dft_pref_pairs
-#SBATCH --partition=cpu
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_cpu_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=1:00:00
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
 #
 # What the collected Diffusion-DPO pairs are, and whether they are the bank-BC
 # run's edit rows (tools/pref_pairs_check.py). Informational: training does not
@@ -15,7 +16,7 @@
 #
 # Config arrives as a positional env FILE (never --export).
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"; mkdir -p "$ROOT/logs/dft"
 for arg in "$@"; do
   if [[ -f "$arg" ]]; then
@@ -23,7 +24,7 @@ for arg in "$@"; do
     source "$arg"
   elif [[ "$arg" == *=* ]]; then export "${arg?}"; fi
 done
-PY="${DFT_PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
+PY="${DFT_PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 DATA="${DFT_PREF_DATA:?set DFT_PREF_DATA (glob of bc_data/<arm>/*.npz)}"
 OUT="${DFT_PREF_CHECK_OUT:?set DFT_PREF_CHECK_OUT (json path)}"
 echo "host=${SLURMD_NODENAME:-unknown} job=${SLURM_JOB_ID:-?} cpus=${SLURM_CPUS_PER_TASK:-?}" \

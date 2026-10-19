@@ -5,7 +5,7 @@
 #   bash rl/diffusion_ft/slurm/submit_gate2b.sh
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 ENV_DIR="$ROOT/logs/dft/env"
 mkdir -p "$ENV_DIR"

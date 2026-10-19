@@ -13,7 +13,7 @@ for O(1) random-access reads -- the source tfrecord is ~930GB / 400k+ records, s
 plain sequential ``TFRecordDataset`` scan up to the highest wanted index is not
 viable. Build the offset index once if missing::
 
-    python -m rl.tfrecord_fast build /zfsauton/scratch/yixiz/ScenarioMaxWaymo/training.tfrecord
+    python -m rl.tfrecord_fast build /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymo/training.tfrecord
 
 Some raw failures never made it into ScenarioMax at all: its tfexample converter
 (``ScenarioMax/scenariomax/unified_to_tfexample/converter/roadgraph.py:_detect_overpass``)
@@ -29,9 +29,9 @@ look).
 Usage::
 
     python rl/build_failure_scenariomax.py \\
-        --trace-json /zfsauton/scratch/yixiz/failure_womd_trace.json \\
-        --output /zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord \\
-        --excluded-manifest /zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/excluded_overpass.json
+        --trace-json /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/failure_womd_trace.json \\
+        --output /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord \\
+        --excluded-manifest /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/excluded_overpass.json
 """
 
 from __future__ import annotations
@@ -51,9 +51,9 @@ for _p in (_RL_DIR, _SCENARIOMAX_DIR):
         sys.path.insert(0, _p)
 from tfrecord_fast import offset_index_exists, read_tfrecord_bytes  # noqa: E402
 
-DEFAULT_TRACE_JSON = "/zfsauton/scratch/yixiz/failure_womd_trace.json"
-DEFAULT_OUTPUT = "/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord"
-DEFAULT_EXCLUDED_MANIFEST = "/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/excluded_overpass.json"
+DEFAULT_TRACE_JSON = "/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/failure_womd_trace.json"
+DEFAULT_OUTPUT = "/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord"
+DEFAULT_EXCLUDED_MANIFEST = "/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/excluded_overpass.json"
 
 # Cases given a closer look during the 2026-07-09 investigation, keyed by tf2_scenario_id
 # (stable across trace reruns, unlike json_path). Everything else gets DEFAULT_NOTE.

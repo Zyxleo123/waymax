@@ -30,7 +30,7 @@
 #   logging    DFT_WANDB (0/1) DFT_WANDB_PROJECT DFT_WANDB_GROUP DFT_WANDB_NAME
 #   placement  DFT_PARTITION DFT_QOS DFT_NODELIST DFT_EXCLUDE
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 ENV_DIR="$ROOT/logs/dft/env"; mkdir -p "$ENV_DIR" "$ROOT/logs/dft"
 # Two sibling submissions in the SAME SECOND collide: `date +%S` resolution gives
 # both the same env filename and the same default out_dir, so the second write
@@ -41,16 +41,16 @@ ENV_DIR="$ROOT/logs/dft/env"; mkdir -p "$ENV_DIR" "$ROOT/logs/dft"
 # 02:38:02). $$ differs per invocation, so it separates them.
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
 ENV_FILE="$ENV_DIR/safetrain_${STAMP}.env"
-OUT_DIR="${DFT_OUT_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/safety_train/${STAMP}}"
+OUT_DIR="${DFT_OUT_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/safety_train/${STAMP}}"
 
 {
   echo "DFT_OUT_DIR=$OUT_DIR"
-  echo "DFT_CKPT=${DFT_CKPT:-/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
+  echo "DFT_CKPT=${DFT_CKPT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
   # data
   [[ -n "${DFT_TFRECORD:-}" ]] && echo "DFT_TFRECORD=${DFT_TFRECORD}"
   [[ -n "${DFT_INDICES:-}" ]]  && echo "DFT_INDICES=${DFT_INDICES}"
-  echo "DFT_SHARD_GLOB=${DFT_SHARD_GLOB:-/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
-  echo "DFT_INDEX_DIR=${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
+  echo "DFT_SHARD_GLOB=${DFT_SHARD_GLOB:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
+  echo "DFT_INDEX_DIR=${DFT_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
   echo "DFT_SCENES_PER_ITER=${DFT_SCENES_PER_ITER:-32}"
   echo "DFT_EVAL_SCENES=${DFT_EVAL_SCENES:-32}"
   echo "DFT_DATA_SEED=${DFT_DATA_SEED:-0}"

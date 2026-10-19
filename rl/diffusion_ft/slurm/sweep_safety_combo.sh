@@ -66,21 +66,21 @@
 #   bash rl/diffusion_ft/slurm/sweep_safety_combo.sh
 #   DFT_ARMS="combo ref_k3" bash rl/diffusion_ft/slurm/sweep_safety_combo.sh
 #   # resume/extend: re-run with the SAME out dir
-#   DFT_SWEEP_OUT=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/combo/<STAMP> \
+#   DFT_SWEEP_OUT=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/combo/<STAMP> \
 #     bash rl/diffusion_ft/slurm/sweep_safety_combo.sh
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
-BASE_OUT="${DFT_SWEEP_OUT:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/combo/${STAMP}}"
+BASE_OUT="${DFT_SWEEP_OUT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/combo/${STAMP}}"
 # Must outlive the whole array (later tasks source it hours after submission), so
 # it lives under the sweep's out dir, not the shared logs/dft/env scratch.
 ENV_DIR="$BASE_OUT/env"
 mkdir -p "$ENV_DIR" "$ROOT/logs/dft"
 
-SPLITS_JSON="${DFT_SPLITS_JSON:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_verified.json}"
-CKPT="${DFT_CKPT:-/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
-GLOB="${DFT_SHARD_GLOB:-/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
-IDX="${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
+SPLITS_JSON="${DFT_SPLITS_JSON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_verified.json}"
+CKPT="${DFT_CKPT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
+GLOB="${DFT_SHARD_GLOB:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
+IDX="${DFT_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
 
 # ---- the centre: ALL FOUR WINS ON, plus k3 -----------------------------------
 # Anchor strength is unchanged from the ablation (beta=100 success-only): the

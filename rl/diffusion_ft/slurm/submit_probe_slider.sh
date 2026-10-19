@@ -13,10 +13,10 @@
 #   bash rl/diffusion_ft/slurm/submit_probe_slider.sh
 #   DFT_PROBE_ARMS='beta3=/a beta10=/b' bash rl/diffusion_ft/slurm/submit_probe_slider.sh
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 ENV_DIR="$ROOT/logs/dft/env"; mkdir -p "$ENV_DIR" "$ROOT/logs/dft"
 
-SWEEP="${DFT_SWEEP_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/base_anchor_sweep/20260909_094413_534731}"
+SWEEP="${DFT_SWEEP_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/base_anchor_sweep/20260909_094413_534731}"
 ARMS="${DFT_PROBE_ARMS:-beta3=$SWEEP/beta3_succ beta10=$SWEEP/beta10_succ beta30=$SWEEP/beta30_succ}"
 TITLE="${DFT_PROBE_TITLE:-base_anchor sweep -- recovered / regressed through training}"
 FIG_DIR="${DFT_PROBE_FIG_DIR:-$SWEEP/figures}"

@@ -62,7 +62,7 @@ def main() -> None:
     p.add_argument("--scan_dir", required=True)
     p.add_argument("--shard_glob", required=True,
                    help="the glob the scan ran against; recorded for re-checking")
-    p.add_argument("--index_dir", default="/zfsauton/scratch/yixiz/waymax_rs/womd_offsets")
+    p.add_argument("--index_dir", default="/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets")
     p.add_argument("--out_json", default="")
     p.add_argument("--heldout_failure", type=int, default=64,
                    help="failure scenes held out for eval (rest go to train)")

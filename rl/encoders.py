@@ -9,7 +9,7 @@ conversion.
 Two encoders, both operating on the same blocks:
 
 ``lq`` -- **the one V-Max actually used.** Every run in the live
-``/zfsauton/scratch/yixiz/waymax_rs/vmax_repro/`` tree, including the ~97%
+``/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/vmax_repro/`` tree, including the ~97%
 ``repro_sac_v2``, set ``network.encoder.type: lq``. (Careful: the sibling key
 ``algorithm.network.encoder.type`` reads ``none`` in the same file and is *not*
 what the code loads -- see ``train_utils.py:262``.) Perceiver-style: all blocks'

@@ -34,12 +34,12 @@
 #   DFT_PROBE_ARMS="no-anchor=$OUT/noanchor anchor=$OUT/anchor" \
 #     sbatch rl/diffusion_ft/slurm/viz_probe_slider.sbatch
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 ENV_DIR="$ROOT/logs/dft/env"; mkdir -p "$ENV_DIR" "$ROOT/logs/dft"
 # $$ as well as the second: two sibling submissions in the same second would
 # otherwise share an env filename and an out_dir and interleave one log.
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
-BASE_OUT="${DFT_SWEEP_OUT:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/probe_anchor/${STAMP}}"
+BASE_OUT="${DFT_SWEEP_OUT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/probe_anchor/${STAMP}}"
 GROUP="${DFT_WANDB_GROUP:-probe_anchor_${STAMP}}"
 
 # ---- the pool the GRADIENT is taken on --------------------------------------
@@ -51,11 +51,11 @@ GROUP="${DFT_WANDB_GROUP:-probe_anchor_${STAMP}}"
 # over 512 pool scenes is ~9 visits each.
 DFT_TRAIN_SPLITS="${DFT_TRAIN_SPLITS:-failure_train,success_train}"
 DFT_TRAIN_SPLIT_CAP="${DFT_TRAIN_SPLIT_CAP:-256,256}"
-DFT_SPLITS_JSON="${DFT_SPLITS_JSON:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/eval_splits.json}"
+DFT_SPLITS_JSON="${DFT_SPLITS_JSON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/eval_splits.json}"
 # A DIFFERENT splits file is silently wrong: the ids are positions in the scan's
 # shard_glob order, so arms scored against another file are not comparable to
 # anything already measured, and nothing errors.
-DFT_SHARD_GLOB="${DFT_SHARD_GLOB:-/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
+DFT_SHARD_GLOB="${DFT_SHARD_GLOB:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
 
 DFT_ITERS="${DFT_ITERS:-300}"
 DFT_EVAL_EVERY="${DFT_EVAL_EVERY:-10}"
@@ -100,9 +100,9 @@ for ARM in noanchor:0 anchor:"$DFT_ANCHOR_WEIGHT"; do
   ENV_FILE="$ENV_DIR/probeanchor_${STAMP}_${TAG}.env"
   {
     echo "DFT_OUT_DIR=$OUT_DIR"
-    echo "DFT_CKPT=${DFT_CKPT:-/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
+    echo "DFT_CKPT=${DFT_CKPT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
     echo "DFT_SHARD_GLOB=$DFT_SHARD_GLOB"
-    echo "DFT_INDEX_DIR=${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
+    echo "DFT_INDEX_DIR=${DFT_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
     echo "DFT_SCENES_PER_ITER=${DFT_SCENES_PER_ITER:-16}"
     echo "DFT_EVAL_SCENES=$DFT_EVAL_SCENES"
     echo "DFT_DATA_SEED=${DFT_DATA_SEED:-0}"

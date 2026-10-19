@@ -13,12 +13,12 @@ Placeholders are not scenes. Never point a reader that parses EVERY record of a 
 splits JSON over "all scenes in the shard") at the output directory.
 
     python -m rl.diffusion_ft.tools.build_compact_shards build \\
-        --targets /zfsauton/scratch/mineuih/waymax_rs/exp/validation_0_150_failure_scenarios.json \\
-        --src_dir /zfsauton/datasets/womd/tf_example/validation \\
+        --targets /data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/exp/validation_0_150_failure_scenarios.json \\
+        --src_dir /data/user_data/yixiz/autonlab/zfsauton/datasets/womd/tf_example/validation \\
         --name_fmt 'validation_tfexample.tfrecord-{:05d}-of-00150' \\
-        --out_root /zfsauton/scratch/yixiz/waymax_rs/womd_compact/valfail1568 --split validation
+        --out_root /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_compact/valfail1568 --split validation
     python -m rl.diffusion_ft.tools.build_compact_shards verify \\
-        --out_root /zfsauton/scratch/yixiz/waymax_rs/womd_compact/valfail1568
+        --out_root /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_compact/valfail1568
 
 Layout: ``<out_root>/<split>/<shard basenames>`` (shards only, so a ``*`` glob there is
 safe), ``<out_root>/target_scenarios.json`` (basename -> indices, the ES runner's format),

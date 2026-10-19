@@ -1,21 +1,21 @@
 #!/bin/bash
 #SBATCH --job-name=hrd_viz
-#SBATCH --partition=cpu
-#SBATCH --qos=qos_cpu
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_cpu_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=02:00:00
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%j.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%j.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%j.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%j.out
 #
 # Hardness diagnostics. Pure artefact read -- no GPU, no simulator -- so it runs
 # on the cpu partition and never queues behind training. Config arrives as a
 # positional env-file argument (never --export; see the workflow notes).
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 mkdir -p "$ROOT/logs/hardness"
 
@@ -28,12 +28,12 @@ for arg in "$@"; do
   fi
 done
 
-export PYTHON="${PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
+export PYTHON="${PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 export PYTHONUNBUFFERED=1
 
 HRD_OUT="${HRD_OUT:-$ROOT/runs/hardness}"
 HRD_DESC_DIR="${HRD_DESC_DIR:-$HRD_OUT/desc}"
-HRD_CACHE_DIR="${HRD_CACHE_DIR:-/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/}"
+HRD_CACHE_DIR="${HRD_CACHE_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/}"
 HRD_VIZ_DIR="${HRD_VIZ_DIR:-$HRD_OUT/viz}"
 HRD_N_PER_CELL="${HRD_N_PER_CELL:-6}"
 HRD_SEED="${HRD_SEED:-0}"

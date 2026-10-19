@@ -23,7 +23,7 @@
 # magnitudes shrink to -1, and potential-based goal shaping (policy-invariant)
 # carries credit assignment. Run it on the failure set (ScenarioMax => 10x300):
 #
-#   DFT_TFRECORD=/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord \
+#   DFT_TFRECORD=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord \
 #   DFT_INDICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31 \
 #   DFT_ROUTE_REWARD=1 DFT_TERMINATE_OFFROAD=1 DFT_REWARD_PROGRESS=0.2 \
 #   DFT_REWARD_OFFROAD=-1.0 DFT_REWARD_COLLISION=-1.0 DFT_REWARD_GOAL_BONUS=5.0 \
@@ -122,7 +122,7 @@
 # epochs, so DFT_EXPERT_STEPS : DFT_PPO_EPOCHS is a step ratio. Sweep it with
 # `bash rl/diffusion_ft/slurm/sweep_expert_ratio.sh`.
 #
-#   DFT_SHARD_GLOB='/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*-of-01000' \
+#   DFT_SHARD_GLOB='/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*-of-01000' \
 #   DFT_NUM_PATHS=45 DFT_NUM_POINTS_PER_PATH=800 \
 #   DFT_ROUTE_REWARD=1 DFT_OFFROAD_PER_STEP=1 DFT_TERMINATE_OFFROAD=0 \
 #   DFT_COLLISION_PER_STEP=1 DFT_TERMINATE_COLLISION=0 \
@@ -137,7 +137,7 @@
 # the tfrecord and every progression reward is silently 0.
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 ENV_DIR="$ROOT/logs/dft/env"
 mkdir -p "$ENV_DIR"
@@ -148,8 +148,8 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 ENV_FILE="$ENV_DIR/dppo_${DFT_JOBNAME:-dft_dppo}_${STAMP}.env"
 
 {
-  echo "DFT_CKPT=${DFT_CKPT:-/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
-  echo "DFT_TFRECORD=${DFT_TFRECORD:-/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-00000-of-01000}"
+  echo "DFT_CKPT=${DFT_CKPT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
+  echo "DFT_TFRECORD=${DFT_TFRECORD:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-00000-of-01000}"
   echo "DFT_INDICES=${DFT_INDICES:-0,1,2,3,4,5,6,7}"
   echo "DFT_ITERS=${DFT_ITERS:-50}"
   echo "DFT_EXPERT_WEIGHT=${DFT_EXPERT_WEIGHT:-0.0}"
@@ -178,7 +178,7 @@ ENV_FILE="$ENV_DIR/dppo_${DFT_JOBNAME:-dft_dppo}_${STAMP}.env"
   echo "DFT_WANDB_PROJECT=${DFT_WANDB_PROJECT:-diffusion_ft_dppo}"
   echo "DFT_WANDB_GROUP=${DFT_WANDB_GROUP:-}"
   echo "DFT_WANDB_NAME=${DFT_WANDB_NAME:-${DFT_JOBNAME:-}}"
-  echo "DFT_OUT_DIR=${DFT_OUT_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/dppo}"
+  echo "DFT_OUT_DIR=${DFT_OUT_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/dppo}"
   # Reward design. Defaults reproduce the original goal-distance reward exactly.
   # The V-Max parity recipe (see the header) is turned on by setting these.
   echo "DFT_ROUTE_REWARD=${DFT_ROUTE_REWARD:-0}"
@@ -207,7 +207,7 @@ ENV_FILE="$ENV_DIR/dppo_${DFT_JOBNAME:-dft_dppo}_${STAMP}.env"
   echo "DFT_SHARD_GLOB='${DFT_SHARD_GLOB:-}'"
   # Selected scene pool (tools/select_hard_womd.py). Empty = uniform sampling.
   echo "DFT_SCENE_IDS_JSON=${DFT_SCENE_IDS_JSON:-}"
-  echo "DFT_INDEX_DIR=${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
+  echo "DFT_INDEX_DIR=${DFT_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
   echo "DFT_SCENES_PER_ITER=${DFT_SCENES_PER_ITER:-32}"
   echo "DFT_RESAMPLE_EVERY=${DFT_RESAMPLE_EVERY:-1}"
   echo "DFT_EVAL_SCENES=${DFT_EVAL_SCENES:-32}"

@@ -1,16 +1,17 @@
 #!/bin/bash
 #SBATCH --job-name=dft_explabel
-#SBATCH --partition=general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:A6000:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=2:00:00
 #SBATCH --requeue
 #SBATCH --open-mode=append
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
 #
 # Expert log replay on every scene of a splits file, then a copy of the file
 # restricted to expert-solvable scenes (tools/expert_label_splits.py). The env is
@@ -22,7 +23,7 @@
 #
 # Config: a positional env file. Never `sbatch --export`.
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"; mkdir -p "$ROOT/logs/dft"
 for arg in "$@"; do
   if [[ -f "$arg" ]]; then
@@ -30,15 +31,15 @@ for arg in "$@"; do
     source "$arg"
   elif [[ "$arg" == *=* ]]; then export "${arg?}"; fi
 done
-PY="${DFT_PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
+PY="${DFT_PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.95}"
-DFT_CKPT="${DFT_CKPT:-/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
+DFT_CKPT="${DFT_CKPT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
 DFT_OUT_DIR="${DFT_OUT_DIR:?set DFT_OUT_DIR}"
 DFT_SPLITS_JSON="${DFT_SPLITS_JSON:?set DFT_SPLITS_JSON}"
 DFT_LABEL_SPLITS="${DFT_LABEL_SPLITS:?set DFT_LABEL_SPLITS}"
 DFT_CLEAN_SPLITS_OUT="${DFT_CLEAN_SPLITS_OUT:?set DFT_CLEAN_SPLITS_OUT}"
 DFT_SHARD_GLOB="${DFT_SHARD_GLOB:?set DFT_SHARD_GLOB}"
-DFT_INDEX_DIR="${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
+DFT_INDEX_DIR="${DFT_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
 # Rollout shape = select_eval.sbatch's.
 DFT_REPLAN="${DFT_REPLAN:-10}"; DFT_MAX_REPLANS="${DFT_MAX_REPLANS:-8}"
 DFT_WORLD_DT_METHOD="${DFT_WORLD_DT_METHOD:-median}"

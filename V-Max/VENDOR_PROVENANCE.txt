@@ -18,7 +18,7 @@ to the rest of this repo's history. It is now tracked here directly.
 
 The nested `.git` (upstream history, 24M) was moved aside rather than deleted:
 
-    /zfsauton/scratch/yixiz/vmax_upstream_git_backup.git
+    /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/vmax_upstream_git_backup.git
 
 Restore it with `mv` if you ever need to diff against upstream or rebase onto a
 newer V-Max release.
@@ -31,7 +31,7 @@ lived in the same tree:
 
     runs/        129M  stale checkpoints + wandb logs. NOTE: rl/CONTEXT.md warns
                        these are an older, different set from the live runs; the
-                       live tree is /zfsauton/scratch/yixiz/waymax_rs/vmax_repro.
+                       live tree is /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/vmax_repro.
     val_full/     40M  evaluation output
     vmax_smoke/   11M  smoke-test output
     slurm-*.out        job logs

@@ -1,14 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=dft_rebuildsplits
-#SBATCH --partition=cpu
-#SBATCH --qos=qos_cpu
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_cpu_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8G
 #SBATCH --time=00:20:00
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
 #
 # Stage B of the split rebuild: read the verification rows and write a new
 # eval_splits JSON keeping only scenes the base VERIFIABLY fails (and, for the
@@ -19,7 +19,7 @@
 # than stranding every dependent job in DependencyNeverSatisfied.
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"; mkdir -p "$ROOT/logs/dft"
 
 for arg in "$@"; do
@@ -29,7 +29,7 @@ for arg in "$@"; do
   elif [[ "$arg" == *=* ]]; then export "${arg?}"; fi
 done
 
-PY="${DFT_PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
+PY="${DFT_PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 DFT_OUT_DIR="${DFT_OUT_DIR:?set DFT_OUT_DIR}"
 DFT_SPLITS_JSON="${DFT_SPLITS_JSON:?set DFT_SPLITS_JSON}"
 DFT_VERIFY_OUT="${DFT_VERIFY_OUT:-${DFT_OUT_DIR}/verify_rows.jsonl}"

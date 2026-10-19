@@ -35,7 +35,7 @@
 #   DFT_SELECT_SMOKE=1 bash rl/diffusion_ft/slurm/submit_comfort_ab.sh
 #   bash rl/diffusion_ft/slurm/submit_comfort_ab.sh
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 
 L24="lat0.1,lat-0.1,lat0.175,lat-0.175,lat0.25,lat-0.25,lat0.325,lat-0.325,\
 lat0.4,lat-0.4,lat0.5,lat-0.5,lat0.6,lat-0.6,lat0.75,lat-0.75,\
@@ -50,9 +50,9 @@ export DFT_BASE_ARMS="base,c_r10=bank@c_r10:cons:20,c_r20=bank@c_r20:cons:20,\
 c_r20q=bank@c_r20q:cons:20,c_r30q=bank@c_r30q:cons:20"
 export DFT_FT_ARMS="${DFT_FT_ARMS:-ft}"
 export DFT_DUMP_TRAJ=1
-RUN=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
+RUN=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
 export DFT_SELECT_CKPTS="${DFT_SELECT_CKPTS:-$RUN/base_s0/iter_000110}"
-SEL_DIR="${DFT_SELECT_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/$(date +%Y%m%d_%H%M%S)_$$}"
+SEL_DIR="${DFT_SELECT_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/$(date +%Y%m%d_%H%M%S)_$$}"
 export DFT_SELECT_DIR="$SEL_DIR"
 
 echo "comfort A/B over one bank (K=24), ramp x easing:"

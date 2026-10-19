@@ -6,11 +6,11 @@
 #
 # Knobs: DFT_TFRECORD DFT_GATE_INDICES DFT_PYTHON
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 ENV_DIR="$ROOT/logs/dft/env"; mkdir -p "$ENV_DIR" "$ROOT/logs/dft"
 ENV_FILE="$ENV_DIR/edgegeo_$(date +%Y%m%d_%H%M%S)_$$.env"
 {
-  echo "DFT_TFRECORD=${DFT_TFRECORD:-/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord}"
+  echo "DFT_TFRECORD=${DFT_TFRECORD:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord}"
   echo "DFT_GATE_INDICES=${DFT_GATE_INDICES:-0,1,2,3,4,5}"
   [[ -n "${DFT_PYTHON:-}" ]] && echo "DFT_PYTHON=${DFT_PYTHON}"
 } > "$ENV_FILE"

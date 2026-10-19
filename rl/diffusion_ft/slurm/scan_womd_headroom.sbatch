@@ -1,14 +1,15 @@
 #!/bin/bash
 #SBATCH --job-name=dft_scan
-#SBATCH --partition=general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:A6000:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=8:00:00
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%A_%a.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%A_%a.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%A_%a.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%A_%a.out
 # Preemption-safe: the scan skips rows it already wrote, so a requeued task
 # resumes. --open-mode=append keeps the previous attempt's log instead of
 # truncating it, which is the only way to tell a resume from a fresh start.
@@ -28,7 +29,7 @@
 # as $1). Never `sbatch --export` (requeue-hold on this cluster).
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 mkdir -p "$ROOT/logs/dft"
 
@@ -41,22 +42,22 @@ for arg in "$@"; do
   fi
 done
 
-export PYTHON="${PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
+export PYTHON="${PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 export PYTHONUNBUFFERED=1
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
 export TF_CPP_MIN_LOG_LEVEL="${TF_CPP_MIN_LOG_LEVEL:-2}"
 export TF_FORCE_GPU_ALLOW_GROWTH="${TF_FORCE_GPU_ALLOW_GROWTH:-true}"
-export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-/zfsauton/scratch/yixiz/waymax_rs/.jax_compilation_cache}"
+export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/.jax_compilation_cache}"
 
 DFT_SHARD_GLOB="${DFT_SHARD_GLOB:?set DFT_SHARD_GLOB}"
-DFT_INDEX_DIR="${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
+DFT_INDEX_DIR="${DFT_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
 DFT_SCAN_OUT="${DFT_SCAN_OUT:?set DFT_SCAN_OUT}"
 DFT_SCAN_SCENES="${DFT_SCAN_SCENES:-4096}"
 DFT_SCAN_BATCH="${DFT_SCAN_BATCH:-32}"
 DFT_SIGMA_FLOOR="${DFT_SIGMA_FLOOR:-0.03}"
 DFT_NUM_PATHS="${DFT_NUM_PATHS:-45}"
 DFT_NUM_POINTS_PER_PATH="${DFT_NUM_POINTS_PER_PATH:-800}"
-DFT_CKPT="${DFT_CKPT:-/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
+DFT_CKPT="${DFT_CKPT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
 DFT_SCAN_SEED="${DFT_SCAN_SEED:-0}"
 TASK_ID="${SLURM_ARRAY_TASK_ID:-0}"
 NTASKS="${SLURM_ARRAY_TASK_COUNT:-1}"

@@ -43,12 +43,12 @@
 #   DFT_LOPT_SMOKE=1 bash rl/diffusion_ft/slurm/submit_lateral_opt_attrib.sh
 #   bash rl/diffusion_ft/slurm/submit_lateral_opt_attrib.sh
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 # Submitting from inside an allocation must not leak its SLURM_* into the jobs.
 for v in $(compgen -v SLURM_); do unset "$v"; done
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
-OUT="${DFT_LOPT_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/lateral_opt_attrib_${STAMP}}"
-SPLITS3=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json
+OUT="${DFT_LOPT_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/lateral_opt_attrib_${STAMP}}"
+SPLITS3=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json
 NB="${DFT_LOPT_NEIGHBORS:-cv}"
 OPT_CFG="${DFT_SELECT_OPT_CFG:-}"
 NM="${DFT_LOPT_NOMARGIN_M:-0.1}"
@@ -74,7 +74,7 @@ BANKS=(l24 l24m o0 onm l24om)
 per() { local s=""; for b in "${BANKS[@]}"; do s+="${s:+;}$b=$1"; done; echo "$s"; }
 # No fine-tune arm, so this checkpoint dir only names the task dirs (its
 # tparams.npz went in the 09-28 cleanup; nothing loads it).
-OLD=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
+OLD=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
 DFT_SPLITS3_JSON="$SPLITS3" \
 DFT_SELECT_DIR="$OUT/select" \
 DFT_SELECT_DEP="afterok:$GID" DFT_REQUIRE_GATE="$OUT/gate/verdict.txt" \

@@ -41,16 +41,16 @@
 #     bash rl/diffusion_ft/slurm/submit_dppo_entryclean.sh
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 
 SEED_GRID="${DFT_SEED_GRID:-0 1 2}"
-BASE_OUT="${DFT_OUT_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/dppo_entryclean}"
+BASE_OUT="${DFT_OUT_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/dppo_entryclean}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 
 # ---- data: the failure set. ScenarioMax route dims are 10x300; raw WOMD's
 # 45x800 would yield zero valid routes and a silently dead progression reward.
-export DFT_TFRECORD="${DFT_TFRECORD:-/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord}"
+export DFT_TFRECORD="${DFT_TFRECORD:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord}"
 export DFT_INDICES="${DFT_INDICES:-$(seq -s, 0 31)}"
 export DFT_NUM_PATHS="${DFT_NUM_PATHS:-10}"
 export DFT_NUM_POINTS_PER_PATH="${DFT_NUM_POINTS_PER_PATH:-300}"
@@ -92,7 +92,7 @@ export DFT_KEEP_CKPTS="${DFT_KEEP_CKPTS:-3}"
 
 # gpu28 is the 24 GB a5000; every arm that completed this config ran on a 48 GB
 # a6000, and gpu28 is where an arm died in a 13.05 GiB eval transfer (job 37156).
-export DFT_EXCLUDE="${DFT_EXCLUDE-gpu28}"
+export DFT_EXCLUDE="${DFT_EXCLUDE-}"
 export DFT_WANDB="${DFT_WANDB:-1}"
 export DFT_WANDB_PROJECT="${DFT_WANDB_PROJECT:-diffusion_ft_dppo}"
 export DFT_WANDB_GROUP="${DFT_WANDB_GROUP:-entryclean_$STAMP}"

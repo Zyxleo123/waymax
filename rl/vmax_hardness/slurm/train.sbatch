@@ -1,14 +1,15 @@
 #!/bin/bash
 #SBATCH --job-name=vmh_train
-#SBATCH --partition=general
-#SBATCH --gres=gpu:a6000:1
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
+#SBATCH --gres=gpu:A6000:1
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=96G
 #SBATCH --time=16:00:00
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/vmax_hardness/slurm-%x-%j.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/vmax_hardness/slurm-%x-%j.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/vmax_hardness/slurm-%x-%j.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/vmax_hardness/slurm-%x-%j.out
 #
 # Stage C: hardness-balanced fine-tune of the pretrained V-Max SAC (warm-started
 # from model_best) with the refit risk table driving scenario sampling. All non-
@@ -19,7 +20,7 @@
 # pip-installed), so run from V-Max/.
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 mkdir -p "$ROOT/logs/vmax_hardness"
 # shellcheck source=/dev/null
@@ -44,8 +45,8 @@ cd "$ROOT/V-Max"
 "$VMH_TRAIN_PYTHON" -m vmax.scripts.training.train \
   algorithm=sac \
   network/encoder=lq \
-  path_dataset=/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord@1000 \
-  path_dataset_eval=/zfsauton/scratch/eshau/womd/tf_example/validation/validation_tfexample.tfrecord@150 \
+  path_dataset=/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord@1000 \
+  path_dataset_eval=/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/validation/validation_tfexample.tfrecord@150 \
   waymo_dataset=false \
   num_sdc_paths="$VMH_NUM_PATHS" \
   num_points_per_sdc_path="$VMH_NUM_POINTS_PER_PATH" \

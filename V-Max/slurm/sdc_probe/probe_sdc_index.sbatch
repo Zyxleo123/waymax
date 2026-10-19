@@ -1,4 +1,6 @@
 #!/bin/bash
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_cpu_qos
 #SBATCH --job-name=vmax-sdcprobe
 #SBATCH --output=%x-%j.out
 #SBATCH --nodes=1
@@ -29,13 +31,13 @@ for arg in "$@"; do
     fi
 done
 
-WOMD_ROOT="${WOMD_ROOT:-/zfsauton/scratch/eshau/womd/tf_example}"
+WOMD_ROOT="${WOMD_ROOT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example}"
 SHARDS="${SHARDS:-${WOMD_ROOT}/training/training_tfexample.tfrecord-*}"
 NUM_SHARDS="${NUM_SHARDS:-20}"
 MAX_NUM_OBJECTS="${MAX_NUM_OBJECTS:-64}"
-OUT_DIR="${OUT_DIR:-/zfsauton/scratch/yixiz/waymax_rs/sdc_probe}"
-PROBE_DIR="${PROBE_DIR:-${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs/V-Max/slurm/sdc_probe}}"
-CONDA_SH="${CONDA_SH:-/zfsauton/scratch/yixiz/miniconda3/etc/profile.d/conda.sh}"
+OUT_DIR="${OUT_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/sdc_probe}"
+PROBE_DIR="${PROBE_DIR:-${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs/V-Max/slurm/sdc_probe}}"
+CONDA_SH="${CONDA_SH:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/miniconda3/etc/profile.d/conda.sh}"
 CONDA_ENV="${CONDA_ENV:-waymax}"
 
 # The env's activate.d cuda-nvcc hooks read these without a default and abort

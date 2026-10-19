@@ -953,9 +953,9 @@ def build_argparser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="DPPO fine-tuning of the diffusion policy.")
     p.add_argument("--ckpt", type=str, default=DEFAULT_CHECKPOINT_PATH)
     p.add_argument("--tfrecord", type=str,
-                   default="/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-00000-of-01000")
+                   default="/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-00000-of-01000")
     p.add_argument("--indices", type=str, default="0,1,2,3,4,5,6,7")
-    p.add_argument("--out_dir", type=str, default="/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/dppo")
+    p.add_argument("--out_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/dppo")
     p.add_argument("--iters", type=int, default=50)
     p.add_argument("--save_every", type=int, default=10)
     p.add_argument("--keep_last_ckpts", type=int, default=3,

@@ -1,14 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=dft_offsets
-#SBATCH --partition=cpu
-#SBATCH --qos=qos_cpu
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_cpu_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=4G
 #SBATCH --time=2:00:00
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%A_%a.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%A_%a.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%A_%a.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%A_%a.out
 #
 # One-time: build the byte-offset sidecar index (`<shard>.offsets.npy`) for every
 # raw-WOMD training shard, so the DPPO scene sampler can draw a fresh batch from
@@ -26,7 +26,7 @@
 # `sbatch --export`: it requeue-holds on this cluster).
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 mkdir -p "$ROOT/logs/dft"
 
@@ -39,11 +39,11 @@ for arg in "$@"; do
   fi
 done
 
-export PYTHON="${PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
+export PYTHON="${PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 export PYTHONUNBUFFERED=1
 
-DFT_SHARD_GLOB="${DFT_SHARD_GLOB:-/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*-of-01000}"
-DFT_INDEX_DIR="${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
+DFT_SHARD_GLOB="${DFT_SHARD_GLOB:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*-of-01000}"
+DFT_INDEX_DIR="${DFT_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
 TASK_ID="${SLURM_ARRAY_TASK_ID:-0}"
 NTASKS="${SLURM_ARRAY_TASK_COUNT:-1}"
 

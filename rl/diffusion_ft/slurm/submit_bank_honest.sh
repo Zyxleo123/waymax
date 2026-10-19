@@ -33,10 +33,10 @@
 #   DFT_SELECT_SMOKE=1 bash rl/diffusion_ft/slurm/submit_bank_honest.sh
 #   bash rl/diffusion_ft/slurm/submit_bank_honest.sh
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
-OUT="${DFT_HONEST_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/bank_honest_${STAMP}}"
-SPLITS3=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json
+OUT="${DFT_HONEST_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/bank_honest_${STAMP}}"
+SPLITS3=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json
 mkdir -p "$OUT/gate" "$ROOT/logs/dft"
 sb() { env -i HOME="$HOME" PATH="$PATH" USER="${USER:-}" sbatch "$@"; }
 kv() { printf "%s='%s'\n" "$1" "${2//\'/\'\\\'\'}"; }
@@ -48,7 +48,7 @@ echo "gate    -> job $GID (CPU) -> $OUT/gate/verdict.txt"
 L24="lat0.1,lat-0.1,lat0.175,lat-0.175,lat0.25,lat-0.25,lat0.325,lat-0.325,\
 lat0.4,lat-0.4,lat0.5,lat-0.5,lat0.6,lat-0.6,lat0.75,lat-0.75,\
 lat0.9,lat-0.9,lat1.1,lat-1.1,lat1.35,lat-1.35,lat1.6,lat-1.6"
-OLD=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
+OLD=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
 DFT_SPLITS3_JSON="$SPLITS3" \
 DFT_SELECT_DIR="$OUT/select" \
 DFT_SELECT_DEP="afterok:$GID" DFT_REQUIRE_GATE="$OUT/gate/verdict.txt" \

@@ -14,11 +14,11 @@
 #     bash train_diffusion/hardness/slurm/submit_reeval.sh
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 
-SWEEP="${SWEEP:-/zfsauton/scratch/yixiz/waymax_rs/hardness_sweep}"
-RE_OUT="${RE_OUT:-/zfsauton/scratch/yixiz/waymax_rs/hardness_reeval}"
+SWEEP="${SWEEP:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/hardness_sweep}"
+RE_OUT="${RE_OUT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/hardness_reeval}"
 
 # arm -> the run whose epoch_0010 is the best (full-length 08-19 original).
 declare -A RUN=(
@@ -58,11 +58,11 @@ for arm in "${ARMS[@]}"; do
     emit RE_ARM "$arm"
     emit RE_CKPT "$ck"
     emit RE_OUT "$RE_OUT"
-    emit RE_FAIL_TFRECORD_DIR "${RE_FAIL_TFRECORD_DIR:-/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures}"
+    emit RE_FAIL_TFRECORD_DIR "${RE_FAIL_TFRECORD_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures}"
     emit RE_FAIL_NUM "${RE_FAIL_NUM:-218}"
-    emit RE_WOMD_TFRECORD_DIR "${RE_WOMD_TFRECORD_DIR:-/zfsauton/scratch/eshau/womd/tf_example/training}"
+    emit RE_WOMD_TFRECORD_DIR "${RE_WOMD_TFRECORD_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training}"
     emit RE_WOMD_NUM "${RE_WOMD_NUM:-200}"
-    emit RE_LANE_GRAPH_DIR "${RE_LANE_GRAPH_DIR:-/zfsauton/scratch/mineuih/waymax_rs/lane_graphs}"
+    emit RE_LANE_GRAPH_DIR "${RE_LANE_GRAPH_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs}"
     emit RE_NUM_WORLDS "${RE_NUM_WORLDS:-10}"
   } > "$env_file"
   job="$("${SUBMIT[@]}" --parsable --job-name="hrd_reeval_$arm" \

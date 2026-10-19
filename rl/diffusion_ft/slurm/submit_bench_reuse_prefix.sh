@@ -5,11 +5,11 @@
 #   bash rl/diffusion_ft/slurm/submit_bench_reuse_prefix.sh
 #   DFT_NODELIST=gpu26 bash rl/diffusion_ft/slurm/submit_bench_reuse_prefix.sh
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 ENV_DIR="$ROOT/logs/dft/env"; mkdir -p "$ENV_DIR" "$ROOT/logs/dft"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
 ENV_FILE="$ENV_DIR/reuse_${STAMP}.env"
-OUT_DIR="${DFT_OUT_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/bench_reuse/${STAMP}}"
+OUT_DIR="${DFT_OUT_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/bench_reuse/${STAMP}}"
 
 {
   echo "DFT_OUT_DIR=$OUT_DIR"

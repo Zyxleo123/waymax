@@ -19,15 +19,15 @@
 # scenes the policy finds hard, which may not represent how humans usually drive.
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 ENV_DIR="$ROOT/logs/dft/env"; mkdir -p "$ENV_DIR"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 ENV_FILE="$ENV_DIR/expcal_${STAMP}.env"
-DFT_CAL_OUT="${DFT_CAL_OUT:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/expert_cal/${STAMP}}"
+DFT_CAL_OUT="${DFT_CAL_OUT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/expert_cal/${STAMP}}"
 
 {
-  echo "DFT_TFRECORD=${DFT_TFRECORD:-/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord}"
+  echo "DFT_TFRECORD=${DFT_TFRECORD:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord}"
   echo "DFT_CAL_SCENES=${DFT_CAL_SCENES:-64}"
   echo "DFT_CAL_START=${DFT_CAL_START:-0}"
   echo "DFT_CAL_CHUNK=${DFT_CAL_CHUNK:-8}"

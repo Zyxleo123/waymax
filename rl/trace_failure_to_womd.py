@@ -13,8 +13,8 @@ Run on a login / IO node with TensorFlow installed, e.g.::
 
     conda activate waymax
     python rl/trace_failure_to_womd.py \\
-        --failure-dir /zfsauton/scratch/mineuih/waymax_rs/failure_samples \\
-        --output /zfsauton/scratch/yixiz/failure_womd_trace.json
+        --failure-dir /data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/failure_samples \\
+        --output /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/failure_womd_trace.json
 
 Build (or refresh) the #1 id index once — slow, ~486k records / 1000 shards::
 
@@ -49,18 +49,18 @@ if str(_RL_DIR) not in sys.path:
 from womd_compare import scenario_id_from_scenario_bytes
 
 # Defaults match eshau scratch layout used by waymax_rs.
-DEFAULT_FAILURE_DIR = "/zfsauton/scratch/mineuih/waymax_rs/failure_samples"
-DEFAULT_TFEXAMPLE_DIR = "/zfsauton/scratch/eshau/womd/tf_example/training"
-DEFAULT_SCENARIO_DIR = "/zfsauton/scratch/eshau/womd/scenario/training"
+DEFAULT_FAILURE_DIR = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/failure_samples"
+DEFAULT_TFEXAMPLE_DIR = "/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training"
+DEFAULT_SCENARIO_DIR = "/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/scenario/training"
 DEFAULT_SIDECAR_DB = (
-    "/zfsauton/scratch/eshau/womd/scenario_sidecar/training/training.scenario_store.sqlite3"
+    "/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/scenario_sidecar/training/training.scenario_store.sqlite3"
 )
-DEFAULT_INDEX_CACHE = "/zfsauton/scratch/yixiz/womd_scenario_id_index.sqlite3"
-DEFAULT_SCENARIOMAX_DIR = "/zfsauton/scratch/yixiz/ScenarioMaxWaymo"
+DEFAULT_INDEX_CACHE = "/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/womd_scenario_id_index.sqlite3"
+DEFAULT_SCENARIOMAX_DIR = "/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymo"
 DEFAULT_SCENARIOMAX_TFRECORD = (
-    "/zfsauton/scratch/yixiz/ScenarioMaxWaymo/training.tfrecord"
+    "/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymo/training.tfrecord"
 )
-DEFAULT_SCENARIOMAX_INDEX = "/zfsauton/scratch/yixiz/scenariomax_scenario_id_index.sqlite3"
+DEFAULT_SCENARIOMAX_INDEX = "/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/scenariomax_scenario_id_index.sqlite3"
 
 SHARD_RE = re.compile(r"-(\d{5})-of-(\d{5})$")
 

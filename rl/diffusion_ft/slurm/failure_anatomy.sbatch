@@ -1,14 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=dft_anat
-#SBATCH --partition=cpu
-#SBATCH --qos=qos_cpu
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_cpu_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G
 #SBATCH --time=04:00:00
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%A_%a.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%A_%a.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%A_%a.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%A_%a.out
 #
 # Anatomy of the residual: per-STEP geometry for every episode a select run
 # dumped, recomputed on CPU from the executed world paths
@@ -23,7 +23,7 @@
 #
 # Config arrives as a positional env FILE. Never `sbatch --export`.
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"; mkdir -p "$ROOT/logs/dft"
 for arg in "$@"; do
   if [[ -f "$arg" ]]; then
@@ -32,7 +32,7 @@ for arg in "$@"; do
   elif [[ "$arg" == *=* ]]; then export "${arg?}"; fi
 done
 
-PY="${DFT_PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
+PY="${DFT_PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 SEL_DIR="${DFT_SELECT_DIR:?set DFT_SELECT_DIR (a select run with --dump_traj)}"
 OUT_DIR="${DFT_ANAT_OUT:?set DFT_ANAT_OUT}"
 SPLIT="${DFT_ANAT_SPLIT:-failure_heldout}"
@@ -42,8 +42,8 @@ CHUNKS="${DFT_ANAT_CHUNKS:-6}"
 CAP="${DFT_ANAT_CAP:--1}"
 LOAD_BATCH="${DFT_ANAT_LOAD_BATCH:-8}"
 SPLITS_JSON="${DFT_SPLITS_JSON:?set DFT_SPLITS_JSON}"
-SHARD_GLOB="${DFT_SHARD_GLOB:-/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
-INDEX_DIR="${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
+SHARD_GLOB="${DFT_SHARD_GLOB:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
+INDEX_DIR="${DFT_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
 SWEEP_ARM="${DFT_ANAT_SWEEP_ARM:-ft}"
 SWEEP_MAX="${DFT_ANAT_SWEEP_MAX:-3}"
 SWEEP_LAT="${DFT_ANAT_SWEEP_LAT:-4.0}"

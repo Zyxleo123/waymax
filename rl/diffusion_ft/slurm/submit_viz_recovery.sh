@@ -12,9 +12,9 @@
 #   bash rl/diffusion_ft/slurm/submit_viz_recovery.sh
 #   DFT_RECOV_ARMS="base,ft,b_l24,c_r20" bash rl/diffusion_ft/slurm/submit_viz_recovery.sh
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 
-SEL=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select
+SEL=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select
 # 3-seed ladder run (b_l24, ft, bf_w10/w20) + ramp/blend sweep (c_r10..c_r30q).
 IN_JSON="${DFT_RECOV_IN_JSON:-$SEL/20260918_110955_3370740/select_summary.json $SEL/20260918_110957_3371380/select_summary.json}"
 ARMS="${DFT_RECOV_ARMS:-ft,bf_w20,bf_w10,b_l24,c_r30q,c_r20q,c_r20,c_r10}"

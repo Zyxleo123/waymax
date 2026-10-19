@@ -18,21 +18,21 @@ Examples::
 
     # Failure case (WOMD tfexample) + logged/predicted trajectory
     python -m rl.visualize_scenario \\
-        --failure-json /zfsauton/scratch/mineuih/waymax_rs/failure_samples/\\
+        --failure-json /data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/failure_samples/\\
             training_tfexample.tfrecord-00000-of-01000.scenario_052.json \\
         --mode both
 
     # Pseudo-GT on ScenarioMax scene (from trace mapping)
     python -m rl.visualize_scenario \\
         --failure-json .../scenario_052.json \\
-        --trace-json /zfsauton/scratch/yixiz/failure_womd_trace.json \\
-        --trajectory-npz /zfsauton/scratch/yixiz/pseudo_gt/repro_sac_v2/\\
+        --trace-json /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/failure_womd_trace.json \\
+        --trajectory-npz /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/pseudo_gt/repro_sac_v2/\\
             training_tfexample.tfrecord-00000-of-01000.scenario_052.trajectory.npz \\
         --scenariomax --mode video
 
     # Explicit ScenarioMax tfrecord + index
     python -m rl.visualize_scenario \\
-        --tfrecord /zfsauton/scratch/yixiz/ScenarioMaxWaymo/training.tfrecord \\
+        --tfrecord /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymo/training.tfrecord \\
         --scenario-idx 12345 --scenariomax --mode static
 """
 

@@ -62,7 +62,7 @@
 # valid sdc_path` MUST be 31/32 or better, or every progression reward is 0.
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 
 PENALTY_GRID="${DFT_PENALTY_GRID:-0.2 0.5 1.0}"
@@ -74,9 +74,9 @@ COL_RATIO="${DFT_COL_RATIO:-1.0}"
 # RESOURCE_EXHAUSTED allocating 13.05 GiB in a device->host transfer at eval.
 # Every arm that ran to completion on this config was on gpu24 (a6000). Override
 # with DFT_EXCLUDE= (empty) to let it back in.
-export DFT_EXCLUDE="${DFT_EXCLUDE-gpu28}"
+export DFT_EXCLUDE="${DFT_EXCLUDE-}"
 
-BASE_OUT="${DFT_OUT_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/dppo_reward}"
+BASE_OUT="${DFT_OUT_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/dppo_reward}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 SWEEP_OUT="$BASE_OUT/$STAMP"
 
@@ -84,7 +84,7 @@ SWEEP_OUT="$BASE_OUT/$STAMP"
 # dwell-charged but collision terminal, a cheap crash escapes the rest of the
 # bill and the policy learns to crash early). Both dwell-charged, neither
 # terminal, so the goal is the only absorbing state.
-export DFT_TFRECORD="${DFT_TFRECORD:-/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord}"
+export DFT_TFRECORD="${DFT_TFRECORD:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord}"
 export DFT_INDICES="${DFT_INDICES:-$(seq -s, 0 31)}"
 export DFT_ROUTE_REWARD="${DFT_ROUTE_REWARD:-1}"
 export DFT_OFFROAD_PER_STEP="${DFT_OFFROAD_PER_STEP:-1}"

@@ -5,9 +5,9 @@
 # Usage (from repo root, ON RHEA):
 #   bash rl/diffusion_ft/slurm/submit_test_ego_vel.sh
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
-OUT="${DFT_GATE_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/egovel_gate/${STAMP}}"
+OUT="${DFT_GATE_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/egovel_gate/${STAMP}}"
 mkdir -p "$OUT" "$ROOT/logs/dft"
 kv() { printf "%s='%s'\n" "$1" "${2//\'/\'\\\'\'}"; }
 { kv DFT_GATE_VERDICT "$OUT/verdict.txt"

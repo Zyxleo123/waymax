@@ -51,10 +51,10 @@ from rl.waymax_env import (
 )
 
 # Default data locations (see rl/CONTEXT.md).
-DEFAULT_FAILURE_DIR = "/zfsauton/scratch/mineuih/waymax_rs/failure_samples"
-DEFAULT_WOMD_DIR = "/zfsauton/scratch/eshau/womd/tf_example/training"
-DEFAULT_RUNS_DIR = "/zfsauton/scratch/yixiz/waymax_rs/runs"
-DEFAULT_BC_CACHE_DIR = "/zfsauton/scratch/yixiz/waymax_rs/bc_cache"
+DEFAULT_FAILURE_DIR = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/failure_samples"
+DEFAULT_WOMD_DIR = "/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training"
+DEFAULT_RUNS_DIR = "/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/runs"
+DEFAULT_BC_CACHE_DIR = "/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/bc_cache"
 
 
 # --------------------------------------------------------------------------- #

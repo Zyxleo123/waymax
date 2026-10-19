@@ -26,8 +26,8 @@
 #   DFT_ANAT_SPLIT=intermittent_heldout bash rl/diffusion_ft/slurm/submit_failure_anatomy.sh
 #   DFT_ANAT_SMOKE=1 bash rl/diffusion_ft/slurm/submit_failure_anatomy.sh   # 8 scenes, 1 chunk
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
-SEL_ROOT=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
+SEL_ROOT=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select
 
 # Arms whose `<arm>/r<rep>/traj` exists in a feat npz, as a comma-separated list.
 # An .npz IS a zip and each array is one `<key>.npy` member, so this reads the
@@ -106,9 +106,9 @@ kv() { printf "%s='%s'\n" "$1" "${2//\'/\'\\\'\'}"; }
   kv DFT_ANAT_CHUNKS "$CHUNKS"
   kv DFT_ANAT_CAP "$CAP"
   kv DFT_ANAT_LOAD_BATCH "${DFT_ANAT_LOAD_BATCH:-8}"
-  kv DFT_SPLITS_JSON "${DFT_SPLITS_JSON:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json}"
-  kv DFT_SHARD_GLOB "${DFT_SHARD_GLOB:-/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
-  kv DFT_INDEX_DIR "${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
+  kv DFT_SPLITS_JSON "${DFT_SPLITS_JSON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json}"
+  kv DFT_SHARD_GLOB "${DFT_SHARD_GLOB:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
+  kv DFT_INDEX_DIR "${DFT_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
   kv DFT_ANAT_SWEEP_ARM "$SWEEP_ARM"
   kv DFT_ANAT_SWEEP_MAX "${DFT_ANAT_SWEEP_MAX:-3}"
   kv DFT_ANAT_SWEEP_LAT "${DFT_ANAT_SWEEP_LAT:-4.0}"

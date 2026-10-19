@@ -1,13 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=vmh_refit
-#SBATCH --partition=general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_cpu_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=1:00:00
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/vmax_hardness/slurm-%x-%j.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/vmax_hardness/slurm-%x-%j.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/vmax_hardness/slurm-%x-%j.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/vmax_hardness/slurm-%x-%j.out
 #
 # Stage B (CPU): build labels.npz from the Stage-A SAC failures + the EXISTING
 # expert log-replay labels (policy-independent, reused), then refit the descriptor
@@ -15,7 +16,7 @@
 # must not queue behind GPU work for a card it never uses.
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 mkdir -p "$ROOT/logs/vmax_hardness"
 # shellcheck source=/dev/null

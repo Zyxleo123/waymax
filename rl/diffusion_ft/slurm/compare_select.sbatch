@@ -1,21 +1,21 @@
 #!/bin/bash
 #SBATCH --job-name=dft_selcmp
-#SBATCH --partition=cpu
-#SBATCH --qos=qos_cpu
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_cpu_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8G
 #SBATCH --time=00:30:00
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
 #
 # Paired B-minus-A between the fine-tune arms of two select_eval runs that share
 # draws (tools/compare_select.py). CPU only; re-runnable from its env file:
 #   sbatch rl/diffusion_ft/slurm/compare_select.sbatch <compare.env>
 # Gate inside the job: if either run left no rows, say which and exit 0.
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"; mkdir -p "$ROOT/logs/dft"
 for arg in "$@"; do
   if [[ -f "$arg" ]]; then
@@ -23,7 +23,7 @@ for arg in "$@"; do
     source "$arg"
   elif [[ "$arg" == *=* ]]; then export "${arg?}"; fi
 done
-PY="${DFT_PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
+PY="${DFT_PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 A="${DFT_CMP_A:?set DFT_CMP_A (select dir of the reference run)}"
 B="${DFT_CMP_B:?set DFT_CMP_B (select dir of the candidate run)}"
 SPLITS_JSON="${DFT_SPLITS_JSON:?set DFT_SPLITS_JSON}"

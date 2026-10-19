@@ -24,7 +24,7 @@
 #     bash rl/diffusion_ft/slurm/sweep_train_dppo.sh
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 
 SIGMA_GRID="${DFT_SIGMA_GRID:-0.0025 0.005 0.01}"
@@ -35,7 +35,7 @@ TARGET_KL_GRID="${DFT_TARGET_KL_GRID:-0.05 0.2}"
 # 0.1 swamps the PG term (~1000x) and the run becomes behavior cloning.
 EW_GRID="${DFT_EXPERT_WEIGHT_GRID:-${DFT_EXPERT_WEIGHT:-0.0}}"
 # Base out_dir; each arm gets a distinct subdir so checkpoints/logs never collide.
-BASE_OUT="${DFT_OUT_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/dppo}"
+BASE_OUT="${DFT_OUT_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/dppo}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 
 # `1.5e-3` / `0.0025` -> `1p5e-3` / `0p0025` for use in a job name / path.

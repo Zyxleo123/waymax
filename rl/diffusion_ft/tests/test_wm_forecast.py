@@ -109,7 +109,7 @@ def main(argv=None):
     p.add_argument("--splits_json", required=True)
     p.add_argument("--split", default="failure_heldout")
     p.add_argument("--shard_glob",
-                   default="/zfsauton/datasets/womd/tf_example/training/training_tfexample.tfrecord-*")
+                   default="/data/user_data/yixiz/autonlab/zfsauton/datasets/womd/tf_example/training/training_tfexample.tfrecord-*")
     p.add_argument("--index_dir", default=DEFAULT_INDEX_DIR)
     p.add_argument("--n_scenes", type=int, default=8)
     p.add_argument("--t0s", default="20,40,60")

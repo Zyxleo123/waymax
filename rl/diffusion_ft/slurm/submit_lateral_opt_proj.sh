@@ -40,11 +40,11 @@
 #   DFT_LOPT_SMOKE=1 bash rl/diffusion_ft/slurm/submit_lateral_opt_proj.sh
 #   bash rl/diffusion_ft/slurm/submit_lateral_opt_proj.sh
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 for v in $(compgen -v SLURM_); do unset "$v"; done
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
-OUT="${DFT_LOPT_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/lateral_opt_proj_${STAMP}}"
-SPLITS3=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json
+OUT="${DFT_LOPT_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/lateral_opt_proj_${STAMP}}"
+SPLITS3=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json
 NB="${DFT_LOPT_NEIGHBORS:-cv}"
 THETA="${DFT_PROJ_THETA:-0.3}"
 case "$NB" in log|cv|none) ;; *) echo "FATAL: DFT_LOPT_NEIGHBORS=$NB not log|cv|none" >&2; exit 1;; esac
@@ -62,7 +62,7 @@ echo "+ sbatch --parsable rl/diffusion_ft/slurm/gate_lateral_opt.sbatch $OUT/gat
 GID=$(sb --parsable rl/diffusion_ft/slurm/gate_lateral_opt.sbatch "$OUT/gate/gate.env")
 echo "gate    -> job $GID (CPU) -> $OUT/gate/verdict.txt"
 
-OLD=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
+OLD=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
 DFT_SPLITS3_JSON="$SPLITS3" \
 DFT_SELECT_DIR="$OUT/select" \
 DFT_SELECT_DEP="afterok:$GID" DFT_REQUIRE_GATE="$OUT/gate/verdict.txt" \
@@ -98,7 +98,7 @@ done
 echo "compare -> jobs ${CIDS[*]} (CPU, afterok:$AID) -> $OUT/select/compare_*_vs_o_lp*.json"
 if [[ -z "$SMOKE" ]]; then
   # REGRESSION: o_lp here (a shared bank, new selector code) vs o_lp in the 151623 rerun.
-  REF="${DFT_LOPT_REF:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/lateral_opt_lonprev_20260930_151623_1595722/select}"
+  REF="${DFT_LOPT_REF:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/lateral_opt_lonprev_20260930_151623_1595722/select}"
   f="$OUT/cmp_regress.env"
   { kv DFT_CMP_A "$REF"; kv DFT_CMP_B "$OUT/select"; kv DFT_SPLITS_JSON "$SPLITS3"
     kv DFT_CMP_ARM_A o_lp; kv DFT_CMP_ARM_B o_lp; kv DFT_CMP_LABEL_A rerun; kv DFT_CMP_LABEL_B proj

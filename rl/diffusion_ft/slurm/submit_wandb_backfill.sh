@@ -7,12 +7,12 @@
 # with --wandb continues that same run rather than opening a second chart.
 #
 # Usage (from repo root, on rhea):
-#   DFT_OUT_DIR=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/safety_train/20260901_234654 \
+#   DFT_OUT_DIR=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/safety_train/20260901_234654 \
 #     bash rl/diffusion_ft/slurm/submit_wandb_backfill.sh
 #
 # Knobs: DFT_WANDB_PROJECT DFT_WANDB_GROUP DFT_WANDB_NAME DFT_BACKFILL_DRY
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 ENV_DIR="$ROOT/logs/dft/env"; mkdir -p "$ENV_DIR" "$ROOT/logs/dft"
 # `$$` so two sibling backfills in the same second do not share one env file.
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"; ENV_FILE="$ENV_DIR/wbfill_${STAMP}.env"

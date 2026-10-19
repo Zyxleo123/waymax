@@ -11,15 +11,15 @@
 # Knobs: DFT_DRAG_DIR DFT_DRAG_INDICES DFT_TFRECORD DFT_DRAG_RADIUS
 #        DFT_DRAG_PROBES DFT_EDGE_MARGIN DFT_AGENT_MARGIN DFT_DRAG_TITLE
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 ENV_DIR="$ROOT/logs/dft/env"; mkdir -p "$ENV_DIR" "$ROOT/logs/dft"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
 ENV_FILE="$ENV_DIR/drag_${STAMP}.env"
-OUT_DIR="${DFT_DRAG_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/safety_drag/${STAMP}}"
+OUT_DIR="${DFT_DRAG_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/safety_drag/${STAMP}}"
 
 {
   echo "DFT_DRAG_DIR=$OUT_DIR"
-  echo "DFT_TFRECORD=${DFT_TFRECORD:-/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord}"
+  echo "DFT_TFRECORD=${DFT_TFRECORD:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord}"
   echo "DFT_DRAG_INDICES=${DFT_DRAG_INDICES:-0,1,2,3,4,5}"
   echo "DFT_DRAG_RADIUS=${DFT_DRAG_RADIUS:-70}"
   echo "DFT_DRAG_PROBES=${DFT_DRAG_PROBES:-48}"

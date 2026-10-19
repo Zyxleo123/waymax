@@ -1,16 +1,17 @@
 #!/bin/bash
 #SBATCH --job-name=dft_fm3_eval
-#SBATCH --partition=general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:A6000:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=96G
 #SBATCH --time=12:00:00
 #SBATCH --requeue
 #SBATCH --open-mode=append
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%A_%a.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%A_%a.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%A_%a.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%A_%a.out
 #
 # Closed-loop eval of one FlowMol3 arm, through the SAME harness
 # (`train_safety.py --eval_only`) and the SAME named splits every other arm in
@@ -24,7 +25,7 @@
 # Config arrives as a positional env FILE or DIRECTORY (array mode). Never --export.
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"; mkdir -p "$ROOT/logs/dft"
 
 for arg in "$@"; do
@@ -40,7 +41,7 @@ for arg in "$@"; do
   elif [[ "$arg" == *=* ]]; then export "${arg?}"; fi
 done
 
-PY="${DFT_PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
+PY="${DFT_PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 export PYTHONUNBUFFERED=1
 export TF_CPP_MIN_LOG_LEVEL="${TF_CPP_MIN_LOG_LEVEL:-2}"
 export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.95}"
@@ -56,7 +57,7 @@ DFT_SPLITS="${DFT_SPLITS:-failure_heldout,success_heldout}"
 DFT_SPLIT_CAP="${DFT_SPLIT_CAP:-1000}"
 DFT_EVAL_CHUNK="${DFT_EVAL_CHUNK:-32}"
 DFT_EVAL_SEED="${DFT_EVAL_SEED:-12345}"
-DFT_INDEX_DIR="${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
+DFT_INDEX_DIR="${DFT_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
 
 # ---- decision gate, INSIDE the job ------------------------------------------
 # A missing checkpoint means the training arm has not produced one yet (or

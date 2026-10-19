@@ -35,7 +35,7 @@ Six gates: expert-replay clean · batched==single · per-step sums to return ·
 obs changes on ego deviation · permutation equivariance · frozen-ckpt
 reproducible. Log lands in `logs/dft/slurm-dft_gate1-<jobid>.out`.
 
-Interpreter: `/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python` (flax 0.12.7).
+Interpreter: `/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python` (flax 0.12.7).
 Base checkpoint: `.../pretrain_diffusion_without_subgoal_20260616_013642/latest`.
 
 ## Phase 2 — diffusion API extensions (Gate 2 PASS)
@@ -574,7 +574,7 @@ rule it out for two arms sharing an objective. Only a seed replicate does.
 # anchor-only (the null objective) down an lr ladder, + a param-distance probe
 bash rl/diffusion_ft/slurm/sweep_null_lr.sh
 # just the measurement, against any finished sweep
-DFT_ARMS='/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/safety_anchor_sweep/20260902_200735_785143/*/' \
+DFT_ARMS='/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/safety_anchor_sweep/20260902_200735_785143/*/' \
   bash rl/diffusion_ft/slurm/submit_param_distance.sh
 ```
 
@@ -612,7 +612,7 @@ term steering and the safety term being a rumour on top of noise.
 ### The anchor diagnosis
 
 ```bash
-DFT_EXTRA_ARMS='/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/null_lr_sweep/<STAMP>/*/' \
+DFT_EXTRA_ARMS='/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/null_lr_sweep/<STAMP>/*/' \
   bash rl/diffusion_ft/slurm/sweep_anchor_diagnosis.sh
 ```
 
@@ -669,7 +669,7 @@ of one per split. `sweep_null_lr.sh` shipped with this bug and burned an arm.
 Both new sweeps now default it to the file the 09-02 sweep used:
 
 ```
-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/eval_splits.json
+/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/eval_splits.json
 ```
 
 A *different* splits file would also be wrong — the scene ids are positions in
@@ -2977,7 +2977,7 @@ is charged on the final sampled plan, not on a denoising target.
   `--adapter_ckpt`, and `--dump_pairs`. Chain: `slurm/submit_adapter_pilot.sh`.
   Tests: `slurm/test_adapter.sbatch`.
 * **Splits file.** `verified_seed777/eval_splits_3strata_womd.json` is the
-  verified splits with `shard_glob` moved to `/zfsauton/datasets/womd`; the
+  verified splits with `shard_glob` moved to `/data/user_data/yixiz/autonlab/zfsauton/datasets/womd`; the
   eshau copy is gone.
 * **Run.** `adapter/20261004_005655_968306`. Results are in its `report.md`
   and in the doc's results section.

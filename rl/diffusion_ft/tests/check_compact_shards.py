@@ -7,8 +7,8 @@ requires bit-identical simulator states and equal ``scenario/id``s. It also chec
 placeholder index fails to load instead of yielding a scene. CPU only.
 
     python rl/diffusion_ft/tests/check_compact_shards.py --compact_root .../valfail1568 \\
-        --src_dir /zfsauton/datasets/womd/tf_example/validation \\
-        --es_root /zfsauton2/home/yixiz/waymax_rs_es_newmodel --n_shards 4
+        --src_dir /data/user_data/yixiz/autonlab/zfsauton/datasets/womd/tf_example/validation \\
+        --es_root /home/yixiz/waymax_rs_es_newmodel --n_shards 4
 """
 
 from __future__ import annotations

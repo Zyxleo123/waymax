@@ -16,7 +16,7 @@
 #     HRD_CKPT=/path/to/pretrained/latest bash train_diffusion/hardness/slurm/submit_alpha_sweep.sh
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 
 HRD_OUT="${HRD_OUT:-$ROOT/runs/hardness}"
@@ -58,8 +58,8 @@ submit_arm() {
     emit HRD_EXCLUDE_DIRTY "$dirty"
     emit HRD_WEIGHT_CLIP "${HRD_WEIGHT_CLIP:-10.0}"
     emit HRD_CKPT "$HRD_CKPT"
-    emit HRD_CACHE_DIR "${HRD_CACHE_DIR:-/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/}"
-    emit HRD_SAVE_DIR "${HRD_SAVE_DIR:-/zfsauton/scratch/yixiz/waymax_rs/hardness_sweep}/$label"
+    emit HRD_CACHE_DIR "${HRD_CACHE_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/}"
+    emit HRD_SAVE_DIR "${HRD_SAVE_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/hardness_sweep}/$label"
     emit HRD_EPOCHS "${HRD_EPOCHS:-20}"
     emit HRD_STEPS "${HRD_STEPS:-1000}"
     # Same seed across arms: the sweep must vary alpha and nothing else.
@@ -69,11 +69,11 @@ submit_arm() {
     # submitter scrubs the environment (env -i), so anything you want to override
     # from the submit command must be forwarded through the env file explicitly.
     emit HRD_EVAL_EVERY "${HRD_EVAL_EVERY:-5}"
-    emit HRD_EVAL_TFRECORD_DIR "${HRD_EVAL_TFRECORD_DIR:-/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures}"
+    emit HRD_EVAL_TFRECORD_DIR "${HRD_EVAL_TFRECORD_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures}"
     emit HRD_EVAL_NUM "${HRD_EVAL_NUM:-218}"
-    emit HRD_EVAL2_TFRECORD_DIR "${HRD_EVAL2_TFRECORD_DIR:-/zfsauton/scratch/eshau/womd/tf_example/training}"
+    emit HRD_EVAL2_TFRECORD_DIR "${HRD_EVAL2_TFRECORD_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training}"
     emit HRD_EVAL2_NUM "${HRD_EVAL2_NUM:-200}"
-    emit HRD_EVAL_LANE_GRAPH_DIR "${HRD_EVAL_LANE_GRAPH_DIR:-/zfsauton/scratch/mineuih/waymax_rs/lane_graphs}"
+    emit HRD_EVAL_LANE_GRAPH_DIR "${HRD_EVAL_LANE_GRAPH_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs}"
   } > "$env_file"
   local job
   job="$("${SUBMIT[@]}" --parsable --job-name="hrd_$label" \

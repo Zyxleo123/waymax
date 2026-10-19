@@ -131,7 +131,7 @@ def main(argv=None):
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--splits_json", required=True)
     p.add_argument("--shard_glob",
-                   default="/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*")
+                   default="/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*")
     p.add_argument("--index_dir", default=DEFAULT_INDEX_DIR)
     p.add_argument("--ckpt", default=DEFAULT_CHECKPOINT_PATH)
     p.add_argument("--n_failure", type=int, default=-1, help="failure_heldout scenes for W0/W1 (-1 = all)")

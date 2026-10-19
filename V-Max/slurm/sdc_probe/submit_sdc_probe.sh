@@ -11,15 +11,15 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_DIR="${ENV_DIR:-/zfsauton/scratch/yixiz/waymax_rs/sdc_probe/env}"
+ENV_DIR="${ENV_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/sdc_probe/env}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 ENV_FILE="${ENV_DIR}/probe_${STAMP}.env"
 
-WOMD_ROOT="${WOMD_ROOT:-/zfsauton/scratch/eshau/womd/tf_example}"
+WOMD_ROOT="${WOMD_ROOT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example}"
 NUM_SHARDS="${NUM_SHARDS:-20}"
 MAX_NUM_OBJECTS="${MAX_NUM_OBJECTS:-64}"
-OUT_DIR="${OUT_DIR:-/zfsauton/scratch/yixiz/waymax_rs/sdc_probe/${STAMP}}"
-PARTITION="${PARTITION:-cpu}"
+OUT_DIR="${OUT_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/sdc_probe/${STAMP}}"
+PARTITION="${PARTITION:-preempt}"
 
 mkdir -p "${ENV_DIR}" "${OUT_DIR}"
 
