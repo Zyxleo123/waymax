@@ -10,6 +10,9 @@
 # Optional env:
 #   GPU_PARTITION / CPU_PARTITION  rewrite '#SBATCH --partition=general' / '=cpu' lines
 #   DROP_QOS=1                     delete '#SBATCH --qos=' lines (autonlab QOS names)
+#   GPU_QOS / CPU_QOS              (with DROP_QOS=1) add '#SBATCH --qos=' after each partition line:
+#                                  GPU_QOS if the script has a '#SBATCH --gres=gpu' line, else CPU_QOS
+#                                  (Babel preempt: preempt_qos / preempt_cpu_qos, both required)
 #   DROP_NODE_PINS=1               drop autonlab node pins: '#SBATCH --exclude/--nodelist=gpuNN'
 #                                  lines, literal '--exclude=gpuNN' flags, '${X-gpuNN}' defaults
 #   GPU_GRES=gpu:<type>:1          rewrite '#SBATCH --gres=gpu:1' and '--gres=gpu:<type>:1' lines
@@ -60,6 +63,12 @@ for co in "$@"; do
       [[ -n "${GPU_PARTITION:-}" ]] && sed -i "s|^#SBATCH --partition=general\$|#SBATCH --partition=$GPU_PARTITION|" "${sb[@]}"
       [[ -n "${CPU_PARTITION:-}" ]] && sed -i "s|^#SBATCH --partition=cpu\$|#SBATCH --partition=$CPU_PARTITION|" "${sb[@]}"
       [[ "${DROP_QOS:-0}" == 1 ]] && sed -i '/^#SBATCH --qos=/d' "${sb[@]}"
+      if [[ "${DROP_QOS:-0}" == 1 && -n "${GPU_QOS:-}${CPU_QOS:-}" ]]; then
+        for f in "${sb[@]}"; do
+          if grep -qE '^#SBATCH --gres=gpu' "$f"; then q="${GPU_QOS:-}"; else q="${CPU_QOS:-}"; fi
+          [[ -n "$q" ]] && sed -i "/^#SBATCH --partition=/a #SBATCH --qos=$q" "$f"
+        done
+      fi
     fi
   fi
   if [[ "${DROP_NODE_PINS:-0}" == 1 ]]; then
