@@ -1,8 +1,9 @@
 # Everything the current work needs from autonlab, including its eval data, except the conda
-# env (see env/MIGRATION.md). For `rsync -a -r --files-from=env/transfer_list.txt / HOST:NEWROOT/`:
-# each path keeps its full autonlab path under NEWROOT, which is what env/relocate_paths.sh
-# assumes. rsync ignores lines starting with '#'. About 26 GB total (16 GB scratch incl. the 4.2 GB
-# compact failure set, 7.8 GB val shards 0-9, 1.9 GB checkpoints).
+# env. env/b2_upload.sh reads this list: the first three trees go into archives/scratch.tar.gz,
+# everything else goes up as plain files under files/<autonlab path> in b2:proteina/waymax_rs.
+# The download side is env/MIGRATION.md section 1. Paths keep their full autonlab form, which
+# is what env/relocate_paths.sh assumes. Lines starting with '#' are ignored. About 26 GB total
+# (16 GB scratch incl. the 4.2 GB compact failure set, 7.8 GB val shards 0-9, 1.9 GB checkpoints).
 
 # --- yours: results, split JSONs, WOMD offset indexes, ES subsets, ES run roots (12 GB apparent),
 #     and womd_compact/valfail1568: the new failures' compact copy (tools/build_compact_shards.py)
