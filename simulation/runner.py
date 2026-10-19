@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import functools
 import json
 import os
 import sys
 import re
+import struct
 import time
 from pathlib import Path
 from typing import Any
@@ -50,6 +52,19 @@ except Exception:
 
 
 _SCENARIO_RESULT_RE = re.compile(r"^(?P<tfrecord_name>.+)\.scenario_(?P<scenario_idx>\d+)\.json$")
+
+
+@functools.lru_cache(maxsize=None)
+def _num_tfrecord_records(path: str) -> int:
+    """Records in an uncompressed TFRecord file (each: 8-byte length, 4-byte CRC, data, 4-byte CRC)."""
+    count = 0
+    with open(path, "rb") as f:
+        while True:
+            header = f.read(8)
+            if len(header) < 8:
+                return count
+            f.seek(struct.unpack("<Q", header)[0] + 8, os.SEEK_CUR)
+            count += 1
 
 
 def _load_completed_scenarios(start_from: str | None) -> set[tuple[str, int]]:
@@ -189,15 +204,26 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
             if not scenario_indices:
                 break
         else:
+            num_records = _num_tfrecord_records(str(tfrecord_path))
             scenario_indices = []
-            while len(scenario_indices) < int(args.num_worlds) and tested_scenarios + len(scenario_indices) < int(args.num_scenarios):
+            while (
+                len(scenario_indices) < int(args.num_worlds)
+                and tested_scenarios + len(scenario_indices) < int(args.num_scenarios)
+                and curr_scenario_index < num_records
+            ):
                 scenario_idx = int(curr_scenario_index)
                 curr_scenario_index += 1
                 if (os.path.basename(tfrecord_path), scenario_idx) in completed_scenarios:
                     continue
                 scenario_indices.append(scenario_idx)
             if not scenario_indices:
+                if curr_scenario_index >= num_records and _advance_tfrecord():
+                    continue
                 break
+        # A shard's last batch can be short; planner/batch_dims expect num_worlds, so pad it with
+        # copies of its last scenario and keep only the first num_real results.
+        num_real = len(scenario_indices)
+        scenario_indices = scenario_indices + [scenario_indices[-1]] * (int(args.num_worlds) - num_real)
         try:
             sim_state, _, scenario_ids = load_scenario_state_batch_fast(
                 ds_cfg, scenario_indices, return_scenario_ids=True
@@ -309,6 +335,11 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                 "min_goal_dist": np.asarray(goal_eval["min_goal_distance_m"]),
                 "final_goal_dist": np.asarray(goal_eval["final_goal_distance_m"]),
             })
+        if num_real < len(scenario_indices):
+            # Padded last batch: drop the padding copies.
+            scenario_indices = scenario_indices[:num_real]
+            overlap, offroad, success = overlap[:num_real], offroad[:num_real], success[:num_real]
+            goal_eval = {key: value[:num_real] for key, value in goal_eval.items()}
         reached_all += int(np.sum(goal_eval["reached"]))
         success_all += int(np.sum(success))
 
