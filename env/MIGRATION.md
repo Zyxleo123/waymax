@@ -39,17 +39,20 @@ A single prefix rewrite (`env/relocate_paths.sh`, section 5) then repoints ~400 
 cd /zfsauton2/home/yixiz/waymax_rs && bash env/b2_upload.sh     # DEST defaults to b2:proteina/waymax_rs
 ```
 
-The first attempt (2026-10-19 00:15) failed with `403 storage_cap_exceeded`. The `proteina`
-bucket also holds ~20 GiB of the Proteina/CPSea project (`cpsea/`), and the account was at its
-B2 storage cap. Raise the cap in the Backblaze web console (Caps & Alerts) by ≥25 GB, then run
-`REUSE_ARCHIVES=1 bash env/b2_upload.sh` to reuse the archives already staged in
-`/var/tmp/yixiz/waymax_b2` on lov4. **Never `rclone sync`, `delete` or `cleanup` at the bucket
-root:** that would touch the other project's data. Only ever write under `waymax_rs/`.
+**Uploaded and verified 2026-10-19 00:36.** The archives' SHA256 checked out; `rclone check`
+reported 3/3 archive objects and 434/434 bulk files matching; and the 5 files under other
+users' unlistable scratch roots (world models, discriminator) were sent one by one and matched
+by SHA1. The archives date from 00:14 and won't hold ES val10 results written after that.
+**Before the outage, re-run `bash env/b2_upload.sh` without `REUSE_ARCHIVES`.**
+The `proteina` bucket also holds ~20 GiB of the Proteina/CPSea project (`cpsea/`), and the B2
+storage cap was raised for this upload. **Never `rclone sync`, `delete` or `cleanup` at the
+bucket root:** that would touch the other project's data. Only ever write under `waymax_rs/`.
 
-The script builds the archives on lov4's local disk, uploads them, uploads the plain files, and
-`rclone check`s both against the bucket. **Re-run it just before the outage.** The plain files
-are incremental and the archives are rebuilt, which picks up the ES val10 jobs that were still
-writing results.
+The script builds the archives on lov4's local disk and uploads them. It then uploads the plain
+files: in bulk, except files under other users' unlistable scratch roots, which go one by one.
+Finally it verifies everything (`rclone check`, plus SHA1 for the one-by-one files). On a re-run
+the plain files are incremental and the archives are rebuilt. The bucket holds 442 objects,
+19.1 GiB.
 
 ## 1. Download (new machine)
 
