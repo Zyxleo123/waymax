@@ -25,13 +25,18 @@ ARCHIVE_TREES=(zfsauton/scratch/yixiz/waymax_rs zfsauton/scratch/yixiz/ScenarioM
 COMPACT=zfsauton/scratch/yixiz/waymax_rs/womd_compact   # binary, inside the scratch tree: sent as files
 
 # --- plain-file list: the transfer list minus the archived trees, directories expanded
-: > "$STAGE/files.txt"
+: > "$STAGE/all_files.txt"
 grep -v '^#' "$REPO/env/transfer_list.txt" | grep . | sed 's|^/||' | while read -r p; do
   for a in "${ARCHIVE_TREES[@]}"; do [[ "$p" == "$a" ]] && continue 2; done
   if [[ -d "/$p" ]]; then (cd / && find -P "$p" -type f); else echo "$p"; fi
-done >> "$STAGE/files.txt"
-(cd / && find -P "$COMPACT" -type f) >> "$STAGE/files.txt"
-echo "plain files: $(wc -l < "$STAGE/files.txt")"
+done >> "$STAGE/all_files.txt"
+(cd / && find -P "$COMPACT" -type f) >> "$STAGE/all_files.txt"
+# rclone --files-from lists every ancestor directory, and other users' scratch roots are
+# drwx-----x (enterable, not listable): those files go one by one by exact path (direct.txt).
+listable() { local d; d="/$(dirname "$1")"; while [[ "$d" != / ]]; do [[ -r "$d" ]] || return 1; d="$(dirname "$d")"; done; }
+: > "$STAGE/files.txt"; : > "$STAGE/direct.txt"
+while read -r p; do if listable "$p"; then echo "$p" >> "$STAGE/files.txt"; else echo "$p" >> "$STAGE/direct.txt"; fi; done < "$STAGE/all_files.txt"
+echo "plain files: $(wc -l < "$STAGE/all_files.txt") ($(wc -l < "$STAGE/files.txt") bulk, $(wc -l < "$STAGE/direct.txt") one by one)"
 
 # --- archives (tar exit 1 = "file changed as we read it": the ES jobs are still writing)
 if [[ "${REUSE_ARCHIVES:-0}" == 1 && -s "$STAGE/scratch.tar.gz" && -s "$STAGE/claude.tar.gz" ]]; then
@@ -52,6 +57,13 @@ fi
 ARCH=(--include scratch.tar.gz --include claude.tar.gz --include SHA256SUMS)
 rclone copy "$STAGE" "$DEST/archives" "${ARCH[@]}" --stats 30s --stats-one-line
 rclone copy / "$DEST/files" --files-from "$STAGE/files.txt" --transfers 16 --stats 30s --stats-one-line
+while read -r p; do rclone copyto "/$p" "$DEST/files/$p"; done < "$STAGE/direct.txt"
 rclone check "$STAGE" "$DEST/archives" "${ARCH[@]}" --one-way
 rclone check / "$DEST/files" --files-from "$STAGE/files.txt" --one-way --fast-list
+bad=0
+while read -r p; do
+  l="$(sha1sum "/$p" | cut -d' ' -f1)"; r="$(rclone hashsum sha1 "$DEST/files/$p" | cut -d' ' -f1)"
+  if [[ "$l" == "$r" ]]; then echo "sha1 ok: $p"; else echo "SHA1 MISMATCH: $p (local $l, bucket ${r:-missing})"; bad=1; fi
+done < "$STAGE/direct.txt"
+(( bad == 0 )) || exit 1
 echo "b2_upload: DONE -> $DEST"
