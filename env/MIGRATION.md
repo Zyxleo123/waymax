@@ -33,11 +33,18 @@ A single prefix rewrite (`env/relocate_paths.sh`, section 5) then repoints ~400 
 | `files/zfsauton/scratch/mineuih/...` | policy checkpoints: the 0616 base (o_am), `goal_cond_diffusion_policy/epoch_1000` (ES), and the 0711 ES policy; plus the failure list `exp/validation_0_150_failure_scenarios.json` |
 | `files/zfsauton/scratch/{sbellad,ishanj}/...` | MF world models (Sagar's `latest.pt` and `epoch_0450.pt`, Ishan's `epoch_0450.pt`), the ES discriminator `best.pt`, and its split JSON |
 
-## 0. Upload (autonlab; done 2026-10-18)
+## 0. Upload (autonlab)
 
 ```bash
 cd /zfsauton2/home/yixiz/waymax_rs && bash env/b2_upload.sh     # DEST defaults to b2:proteina/waymax_rs
 ```
+
+The first attempt (2026-10-19 00:15) failed with `403 storage_cap_exceeded`. The `proteina`
+bucket also holds ~20 GiB of the Proteina/CPSea project (`cpsea/`), and the account was at its
+B2 storage cap. Raise the cap in the Backblaze web console (Caps & Alerts) by ≥25 GB, then run
+`REUSE_ARCHIVES=1 bash env/b2_upload.sh` to reuse the archives already staged in
+`/var/tmp/yixiz/waymax_b2` on lov4. **Never `rclone sync`, `delete` or `cleanup` at the bucket
+root:** that would touch the other project's data. Only ever write under `waymax_rs/`.
 
 The script builds the archives on lov4's local disk, uploads them, uploads the plain files, and
 `rclone check`s both against the bucket. **Re-run it just before the outage.** The plain files

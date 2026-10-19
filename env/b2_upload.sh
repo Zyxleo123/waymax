@@ -10,6 +10,8 @@
 # The download side is env/MIGRATION.md section 1.
 #
 # usage: bash env/b2_upload.sh [DEST]      default DEST=b2:proteina/waymax_rs
+#   REUSE_ARCHIVES=1  upload the archives already staged in $STAGE instead of rebuilding them
+# The proteina bucket also holds the CPSea project (cpsea/): never `rclone sync`/`cleanup` it.
 set -euo pipefail
 DEST="${1:-b2:proteina/waymax_rs}"
 REPO="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
@@ -32,6 +34,9 @@ done >> "$STAGE/files.txt"
 echo "plain files: $(wc -l < "$STAGE/files.txt")"
 
 # --- archives (tar exit 1 = "file changed as we read it": the ES jobs are still writing)
+if [[ "${REUSE_ARCHIVES:-0}" == 1 && -s "$STAGE/scratch.tar.gz" && -s "$STAGE/claude.tar.gz" ]]; then
+  echo "reusing staged archives:"; (cd "$STAGE" && sha256sum -c SHA256SUMS)
+else
 rc=0
 tar -C / --use-compress-program="pigz -p $NPROC" --warning=no-file-changed --warning=no-file-removed \
     --exclude=.jax_compilation_cache --exclude="$COMPACT" \
@@ -41,6 +46,7 @@ mv "$STAGE/scratch.tar.gz.tmp" "$STAGE/scratch.tar.gz"
 tar -C "$HOME/.claude" --use-compress-program="pigz -p $NPROC" -cf "$STAGE/claude.tar.gz" \
     CLAUDE.md projects/-zfsauton2-home-yixiz-waymax-rs/memory
 (cd "$STAGE" && sha256sum scratch.tar.gz claude.tar.gz > SHA256SUMS && cat SHA256SUMS && ls -l scratch.tar.gz claude.tar.gz)
+fi
 
 # --- upload, then verify against what is now in the bucket
 ARCH=(--include scratch.tar.gz --include claude.tar.gz --include SHA256SUMS)
