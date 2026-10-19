@@ -1,6 +1,6 @@
 """Rebuild the fail1500 subset from a finished fail1500 run, split into shard groups.
 
-The original subset dir (/zfsauton/scratch/sbellad/immediate_exp/es_failure_subset_n1500_seed0)
+The original subset dir (/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/es_failure_subset_n1500_seed0)
 is gone, but every fail1500 run wrote one JSON per scene named
 ``<tfrecord basename>.scenario_<idx>.json`` with ``tfrecord`` / ``scenario_idx``
 inside, so the scene list is recoverable from any of them.
@@ -30,7 +30,7 @@ NAME_RE = re.compile(r"^(?P<tf>.+)\.scenario_(?P<idx>\d+)\.json$")
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--run_dir", required=True, help="a fail1500 simulation_* dir with per-scene JSONs")
-    p.add_argument("--womd_dir", default="/zfsauton/datasets/womd/tf_example/training")
+    p.add_argument("--womd_dir", default="/data/user_data/yixiz/autonlab/zfsauton/datasets/womd/tf_example/training")
     p.add_argument("--out", required=True)
     p.add_argument("--groups", type=int, default=6)
     p.add_argument("--expect", type=int, default=1500)

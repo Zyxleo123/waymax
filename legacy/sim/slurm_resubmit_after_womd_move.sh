@@ -1,9 +1,9 @@
 #!/bin/bash
 # Resubmit every fail1500 run that broke on Oct 2 16:54 when
-# /zfsauton/scratch/eshau/womd disappeared, plus a Diffusion-ES GT sanity rerun.
+# /data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd disappeared, plus a Diffusion-ES GT sanity rerun.
 #
 # The subset tfrecords are symlinks; they now point to
-#   /zfsauton/datasets/womd/tf_example/training
+#   /data/user_data/yixiz/autonlab/zfsauton/datasets/womd/tf_example/training
 # Old partial outputs were renamed to INVALID_womd_missing_simulation_*.
 #
 # Usage (from rhea or lov4):
@@ -20,16 +20,16 @@
 #      compared scene-by-scene against immediate_exp/es_diffusion_gt_fail1500/ (Sep 9, 52.27%)
 set -euo pipefail
 
-ROOT="${WAYMAX_RS_ROOT:-/zfsauton2/home/sbellad/baseline/waymax_rs}"
-SUBSET_DIR="/zfsauton/scratch/sbellad/immediate_exp/es_failure_subset_n1500_seed0"
-NEW_WOMD="/zfsauton/datasets/womd/tf_example/training"
-RECHECK_ROOT="/zfsauton/scratch/sbellad/immediate_exp/_womd_path_recheck"
-GT_REF_DIR="/zfsauton/scratch/sbellad/immediate_exp/es_diffusion_gt_fail1500"
+ROOT="${WAYMAX_RS_ROOT:-/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs}"
+SUBSET_DIR="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/es_failure_subset_n1500_seed0"
+NEW_WOMD="/data/user_data/yixiz/autonlab/zfsauton/datasets/womd/tf_example/training"
+RECHECK_ROOT="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/_womd_path_recheck"
+GT_REF_DIR="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/es_diffusion_gt_fail1500"
 GT_NEW_DIR="${RECHECK_ROOT}/es_diffusion_gt_fail1500"
 MODE="${1:-submit}"
 
 if [[ "${MODE}" == "compare" ]]; then
-  source /zfsauton/scratch/sbellad/miniconda3/bin/activate /zfsauton/scratch/sbellad/conda_envs/waymax_rs
+  source /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/miniconda3/bin/activate /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/conda_envs/waymax_rs
   python - "${GT_REF_DIR}" "${GT_NEW_DIR}" <<'EOF'
 import glob, json, os, sys
 ref_dir = sorted(glob.glob(f"{sys.argv[1]}/simulation_*"))[-1]

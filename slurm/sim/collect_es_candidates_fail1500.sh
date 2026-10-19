@@ -1,16 +1,16 @@
 #!/bin/bash
 #SBATCH --job-name=collect_es_cand
-#SBATCH --partition=general
-#SBATCH --qos=qos_general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:A6000:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --time=2-00:00:00
-#SBATCH --chdir=/zfsauton2/home/sbellad/baseline/waymax_rs
-#SBATCH --output=/zfsauton/scratch/sbellad/es_discriminator/logs/collect_es_candidates_%j.out
-#SBATCH --error=/zfsauton/scratch/sbellad/es_discriminator/logs/collect_es_candidates_%j.err
+#SBATCH --chdir=/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs
+#SBATCH --output=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/es_discriminator/logs/collect_es_candidates_%j.out
+#SBATCH --error=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/es_discriminator/logs/collect_es_candidates_%j.err
 
 # Diffusion-ES + multi-future WM (expected_independent) on the 1,500 failure scenes,
 # saving every evaluated ES candidate per replan, then GT-replay labels offline.
@@ -32,13 +32,13 @@
 #   es_candidates/<tfrecord>.scen_<i>_..._<m>.labels.npz   GT-replay labels + progress metrics
 set -euo pipefail
 
-ROOT=/zfsauton2/home/sbellad/baseline/waymax_rs
-SCRATCH=/zfsauton/scratch/sbellad
+ROOT=/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs
+SCRATCH=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad
 OUT_ROOT=${SCRATCH}/es_discriminator/es_candidate_data
 SUBSET=${SCRATCH}/Diffusion_ES_sim/es_failure_subset_n1500_seed0
 DIFFUSION_CKPT=${SCRATCH}/train_diffusion/diffusion_baseline_baseline_20260810_144559/epoch_0500
 MF_WM_CKPT=${SCRATCH}/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20260916_200620/epoch_0450.pt
-LANE_GRAPH_DIR=/zfsauton/scratch/mineuih/waymax_rs/lane_graphs
+LANE_GRAPH_DIR=/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs
 SEED=0
 STAGE=all
 NUM_SCENARIOS=100000

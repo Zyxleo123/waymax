@@ -99,11 +99,11 @@ def _parse_anchor_steps(raw_anchor_steps: list[str] | None) -> tuple[int, ...]:
 
 def parse_args() -> TemporalVLAPretrainConfig:
 	parser = argparse.ArgumentParser(description="Pretrain TemporalGemmaVLA on temporal QA data.")
-	parser.add_argument("--cache_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/")
+	parser.add_argument("--cache_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/")
 	parser.add_argument("--tfrecord_dir", type=str, default=None, help="Deprecated alias for --cache_dir.")
-	parser.add_argument("--annotation_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/annotations/target_lane/")
+	parser.add_argument("--annotation_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/annotations/target_lane/")
 	parser.add_argument("--file_indices", type=str, nargs="*", default=None)
-	parser.add_argument("--output_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/checkpoints/pretrain_temporal_vla")
+	parser.add_argument("--output_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/checkpoints/pretrain_temporal_vla")
 
 	parser.add_argument("--wandb_project", type=str, default="pretrain_temporal_vla")
 	parser.add_argument("--wandb_run_name", type=str, default="pretrain_temporal_vla")

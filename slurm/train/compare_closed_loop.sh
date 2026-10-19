@@ -1,20 +1,20 @@
 #!/bin/bash
 #SBATCH --job-name=cmp_closed_loop
-#SBATCH --partition=general
-#SBATCH --qos=qos_general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_cpu_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #SBATCH --time=02:00:00
-#SBATCH --chdir=/zfsauton2/home/sbellad/baseline/waymax_rs
-#SBATCH --output=/zfsauton/scratch/sbellad/es_discriminator/closed_loop/logs/compare_%j.out
-#SBATCH --error=/zfsauton/scratch/sbellad/es_discriminator/closed_loop/logs/compare_%j.err
+#SBATCH --chdir=/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs
+#SBATCH --output=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/es_discriminator/closed_loop/logs/compare_%j.out
+#SBATCH --error=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/es_discriminator/closed_loop/logs/compare_%j.err
 # Pair the learned-reward closed-loop runs with the matching handcrafted Diffusion-ES baselines.
 #   bash slurm/train/compare_closed_loop.sh [--disc_name N] [--allow_partial]   (runs on CPU; also fine on lov1)
 set -eo pipefail
-SCRATCH=/zfsauton/scratch/sbellad
-ROOT=/zfsauton2/home/sbellad/baseline/waymax_rs
+SCRATCH=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad
+ROOT=/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs
 DISC_NAME=safety_progress_full_gaussian_wm
 EXTRA=()
 while [[ $# -gt 0 ]]; do

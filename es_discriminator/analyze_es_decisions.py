@@ -45,7 +45,7 @@ from es_discriminator.label_bank import _to_world
 START_T = 10
 EPISODE_STEPS = 91
 QUERY_CHUNK = 8192
-SCRATCH = "/zfsauton/scratch/sbellad"
+SCRATCH = "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad"
 
 
 # ---- geometry (Waymax-exact) -------------------------------------------------------

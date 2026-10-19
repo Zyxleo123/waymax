@@ -1,16 +1,16 @@
 #!/bin/bash
 #SBATCH --job-name=diffusion_only_fail1500
-#SBATCH --partition=general
-#SBATCH --qos=qos_general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:A6000:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --time=2-00:00:00
-#SBATCH --chdir=/zfsauton2/home/sbellad/baseline/waymax_rs
-#SBATCH --output=/zfsauton/scratch/sbellad/diffusion_sim/logs/diffusion_only_fail1500_%j.out
-#SBATCH --error=/zfsauton/scratch/sbellad/diffusion_sim/logs/diffusion_only_fail1500_%j.err
+#SBATCH --chdir=/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs
+#SBATCH --output=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/diffusion_sim/logs/diffusion_only_fail1500_%j.out
+#SBATCH --error=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/diffusion_sim/logs/diffusion_only_fail1500_%j.err
 
 # Plain diffusion or flow-matching planner (one sample per replan, no ES, no
 # other-agent forecast) on the fail1500 subset (default) or on WOMD validation
@@ -24,13 +24,13 @@
 #   bash   slurm/sim/run_diffusion_fail1500.sh ... --print_paths      # show run name and dirs only
 set -euo pipefail
 
-ROOT=/zfsauton2/home/sbellad/baseline/waymax_rs
-SCRATCH=/zfsauton/scratch/sbellad
+ROOT=/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs
+SCRATCH=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad
 FAIL1500_DIR=${SCRATCH}/Diffusion_ES_sim/es_failure_subset_n1500_seed0
 VAL10_TFRECORD_DIR=${SCRATCH}/womd_val_shards00_09
 DIFFUSION_CKPT=${SCRATCH}/train_diffusion/diffusion_baseline_baseline_20260810_144559/epoch_0500
-FM_CKPT=/zfsauton/scratch/mineuih/waymax_rs/checkpoints/pretrain_flow_matching/pretrain_fm_policy_20260828_011255/epoch_0500
-LANE_GRAPH_DIR=/zfsauton/scratch/mineuih/waymax_rs/lane_graphs
+FM_CKPT=/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/checkpoints/pretrain_flow_matching/pretrain_fm_policy_20260828_011255/epoch_0500
+LANE_GRAPH_DIR=/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs
 PLANNER=${PLANNER:-diffusion}
 SUBSET=fail1500
 PRINT_PATHS=0

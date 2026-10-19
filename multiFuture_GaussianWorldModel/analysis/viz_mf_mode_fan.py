@@ -31,11 +31,11 @@ from data.world_model_cache_loader import build_world_model_cache_loader
 from model.world_model import LatentMultiAgentWorldModel, WorldModelConfig
 
 _DEFAULT_CKPT = (
-    "/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/"
+    "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/"
     "multiFuture_GaussianWorldModel_20260916_200620/epoch_0450.pt"
 )
-_DEFAULT_CACHE = "/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz"
-_DEFAULT_OUT = "/zfsauton/scratch/sbellad/world_model/eval_per_anchor/mode_fan_bev"
+_DEFAULT_CACHE = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz"
+_DEFAULT_OUT = "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/eval_per_anchor/mode_fan_bev"
 
 MODE_COLORS = (
     "#4C78A8",

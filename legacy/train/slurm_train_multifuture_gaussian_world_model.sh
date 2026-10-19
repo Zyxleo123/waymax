@@ -1,27 +1,27 @@
 #!/bin/bash
 #SBATCH --job-name=mf_gauss_wm
-#SBATCH --partition=general
-#SBATCH --qos=qos_general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=96G
 #SBATCH --time=2-00:00:00
-#SBATCH --chdir=/zfsauton2/home/sbellad/baseline/waymax_rs/multiFuture_GaussianWorldModel
-#SBATCH --output=/zfsauton/scratch/sbellad/world_model/multifuture_gaussian_world_model_%j.out
-#SBATCH --error=/zfsauton/scratch/sbellad/world_model/multifuture_gaussian_world_model_%j.err
+#SBATCH --chdir=/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs/multiFuture_GaussianWorldModel
+#SBATCH --output=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/multifuture_gaussian_world_model_%j.out
+#SBATCH --error=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/multifuture_gaussian_world_model_%j.err
 
 set -euo pipefail
 
-ROOT="${MULTIFUTURE_WM_ROOT:-/zfsauton2/home/sbellad/baseline/waymax_rs/multiFuture_GaussianWorldModel}"
-CACHE_DIR="${CACHE_DIR:-/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz}"
-SCRATCH_WM="${SCRATCH_WM:-/zfsauton/scratch/sbellad/world_model}"
+ROOT="${MULTIFUTURE_WM_ROOT:-/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs/multiFuture_GaussianWorldModel}"
+CACHE_DIR="${CACHE_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz}"
+SCRATCH_WM="${SCRATCH_WM:-/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model}"
 SAVE_DIR="${SAVE_DIR:-${SCRATCH_WM}/ckpts_multifuture_gaussian}"
 DEVICE="${WORLD_MODEL_TRAIN_DEVICE:-cuda}"
 
-CONDA_ROOT="${CONDA_ROOT:-/zfsauton/scratch/sbellad/miniconda3}"
-WAYMAX_ENV="${WAYMAX_ENV:-/zfsauton/scratch/sbellad/conda_envs/waymax_rs}"
+CONDA_ROOT="${CONDA_ROOT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/miniconda3}"
+WAYMAX_ENV="${WAYMAX_ENV:-/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/conda_envs/waymax_rs}"
 if [[ "${CONDA_PREFIX:-}" != "${WAYMAX_ENV}" ]]; then
   set +u
   # shellcheck source=/dev/null

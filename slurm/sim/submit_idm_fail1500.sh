@@ -5,9 +5,9 @@
 #   bash slurm/sim/submit_idm_fail1500.sh              # all 7 jobs
 #   bash slurm/sim/submit_idm_fail1500.sh --dry_run    # print only
 #
-#   diffusion only               -> /zfsauton/scratch/sbellad/diffusion_sim/diffusion_only_IDM_fail1500_seed0
-#   diffusion-ES  gt/cv/wm_mf    -> /zfsauton/scratch/sbellad/Diffusion_ES_sim/es_diffusion_IDM_*
-#   flow-matching-ES gt/cv/wm_mf -> /zfsauton/scratch/sbellad/Flow_matching_sim/es_fm_IDM_*  (it6/rs40;
+#   diffusion only               -> /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/diffusion_sim/diffusion_only_IDM_fail1500_seed0
+#   diffusion-ES  gt/cv/wm_mf    -> /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Diffusion_ES_sim/es_diffusion_IDM_*
+#   flow-matching-ES gt/cv/wm_mf -> /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim/es_fm_IDM_*  (it6/rs40;
 #                                   override with FM_IT=4 FM_RS=20 bash ...)
 # Extra args are forwarded to both ES submissions.
 set -euo pipefail
@@ -20,7 +20,7 @@ for a in "$@"; do
   ES_ARGS+=("$a")
 done
 
-DIFF_LOG_DIR=/zfsauton/scratch/sbellad/diffusion_sim/logs_IDM
+DIFF_LOG_DIR=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/diffusion_sim/logs_IDM
 DIFF_CMD=(sbatch --job-name=diffusion_only_IDM_fail1500
   --output=${DIFF_LOG_DIR}/diffusion_only_IDM_fail1500_%j.out
   --error=${DIFF_LOG_DIR}/diffusion_only_IDM_fail1500_%j.err

@@ -1,16 +1,16 @@
 #!/bin/bash
 #SBATCH --job-name=cache_wm
-#SBATCH --partition=general
-#SBATCH --qos=qos_general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:A6000:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=0-08:00:00
-#SBATCH --chdir=/zfsauton2/home/sbellad/baseline/waymax_rs
-#SBATCH --output=/zfsauton/scratch/sbellad/es_discriminator/logs/cache_wm_%j.out
-#SBATCH --error=/zfsauton/scratch/sbellad/es_discriminator/logs/cache_wm_%j.err
+#SBATCH --chdir=/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs
+#SBATCH --output=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/es_discriminator/logs/cache_wm_%j.out
+#SBATCH --error=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/es_discriminator/logs/cache_wm_%j.err
 
 # One frozen multi-future Gaussian WM forward per recorded Diffusion-ES replan (on the executed
 # ego state the planner saw), 32 candidate-independent agents (current + predicted occupancy),
@@ -23,8 +23,8 @@
 # Output: ${SCRATCH}/es_discriminator/{wm_predictions,road_edges}/<run>/  (+ manifest.json, summary.json)
 set -euo pipefail
 
-ROOT=/zfsauton2/home/sbellad/baseline/waymax_rs
-SCRATCH=/zfsauton/scratch/sbellad
+ROOT=/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs
+SCRATCH=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad
 RUN=fail1500_es_diffusion_wm_mf_epoch0450_expected_independent_seed0
 DATA=${SCRATCH}/es_discriminator/es_candidate_data/${RUN}/es_candidates
 TFRECORDS=${SCRATCH}/Diffusion_ES_sim/es_failure_subset_n1500_seed0/tfrecords/training

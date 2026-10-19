@@ -49,17 +49,17 @@ from viz.render import _apply_ego_override_to_state_batch
 from viz.utils import VizConfig, img_from_fig
 
 
-DEFAULT_EXP_ROOT = Path("/zfsauton/scratch/sbellad/immediate_exp")
+DEFAULT_EXP_ROOT = Path("/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp")
 DEFAULT_OUT = DEFAULT_EXP_ROOT / "diff_ok_fm_fail_viewer_gt"
 DEFAULT_DIFF_CKPT = (
-    "/zfsauton/scratch/sbellad/diffusion/"
+    "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/diffusion/"
     "diffusion_baseline_baseline_20260810_144559/epoch_0500"
 )
 DEFAULT_FM_CKPT = (
-    "/zfsauton/scratch/mineuih/waymax_rs/checkpoints/pretrain_flow_matching/"
+    "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/checkpoints/pretrain_flow_matching/"
     "pretrain_fm_policy_20260828_011255/epoch_0500"
 )
-DEFAULT_LANE_GRAPH_DIR = "/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
+DEFAULT_LANE_GRAPH_DIR = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
 
 # Hyperparams used for the fail1500 ES runs (keep in sync with those jobs).
 ES_COMMON = dict(
@@ -662,7 +662,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out_dir", type=str, default=str(DEFAULT_OUT))
     p.add_argument("--diffusion_ckpt", type=str, default=DEFAULT_DIFF_CKPT)
     p.add_argument("--fm_ckpt", type=str, default=DEFAULT_FM_CKPT)
-    p.add_argument("--tf_root", type=str, default="/zfsauton/scratch/eshau/womd/tf_example/training")
+    p.add_argument("--tf_root", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training")
     p.add_argument("--lane_graph_dir", type=str, default=DEFAULT_LANE_GRAPH_DIR)
     p.add_argument("--max_num_objects", type=int, default=128)
     p.add_argument("--select_only", action="store_true", help="Only write cases.json, no videos")

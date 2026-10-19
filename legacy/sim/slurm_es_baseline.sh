@@ -1,16 +1,16 @@
 #!/bin/bash
 #SBATCH --job-name=es_diffusion
-#SBATCH --partition=general
-#SBATCH --qos=qos_general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --time=2-00:00:00
-#SBATCH --chdir=/zfsauton2/home/sbellad/baseline/waymax_rs
-#SBATCH --output=/zfsauton/scratch/sbellad/world_model_sim/logs/es_diffusion_%j.out
-#SBATCH --error=/zfsauton/scratch/sbellad/world_model_sim/logs/es_diffusion_%j.err
+#SBATCH --chdir=/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs
+#SBATCH --output=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model_sim/logs/es_diffusion_%j.out
+#SBATCH --error=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model_sim/logs/es_diffusion_%j.err
 
 # Diffusion-ES closed-loop on TRAIN/VAL shards 00+01 (--planner es).
 #
@@ -30,8 +30,8 @@
 #   refresh default 10; mf planning default expected_independent
 #
 # Outputs:
-#   cv|gt     -> /zfsauton/scratch/sbellad/immediate_exp/
-#   wm_*      -> /zfsauton/scratch/sbellad/world_model_sim/
+#   cv|gt     -> /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/
+#   wm_*      -> /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model_sim/
 #                (exp dirs, app logs, tfrecord symlinks, and Slurm .out/.err)
 #
 set -euo pipefail
@@ -73,15 +73,15 @@ if ! [[ "${WM_REFRESH_STEPS}" =~ ^[0-9]+$ ]] || [[ "${WM_REFRESH_STEPS}" -le 0 ]
   exit 1
 fi
 
-ROOT="${WAYMAX_RS_ROOT:-/zfsauton2/home/sbellad/baseline/waymax_rs}"
+ROOT="${WAYMAX_RS_ROOT:-/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs}"
 cd "${ROOT}"
 if [[ ! -f "${ROOT}/simulation/run_simulation.py" ]]; then
   echo "ERROR: run_simulation.py not found under ROOT=${ROOT}"
   exit 1
 fi
 
-CONDA_ROOT="/zfsauton/scratch/sbellad/miniconda3"
-WAYMAX_ENV="/zfsauton/scratch/sbellad/conda_envs/waymax_rs"
+CONDA_ROOT="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/miniconda3"
+WAYMAX_ENV="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/conda_envs/waymax_rs"
 if [[ "${CONDA_PREFIX:-}" != "${WAYMAX_ENV}" ]]; then
   set +u
   # shellcheck source=/dev/null
@@ -94,9 +94,9 @@ COLLISION_REDUCE="${COLLISION_REDUCE:-mean}"
 COLLISION_SAMPLE_SEED="${COLLISION_SAMPLE_SEED:-0}"
 WM_BACKEND="production"
 NUM_COLLISION_WORLDS=1
-GAU_CKPT_ROOT="/zfsauton/scratch/sbellad/world_model/ckpts_gaussian/gaussian_world_model_20260916_194054"
-MF_CKPT_DEFAULT="/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20260916_200620/epoch_0450.pt"
-DET_CKPT_DEFAULT="/zfsauton/scratch/sbellad/world_model/ckpts/world_model_20260912_170741/epoch_0500.pt"
+GAU_CKPT_ROOT="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/ckpts_gaussian/gaussian_world_model_20260916_194054"
+MF_CKPT_DEFAULT="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20260916_200620/epoch_0450.pt"
+DET_CKPT_DEFAULT="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/ckpts/world_model_20260912_170741/epoch_0500.pt"
 
 case "${MODE}" in
   cv|gt)
@@ -173,14 +173,14 @@ esac
 
 RUN_NAME="es_diffusion_${FORECAST_TAG}"
 if [[ "${OTHER_AGENT_FORECAST}" == "wm" ]]; then
-  EXP_ROOT="${WM_SIM_ROOT:-/zfsauton/scratch/sbellad/world_model_sim}"
+  EXP_ROOT="${WM_SIM_ROOT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model_sim}"
 else
-  EXP_ROOT="${CV_GT_SIM_ROOT:-/zfsauton/scratch/sbellad/immediate_exp}"
+  EXP_ROOT="${CV_GT_SIM_ROOT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp}"
 fi
 EXP_DIR="${EXP_ROOT}/${RUN_NAME}"
-TF_ROOT="/zfsauton/scratch/eshau/womd/tf_example"
-LANE_GRAPH_DIR="/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
-DIFFUSION_CKPT="/zfsauton/scratch/sbellad/diffusion/diffusion_baseline_baseline_20260810_144559/epoch_0500"
+TF_ROOT="/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example"
+LANE_GRAPH_DIR="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
+DIFFUSION_CKPT="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/diffusion/diffusion_baseline_baseline_20260810_144559/epoch_0500"
 
 NUM_WORLDS="${NUM_WORLDS:-5}"
 NUM_SCENARIOS="${NUM_SCENARIOS:-100000}"

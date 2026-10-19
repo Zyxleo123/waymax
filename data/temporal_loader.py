@@ -33,11 +33,11 @@ _INDEX_CACHE_KEYS: tuple[str, ...] = (
     "scenario_indices",
 )
 
-DEFAULT_INSTRUCTION_DATA_DIR = "/zfsauton/scratch/mineuih/waymax_rs/annotations"
+DEFAULT_INSTRUCTION_DATA_DIR = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/annotations"
 DEFAULT_SCENE_FEATURE_CACHE_DIR = (
-    "/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz"
+    "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz"
 )
-DEFAULT_OUTPUT_DIR = "/zfsauton/scratch/sbellad/temporal_output"
+DEFAULT_OUTPUT_DIR = "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/temporal_output"
 DEFAULT_CACHE_TIMESTEPS: tuple[int, ...] | None = None
 DEFAULT_ALLOWED_TIMESTEPS = DEFAULT_CACHE_TIMESTEPS
 

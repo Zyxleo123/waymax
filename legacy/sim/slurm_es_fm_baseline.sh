@@ -1,16 +1,16 @@
 #!/bin/bash
 #SBATCH --job-name=es_fm
-#SBATCH --partition=general
-#SBATCH --qos=qos_general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --time=2-00:00:00
-#SBATCH --chdir=/zfsauton2/home/sbellad/baseline/waymax_rs
-#SBATCH --output=/zfsauton/scratch/sbellad/immediate_exp/logs/es_fm_%j.out
-#SBATCH --error=/zfsauton/scratch/sbellad/immediate_exp/logs/es_fm_%j.err
+#SBATCH --chdir=/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs
+#SBATCH --output=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/logs/es_fm_%j.out
+#SBATCH --error=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/logs/es_fm_%j.err
 
 # Flow-matching ES closed-loop (--planner es_fm).
 # Positional arg selects other-agent forecast + names everything clearly:
@@ -18,8 +18,8 @@
 #   sbatch --job-name=es_fm_gt slurm_es_fm_baseline.sh gt
 #
 # Outputs / logs:
-#   /zfsauton/scratch/sbellad/immediate_exp/es_fm_cv
-#   /zfsauton/scratch/sbellad/immediate_exp/es_fm_gt
+#   /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/es_fm_cv
+#   /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/es_fm_gt
 #   logs/es_fm_{cv|gt}_train_val_shards00_01_<stamp>.log
 #
 set -euo pipefail
@@ -34,15 +34,15 @@ if [[ "${OTHER_AGENT_FORECAST}" != "cv" && "${OTHER_AGENT_FORECAST}" != "gt" ]];
   exit 1
 fi
 
-ROOT="${WAYMAX_RS_ROOT:-/zfsauton2/home/sbellad/baseline/waymax_rs}"
+ROOT="${WAYMAX_RS_ROOT:-/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs}"
 cd "${ROOT}"
 if [[ ! -f "${ROOT}/simulation/run_simulation.py" ]]; then
   echo "ERROR: run_simulation.py not found under ROOT=${ROOT}"
   exit 1
 fi
 
-CONDA_ROOT="/zfsauton/scratch/sbellad/miniconda3"
-WAYMAX_ENV="/zfsauton/scratch/sbellad/conda_envs/waymax_rs"
+CONDA_ROOT="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/miniconda3"
+WAYMAX_ENV="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/conda_envs/waymax_rs"
 if [[ "${CONDA_PREFIX:-}" != "${WAYMAX_ENV}" ]]; then
   set +u
   # shellcheck source=/dev/null
@@ -51,10 +51,10 @@ if [[ "${CONDA_PREFIX:-}" != "${WAYMAX_ENV}" ]]; then
 fi
 
 RUN_NAME="es_fm_${OTHER_AGENT_FORECAST}"
-EXP_DIR="/zfsauton/scratch/sbellad/immediate_exp/${RUN_NAME}"
-TF_ROOT="/zfsauton/scratch/eshau/womd/tf_example"
-LANE_GRAPH_DIR="/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
-FM_CKPT="/zfsauton/scratch/mineuih/waymax_rs/checkpoints/pretrain_flow_matching/pretrain_fm_policy_20260828_011255/epoch_0500"
+EXP_DIR="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/${RUN_NAME}"
+TF_ROOT="/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example"
+LANE_GRAPH_DIR="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
+FM_CKPT="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/checkpoints/pretrain_flow_matching/pretrain_fm_policy_20260828_011255/epoch_0500"
 
 NUM_WORLDS="${NUM_WORLDS:-5}"
 NUM_SCENARIOS="${NUM_SCENARIOS:-100000}"
@@ -67,8 +67,8 @@ FM_NUM_STEPS="${FM_NUM_STEPS:-50}"
 REPLAN_INTERVAL_STEPS="${REPLAN_INTERVAL_STEPS:-10}"
 
 RUN_STAMP="$(date +%Y%m%d_%H%M%S)"
-LOG_DIR="/zfsauton/scratch/sbellad/immediate_exp/logs"
-TF_LINK_ROOT="/zfsauton/scratch/sbellad/immediate_exp/tfrecord_shards_00_01_${RUN_NAME}_${RUN_STAMP}"
+LOG_DIR="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/logs"
+TF_LINK_ROOT="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/tfrecord_shards_00_01_${RUN_NAME}_${RUN_STAMP}"
 LOG_FILE="${LOG_DIR}/${RUN_NAME}_train_val_shards00_01_${RUN_STAMP}.log"
 
 TRAIN_TAG="${RUN_NAME}_TRAIN_tfrecord00_01"

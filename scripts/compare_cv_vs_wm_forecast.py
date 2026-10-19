@@ -14,8 +14,8 @@ the world_model package on PYTHONPATH (see slurm_compare_cv_vs_wm.sh).
 Example::
 
   python scripts/compare_cv_vs_wm_forecast.py \\
-    --cache_dir /zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz \\
-    --world_model_ckpt /zfsauton/scratch/sbellad/world_model/ckpts/world_model_20260912_170741/epoch_0500.pt \\
+    --cache_dir /data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz \\
+    --world_model_ckpt /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/ckpts/world_model_20260912_170741/epoch_0500.pt \\
     --max_batches 0 \\
     --device cuda
 """
@@ -34,7 +34,7 @@ import torch
 import torch.nn.functional as F
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-WM_ROOT = Path(os.environ.get("WORLD_MODEL_ROOT", "/zfsauton2/home/sbellad/world_model"))
+WM_ROOT = Path(os.environ.get("WORLD_MODEL_ROOT", "/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/world_model"))
 
 # Prefer the training package for cache loading + matching network code.
 for root in (WM_ROOT, REPO_ROOT):
@@ -56,12 +56,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--cache_dir",
         type=str,
-        default="/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz",
+        default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz",
     )
     p.add_argument(
         "--world_model_ckpt",
         type=str,
-        default="/zfsauton/scratch/sbellad/world_model/ckpts/world_model_20260912_170741/epoch_0500.pt",
+        default="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/ckpts/world_model_20260912_170741/epoch_0500.pt",
     )
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--batch_size", type=int, default=32)
@@ -89,7 +89,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--out_dir",
         type=str,
-        default="/zfsauton/scratch/sbellad/immediate_exp",
+        default="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp",
     )
     p.add_argument("--tag", type=str, default=None)
     return p.parse_args()

@@ -1,16 +1,16 @@
 #!/bin/bash
 #SBATCH --job-name=label_es_waymax
-#SBATCH --partition=general
-#SBATCH --qos=qos_general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:A6000:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G
 #SBATCH --time=0-06:00:00
-#SBATCH --chdir=/zfsauton2/home/sbellad/baseline/waymax_rs
-#SBATCH --output=/zfsauton/scratch/sbellad/es_discriminator/logs/label_es_waymax_%j.out
-#SBATCH --error=/zfsauton/scratch/sbellad/es_discriminator/logs/label_es_waymax_%j.err
+#SBATCH --chdir=/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs
+#SBATCH --output=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/es_discriminator/logs/label_es_waymax_%j.out
+#SBATCH --error=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/es_discriminator/logs/label_es_waymax_%j.err
 
 # Prepares the recorded fail1500 Diffusion-ES candidates for discriminator training:
 #   1. Waymax-exact overlap/offroad labels for all candidates and the logged expert
@@ -21,8 +21,8 @@
 # Submit from rhea or lov4:  sbatch slurm/train/label_es_waymax.sh
 set -euo pipefail
 
-ROOT=/zfsauton2/home/sbellad/baseline/waymax_rs
-SCRATCH=/zfsauton/scratch/sbellad
+ROOT=/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs
+SCRATCH=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad
 DATA=${SCRATCH}/es_discriminator/es_candidate_data/fail1500_es_diffusion_wm_mf_epoch0450_expected_independent_seed0/es_candidates
 TFRECORDS=${SCRATCH}/Diffusion_ES_sim/es_failure_subset_n1500_seed0/tfrecords/training
 OUT=${SCRATCH}/es_discriminator/real_es_labels

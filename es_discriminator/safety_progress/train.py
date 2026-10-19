@@ -101,7 +101,7 @@ def make_loss(progress_key: str, margin: float, max_pairs: int, safety_frac: flo
 
 
 def main() -> None:
-    p = common_parser(__doc__, default_out="/zfsauton/scratch/sbellad/es_discriminator/safety_progress/manual",
+    p = common_parser(__doc__, default_out="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/es_discriminator/safety_progress/manual",
                       default_name="safety_progress_v1")
     p.add_argument("--max-pairs", type=int, default=512, help="preference pairs per replan group per step")
     p.add_argument("--safety-frac", type=float, default=0.8,

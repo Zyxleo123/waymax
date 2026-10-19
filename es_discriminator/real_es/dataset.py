@@ -28,13 +28,13 @@ from es_discriminator.analyze_es_decisions import batch_files
 from es_discriminator.data import CONTEXT_KEYS, DataConfig
 
 WAYMAX_SUFFIX = ".labels_waymax.npz"
-DEFAULT_RUN = ("/zfsauton/scratch/sbellad/es_discriminator/es_candidate_data/"
+DEFAULT_RUN = ("/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/es_discriminator/es_candidate_data/"
                "fail1500_es_diffusion_wm_mf_epoch0450_expected_independent_seed0/es_candidates")
-DEFAULT_SPLIT = "/zfsauton/scratch/sbellad/es_discriminator/splits/fail1500_scenario_split_seed0.json"
-DEFAULT_INVALID = "/zfsauton/scratch/sbellad/es_discriminator/decision_analysis/invalid_at_start.json"
+DEFAULT_SPLIT = "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/es_discriminator/splits/fail1500_scenario_split_seed0.json"
+DEFAULT_INVALID = "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/es_discriminator/decision_analysis/invalid_at_start.json"
 _RUN_NAME = "fail1500_es_diffusion_wm_mf_epoch0450_expected_independent_seed0"
-DEFAULT_WM_DIR = f"/zfsauton/scratch/sbellad/es_discriminator/wm_predictions/{_RUN_NAME}"
-DEFAULT_EDGE_DIR = f"/zfsauton/scratch/sbellad/es_discriminator/road_edges/{_RUN_NAME}"
+DEFAULT_WM_DIR = f"/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/es_discriminator/wm_predictions/{_RUN_NAME}"
+DEFAULT_EDGE_DIR = f"/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/es_discriminator/road_edges/{_RUN_NAME}"
 WM_KEYS = ("wm_mean", "wm_cov", "wm_probs", "wm_valid", "wm_size", "wm_current")
 EDGE_KEYS = ("edge_xy", "edge_dir", "edge_mask")
 SPLITS = ("train", "val", "test")
