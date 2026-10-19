@@ -1,0 +1,9 @@
+{
+ "generated": "2026-10-19 03:59",
+ "run_dir": "/zfsauton/scratch/ishanj/anchor_wm/closed_loop_val/val0-9_es_anchorwm_ft_rule_hdg_20261019_014026_best_reward_scorer_offmargin_tiebreak",
+ "scenes_done": 0,
+ "expected": 1500,
+ "complete": false,
+ "splits": {},
+ "target": "10 shards"
+}

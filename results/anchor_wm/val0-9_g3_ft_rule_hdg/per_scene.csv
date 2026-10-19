@@ -1,0 +1,1 @@
+tfrecord,scenario,split,ft_rule_hdg scorer:success,ft_rule_hdg scorer:overlap,ft_rule_hdg scorer:offroad,ft_rule_hdg scorer:goal_reached,ft_rule_hdg scorer:final_goal_distance_m,MF+rule:success,MF+rule:overlap,MF+rule:offroad,MF+rule:goal_reached,MF+rule:final_goal_distance_m
