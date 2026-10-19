@@ -21,8 +21,8 @@ constant velocity (CV), privileged ground truth (GT), or a learned world model (
 ## 1. Setup
 
 ```bash
-cd /zfsauton2/home/sbellad/baseline/waymax_rs
-source /zfsauton/scratch/sbellad/miniconda3/bin/activate /zfsauton/scratch/sbellad/conda_envs/waymax_rs
+cd /data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs
+source /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/miniconda3/bin/activate /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/conda_envs/waymax_rs
 export PYTHONPATH=$PWD:$PYTHONPATH
 ```
 
@@ -66,11 +66,11 @@ viz/                            better Waymax visualisation (import viz as visua
 
 | Item | Path |
 |---|---|
-| WOMD tf_example | `/zfsauton/datasets/womd/tf_example/{training,validation}` |
-| Lane graphs | `/zfsauton/scratch/mineuih/waymax_rs/lane_graphs` |
-| Sim-state cache (WM training) | `/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz` |
+| WOMD tf_example | `/data/user_data/yixiz/autonlab/zfsauton/datasets/womd/tf_example/{training,validation}` |
+| Lane graphs | `/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs` |
+| Sim-state cache (WM training) | `/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz` |
 
-The old WOMD copy at `/zfsauton/scratch/eshau/womd` was deleted on 2026-10-02.
+The old WOMD copy at `/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd` was deleted on 2026-10-02.
 Several Python scripts still default to it — always pass the new path
 (`--tfrecord_dir`, `--tf_root`, `--tfrecord_path`) when calling them directly.
 
@@ -79,12 +79,12 @@ Several Python scripts still default to it — always pass the new path
 | Subset | Scenes | Where | Notes |
 |---|---|---|---|
 | `trainval` | all scenes of training shards 00000+00001 and validation shards 00000+00001 | symlinks created per run under the exp root | both splits run inside one job |
-| `fail1500` | 1500 scenes where FM-ES failed (offroad 658, overlap 679, goal 139, both 24), 187 shards | `/zfsauton/scratch/sbellad/immediate_exp/es_failure_subset_n1500_seed0` | main benchmark; GT-filtered variant n=1102 |
-| `probe250` | 250 scenes sampled from fail1500 | `/zfsauton/scratch/sbellad/Flow_matching_sim/fm_hparam_probe_n250_seed0` | FM hyper-parameter probe; `num_worlds` defaults to 1 |
+| `fail1500` | 1500 scenes where FM-ES failed (offroad 658, overlap 679, goal 139, both 24), 187 shards | `/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/es_failure_subset_n1500_seed0` | main benchmark; GT-filtered variant n=1102 |
+| `probe250` | 250 scenes sampled from fail1500 | `/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim/fm_hparam_probe_n250_seed0` | FM hyper-parameter probe; `num_worlds` defaults to 1 |
 
 Subset tfrecords are symlinks into the WOMD folder. Every job checks at start
 that all shards are readable on its node and aborts otherwise (a node without
-the `/zfsauton/datasets` mount used to finish with 0 scenes and print `DONE`).
+the `/data/user_data/yixiz/autonlab/zfsauton/datasets` mount used to finish with 0 scenes and print `DONE`).
 
 ---
 
@@ -160,7 +160,7 @@ results remain comparable.
 | trainval, WM | `world_model_sim/es_{diffusion,fm}_<wm tag>_r<refresh>/` |
 | probe250 | `Flow_matching_sim/fm_hparam_probe_runs/<tag>/` |
 
-All roots are under `/zfsauton/scratch/sbellad/`. WM tags carry the checkpoint
+All roots are under `/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/`. WM tags carry the checkpoint
 epoch and mode, e.g. `wm_mf_epoch0450_expected_independent`, `wm_det_epoch0500`,
 `wm_gau_epoch0370_k8`. Non-default ES/FM budgets are appended to the name
 (e.g. `_t0.3`, `_n30`, `_it6_rt5_p64_e8`).
@@ -301,15 +301,15 @@ bash slurm/train/vla.sh finetune --scene_tokenizer_ckpt P [--subgoal] [--tag T]
 WM hyper-parameters are environment variables (`EPOCHS`, `STEPS_PER_EPOCH`,
 `VAL_STEPS`, `BATCH_SIZE`, `ANCHOR_STEPS`, `HISTORY_STEPS`, `FUTURE_STEPS`,
 `HIDDEN_DIM`, `MAX_RANGE`, `NUM_MODES`, `SIGMA_EPS`, `CACHE_DIR`, `SAVE_DIR`, `WANDB_*`).
-Checkpoints: `/zfsauton/scratch/sbellad/world_model/{ckpts,ckpts_multifuture_gaussian}/`.
+Checkpoints: `/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/{ckpts,ckpts_multifuture_gaussian}/`.
 Policy training logs go to `<repo>/logs/`.
 
 Quick WM smoke test before a long run:
 
 ```bash
 cd multiFuture_GaussianWorldModel   # or train_deterministic_world_model
-python train_world_model.py --cache_dir /zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz \
-  --save_dir /zfsauton/scratch/sbellad/world_model/smoke --device cuda \
+python train_world_model.py --cache_dir /data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz \
+  --save_dir /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/smoke --device cuda \
   --epochs 1 --steps_per_epoch 10 --val_steps 5 --batch_size 4 --anchor_steps 20,30,40 --amp
 ```
 
@@ -366,7 +366,7 @@ Visualisation: `import viz as visualization` instead of `from waymax import visu
 - Submit from **rhea or lov4**; `sbatch` is denied on lov1.
 - Never use `sbatch --export=...` (breaks on this cluster); all scripts here
   pass settings as arguments after the script name or as inherited environment variables.
-- If a node cannot see `/zfsauton/datasets`, the job aborts within seconds and
+- If a node cannot see `/data/user_data/yixiz/autonlab/zfsauton/datasets`, the job aborts within seconds and
   names the node; resubmit with `--exclude <node>`.
 - Do not write scratch files to `/tmp`.
 
@@ -385,13 +385,13 @@ cd waymo-open-dataset
 python -m grpc_tools.protoc -I=src --python_out=src \
   src/waymo_open_dataset/*.proto src/waymo_open_dataset/protos/*.proto
 cd ../scripts
-python extract_roadgraph.py --split <training|validation> --output_dir /zfsauton/scratch/mineuih/waymax_rs/lane_graphs
+python extract_roadgraph.py --split <training|validation> --output_dir /data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs
 ```
 
 Goal-reaching experiment:
 
 ```bash
 python scripts/main_goal_reaching.py --checkpoint_path /path_to_ckpt/epoch_0100/ --split <training|validation> \
-  --exp_dir /path_to_save_results/exp/ --lane_graph_dir /zfsauton/scratch/mineuih/waymax_rs/lane_graphs \
+  --exp_dir /path_to_save_results/exp/ --lane_graph_dir /data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs \
   --num_worlds <N> --num_scenarios <N> --use_es
 ```

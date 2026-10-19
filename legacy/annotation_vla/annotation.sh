@@ -3,7 +3,7 @@ source ~/.bashrc
 conda activate waymax_rs
 
 DEVICE="${1:-0}"
-OUTPUT_DIR=/zfsauton/scratch/mineuih/waymax_rs/annotations/
+OUTPUT_DIR=/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/annotations/
 
 mkdir -p "$OUTPUT_DIR"
 
@@ -19,8 +19,8 @@ while [[ "$current_count" -lt "$target_count" ]]; do
 	# export CUDA_VISIBLE_DEVICES="$DEVICE"
 	# echo "Using CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 	python -m language.manual_annotation.annotation \
-		--tfrecord_dir /zfsauton/scratch/mineuih/womd/training/ \
-		--lane_graph_dir /zfsauton/scratch/mineuih/waymax_rs/lane_graphs/ \
+		--tfrecord_dir /data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/womd/training/ \
+		--lane_graph_dir /data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs/ \
 		--output_dir "$OUTPUT_DIR" \
 		--max_tfrecords 5 \
 		--cpu

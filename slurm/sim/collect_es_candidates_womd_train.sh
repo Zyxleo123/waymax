@@ -1,17 +1,17 @@
 #!/bin/bash
 #SBATCH --job-name=collect_womd
-#SBATCH --partition=general
-#SBATCH --qos=qos_general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:a6000:1
+#SBATCH --gres=gpu:A6000:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --time=16:00:00
 #SBATCH --array=2-11%2
-#SBATCH --chdir=/zfsauton2/home/sbellad/baseline/waymax_rs
-#SBATCH --output=/zfsauton/scratch/sbellad/es_discriminator/logs/collect_womd_%A_%a.out
-#SBATCH --error=/zfsauton/scratch/sbellad/es_discriminator/logs/collect_womd_%A_%a.err
+#SBATCH --chdir=/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs
+#SBATCH --output=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/es_discriminator/logs/collect_womd_%A_%a.out
+#SBATCH --error=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/es_discriminator/logs/collect_womd_%A_%a.err
 
 # Discriminator training data on whole WOMD training shards 00002-00011 (one array task per
 # shard, 2 at a time). Same planner as collect_es_candidates_fail1500.sh: Diffusion-ES with
@@ -39,13 +39,13 @@
 #   wm_predictions/*.wm.npz, road_edges/*.edges.npz, analysis/scenes.npz, job_<id>.log
 set -euo pipefail
 
-ROOT=/zfsauton2/home/sbellad/baseline/waymax_rs
-SCRATCH=/zfsauton/scratch/sbellad
+ROOT=/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs
+SCRATCH=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad
 OUT_ROOT=${SCRATCH}/es_discriminator/es_candidate_data
-WOMD_TRAIN=/zfsauton/datasets/womd/tf_example/training
+WOMD_TRAIN=/data/user_data/yixiz/autonlab/zfsauton/datasets/womd/tf_example/training
 DIFFUSION_CKPT=${SCRATCH}/train_diffusion/diffusion_baseline_baseline_20260810_144559/epoch_0500
 MF_WM_CKPT=${SCRATCH}/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20260916_200620/epoch_0450.pt
-LANE_GRAPH_DIR=/zfsauton/scratch/mineuih/waymax_rs/lane_graphs
+LANE_GRAPH_DIR=/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs
 SEED=0
 RUN_NAME=womd_train_s02_11_es_diffusion_wm_mf_epoch0450_expected_independent_seed${SEED}
 TARGETS=${OUT_ROOT}/${RUN_NAME}/target_scenarios.json

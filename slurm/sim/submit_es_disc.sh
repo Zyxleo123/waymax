@@ -44,12 +44,12 @@
 #   ES_PACK=1 bash ...         # one config per GPU task (default: both groups share one GPU)
 #   ES_PREEMPT_IDX=0,1,2 bash ...  # these task ids go to preempt (qos_preempt caps 10 submitted per user)
 set -euo pipefail
-ROOT="/zfsauton2/home/yixiz/waymax_rs_es_idmfix"; cd "$ROOT"
+ROOT="/home/yixiz/waymax_rs_es_idmfix"; cd "$ROOT"
 for v in $(compgen -v SLURM_); do unset "$v"; done
 source "$ROOT/slurm/sim/es_disc_common.sh"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
 SMOKE="${ES_SMOKE:-}"
-SCR=/zfsauton/scratch/yixiz/waymax_rs/es_posthoc
+SCR=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/es_posthoc
 ES_SUBSET="${ES_SUBSET:-fail1500}"
 case "$ES_SUBSET" in
   fail1500) SUBSET="${ES_SUBSET_DIR:-$SCR/fail1500_subset_g2}"; SPLIT=training; EXPECT=1500 ;;
@@ -59,7 +59,7 @@ esac
 [[ -s "$SUBSET/manifest.json" ]] || { echo "FATAL: $SUBSET has no manifest.json (build it with the es_posthoc prep job)" >&2; exit 1; }
 mapfile -t GROUP_DIRS < <(find "$SUBSET" -maxdepth 1 -type d -name 'group_*' | sort -V)
 (( ${#GROUP_DIRS[@]} > 0 )) || { echo "FATAL: no group_* under $SUBSET" >&2; exit 1; }
-DISC="${ES_DISC_CKPT:-/zfsauton/scratch/sbellad/es_discriminator/safety_progress/safety_progress_v3_20261016_155456_86103/best.pt}"
+DISC="${ES_DISC_CKPT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/es_discriminator/safety_progress/safety_progress_v3_20261016_155456_86103/best.pt}"
 DISC_WM="${ES_DISC_WM_CKPT:-$ES_DEFAULT_DISC_WM}"
 POLICY="${ES_DIFFUSION_CKPT:-$ES_DEFAULT_POLICY}"
 MF_WM="${ES_MF_WM_CKPT:-$ES_DEFAULT_MF_WM}"
@@ -125,7 +125,7 @@ if [[ -n "$SMOKE" ]]; then
   for s in $SPECS; do cfgs+=("$(write_cfg "${s%%:*}" "${s#*:}" "$g0")"); done
   { kv ES_SUBTASKS "${cfgs[*]}"; kv ES_SUBTASK_MODE seq; } > "$OUT/env/smoke.env"
   SB=(--time=6:00:00)
-  [[ -n "${ES_EXCLUDE-gpu30}" ]] && SB+=(--exclude="${ES_EXCLUDE-gpu30}")
+  [[ -n "${ES_EXCLUDE-}" ]] && SB+=(--exclude="${ES_EXCLUDE-}")
   # shellcheck disable=SC2206
   [[ -n "${ES_SMOKE_SB:-}" ]] && SB+=($ES_SMOKE_SB)
   { kv ES_MON_SEC 60; } >> "$OUT/env/smoke.env"
@@ -170,7 +170,7 @@ for ((t = 0; t < N; t++)); do [[ ",$PRE_IDX," == *",$t,"* ]] || GEN_IDX="${GEN_I
 for t in ${PRE_IDX//,/ }; do (( t >= 0 && t < N )) || { echo "FATAL: ES_PREEMPT_IDX has $t, tasks are 0-$((N - 1))" >&2; exit 1; }; done
 CPUS=$(( 8 * P )); MEM="$(( ${ES_MEM_PER_CFG_GB:-48} * P ))G"
 COMMON=(--cpus-per-task="$CPUS" --mem="$MEM")
-[[ -n "${ES_EXCLUDE-gpu30}" ]] && COMMON+=(--exclude="${ES_EXCLUDE-gpu30}")
+[[ -n "${ES_EXCLUDE-}" ]] && COMMON+=(--exclude="${ES_EXCLUDE-}")
 DEPS=()
 if [[ -n "$GEN_IDX" ]]; then
   A1=$(sb --parsable "${COMMON[@]}" --array="$GEN_IDX" slurm/sim/es_disc.sbatch "$OUT/env")
@@ -178,9 +178,9 @@ if [[ -n "$GEN_IDX" ]]; then
   DEPS+=("$A1")
 fi
 if [[ -n "$PRE_IDX" ]]; then
-  A2=$(sb --parsable "${COMMON[@]}" --partition=preempt --qos=qos_preempt --array="$PRE_IDX" \
+  A2=$(sb --parsable "${COMMON[@]}" --partition=preempt --qos=preempt_qos --array="$PRE_IDX" \
     slurm/sim/es_disc.sbatch "$OUT/env")
-  echo "+ sbatch ${COMMON[*]} --partition=preempt --qos=qos_preempt --array=$PRE_IDX slurm/sim/es_disc.sbatch $OUT/env -> $A2 (preempt)"
+  echo "+ sbatch ${COMMON[*]} --partition=preempt --qos=preempt_qos --array=$PRE_IDX slurm/sim/es_disc.sbatch $OUT/env -> $A2 (preempt)"
   DEPS+=("$A2")
 fi
 
@@ -194,7 +194,7 @@ PAIRS="$PAIRS,wm_mf_tb:wm_mf,wmI_mf_tb:wmI_mf,wmI_mf_tb:wm_mf_tb,wmI_mf_tb:wm_mf
   kv ES_ARMS "diff,diff_posthoc,gt,cv,cv_posthoc,wm_mf,wm_mf_posthoc,wm_mf_disc,wm_mf_disc_posthoc,wmI_mf,wmI_mf_posthoc,wmI_mf_disc_posthoc,wm_mf_tb,wmI_mf_tb"
   kv ES_VIEWS "$VIEWS"; kv ES_PAIRS "$PAIRS"; kv ES_EXPECT "$EXPECT"
   # fail1500 scenes are in the discriminator's own training set: slice by its split
-  [[ "$ES_SUBSET" == fail1500 ]] && kv ES_SPLIT_JSON "${ES_DISC_SPLIT_JSON:-/zfsauton/scratch/sbellad/es_discriminator/training_sets/fail1500_plus_womd_train_s02_11/scenario_split_seed0.json}"
+  [[ "$ES_SUBSET" == fail1500 ]] && kv ES_SPLIT_JSON "${ES_DISC_SPLIT_JSON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/es_discriminator/training_sets/fail1500_plus_womd_train_s02_11/scenario_split_seed0.json}"
   true; } > "$OUT/compare.env"
 DEP="afterany:$(IFS=:; echo "${DEPS[*]}")"
 CID=$(sb --parsable --dependency="$DEP" slurm/sim/es_disc_cpu.sbatch "$OUT/compare.env")

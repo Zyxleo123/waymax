@@ -25,19 +25,19 @@ def parse_args() -> argparse.Namespace:
 	parser.add_argument(
 		"--cache_dir",
 		type=str,
-		default="/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz",
+		default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz",
 		help="Directory containing training_tfexample cache NPZ files.",
 	)
 	parser.add_argument(
 		"--instruction_dir",
 		type=str,
-		default="/zfsauton/scratch/mineuih/waymax_rs/annotations",
+		default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/annotations",
 		help="Directory containing tfrecord_{i}.jsonl and tfrecord_{i}.idx.json.",
 	)
 	parser.add_argument(
 		"--out_dir",
 		type=str,
-		default="/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz",
+		default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz",
 		help="Directory to write updated cache NPZ files.",
 	)
 	parser.add_argument(

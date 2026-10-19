@@ -35,12 +35,12 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 
-DEFAULT_EXP = Path("/zfsauton/scratch/sbellad/immediate_exp")
-DEFAULT_FM_ROOT = Path("/zfsauton/scratch/sbellad/Flow_matching_sim")
+DEFAULT_EXP = Path("/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp")
+DEFAULT_FM_ROOT = Path("/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim")
 DEFAULT_OUT = DEFAULT_FM_ROOT / "fm_hparam_probe_n250_seed0"
 DEFAULT_FAIL1500 = DEFAULT_EXP / "es_failure_subset_n1500_seed0"
-DEFAULT_TF = "/zfsauton/scratch/eshau/womd/tf_example/training"
-DEFAULT_LG = "/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
+DEFAULT_TF = "/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training"
+DEFAULT_LG = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
 DEFAULT_GT_FILTER = (
     DEFAULT_EXP / "gt_filtered_fail1500_20260911_170730" / "gt_filter" / "gt_filter_summary.json"
 )

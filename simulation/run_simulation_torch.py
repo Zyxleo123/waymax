@@ -27,9 +27,9 @@ from train_diffusion_torch.utils.infer import load_model_for_inference_torch
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--diffusion_ckpt_path", type=str, required=True)
-    parser.add_argument("--tfrecord_dir", type=str, default="/zfsauton/scratch/eshau/womd/tf_example/")
+    parser.add_argument("--tfrecord_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/")
     parser.add_argument("--split", type=str, default="training", choices=["training", "validation"])
-    parser.add_argument("--exp_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/exp")
+    parser.add_argument("--exp_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/exp")
     parser.add_argument("--planner", type=str, default="diffusion", choices=["diffusion", "log-replay"])
     parser.add_argument("--start_timestep", type=int, default=10)
     parser.add_argument("--mask_goal", action="store_true", default=False)

@@ -29,7 +29,7 @@ import numpy as np
 
 from .deploy import DiscriminatorScorer
 
-DEFAULT_CHECKPOINT = ("/zfsauton/scratch/sbellad/es_discriminator/safety_progress/"
+DEFAULT_CHECKPOINT = ("/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/es_discriminator/safety_progress/"
                       "safety_progress_full_gaussian_wm_20261013_090539_81674/best.pt")
 ANCHOR_TOL_M = 0.05
 ANCHOR_TOL_RAD = 0.01

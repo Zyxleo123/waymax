@@ -8,7 +8,7 @@ Expects data from::
 Run::
 
   streamlit run apps/diff_vs_fm_fail_viewer/app.py \\
-    -- --data_dir /zfsauton/scratch/sbellad/immediate_exp/diff_ok_fm_fail_viewer_gt
+    -- --data_dir /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/diff_ok_fm_fail_viewer_gt
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from pathlib import Path
 
 import streamlit as st
 
-DEFAULT_DATA_DIR = "/zfsauton/scratch/sbellad/immediate_exp/diff_ok_fm_fail_viewer_gt"
+DEFAULT_DATA_DIR = "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/diff_ok_fm_fail_viewer_gt"
 
 
 def parse_known_args() -> argparse.Namespace:

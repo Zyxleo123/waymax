@@ -56,9 +56,9 @@ from es_discriminator.real_es.check_alignment import replaced_state
 
 REPO = Path(__file__).resolve().parents[2]
 WM_PKG = REPO / "multiFuture_GaussianWorldModel"
-DEFAULT_CKPT = ("/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/"
+DEFAULT_CKPT = ("/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/"
                 "multiFuture_GaussianWorldModel_20260916_200620/epoch_0450.pt")
-DEFAULT_TFRECORDS = "/zfsauton/scratch/sbellad/Diffusion_ES_sim/es_failure_subset_n1500_seed0/tfrecords/training"
+DEFAULT_TFRECORDS = "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Diffusion_ES_sim/es_failure_subset_n1500_seed0/tfrecords/training"
 NUM_AGENTS = 32
 NUM_EDGES = 256
 EDGE_BOX = (-25.0, 100.0, 40.0)        # behind, ahead, half-width (m)

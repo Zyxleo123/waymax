@@ -1,14 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=es_idm_cpu
-#SBATCH --partition=cpu
-#SBATCH --qos=qos_cpu
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_cpu_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8G
 #SBATCH --time=1:00:00
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/es_idmfix/slurm-%x-%j.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/es_idmfix/slurm-%x-%j.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/es_idmfix/slurm-%x-%j.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/es_idmfix/slurm-%x-%j.out
 #
 # CPU side of slurm/sim/submit_es_disc.sh:
 #   ES_CPU_MODE=compare    paired arm comparison per evaluator view (scripts/compare_es_disc.py);
@@ -24,7 +24,7 @@
 set -euo pipefail
 
 ES_COMMON="${SLURM_SUBMIT_DIR:-/nonexistent}/slurm/sim/es_disc_common.sh"
-[[ -r "$ES_COMMON" ]] || ES_COMMON=/zfsauton2/home/yixiz/waymax_rs_es_idmfix/slurm/sim/es_disc_common.sh
+[[ -r "$ES_COMMON" ]] || ES_COMMON=/home/yixiz/waymax_rs_es_idmfix/slurm/sim/es_disc_common.sh
 [[ -r "$ES_COMMON" ]] || { echo "FATAL: shared preamble $ES_COMMON missing" >&2; exit 1; }
 # shellcheck disable=SC1090
 source "$ES_COMMON"

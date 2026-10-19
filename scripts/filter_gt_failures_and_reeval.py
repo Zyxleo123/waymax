@@ -12,7 +12,7 @@ Usage (from repo root, waymax_rs conda env)::
 
 Outputs under::
 
-  /zfsauton/scratch/sbellad/immediate_exp/gt_filtered_es_metrics_<stamp>/
+  /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/gt_filtered_es_metrics_<stamp>/
 """
 
 from __future__ import annotations
@@ -45,9 +45,9 @@ from simulation.evaluation_utils import (
     rollout_predicted_trajectories_with_metrics,
 )
 
-DEFAULT_TF_ROOT = "/zfsauton/scratch/eshau/womd/tf_example"
-DEFAULT_EXP_ROOT = "/zfsauton/scratch/sbellad/immediate_exp"
-DEFAULT_OUT_ROOT = "/zfsauton/scratch/sbellad/immediate_exp"
+DEFAULT_TF_ROOT = "/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example"
+DEFAULT_EXP_ROOT = "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp"
+DEFAULT_OUT_ROOT = "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp"
 
 EXPERIMENT_RUNS = {
     "diffusion_es_cv": "es_diffusion_cv",

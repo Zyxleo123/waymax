@@ -11,15 +11,15 @@
 #
 set -euo pipefail
 
-ROOT="${WAYMAX_RS_ROOT:-/zfsauton2/home/sbellad/baseline/waymax_rs}"
+ROOT="${WAYMAX_RS_ROOT:-/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs}"
 SCRIPT="${ROOT}/legacy/sim/slurm_es_failure_subset_1500.sh"
-LOG_DIR="/zfsauton/scratch/sbellad/Flow_matching_sim/logs"
+LOG_DIR="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim/logs"
 mkdir -p "${LOG_DIR}"
 
 echo "Submitting FM-ES fail1500 (it4, rs=20, pop 64 / elite 8, t=0.2):"
-echo "  CV     -> /zfsauton/scratch/sbellad/Flow_matching_sim/es_fm_cv_fail1500_it4_rs20_p64_e8/"
-echo "  WM det -> /zfsauton/scratch/sbellad/Flow_matching_sim/es_fm_wm_det_epoch0500_fail1500_it4_rs20_p64_e8/"
-echo "  WM mf  -> /zfsauton/scratch/sbellad/Flow_matching_sim/es_fm_wm_mf_epoch0450_expected_independent_fail1500_it4_rs20_p64_e8/"
+echo "  CV     -> /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim/es_fm_cv_fail1500_it4_rs20_p64_e8/"
+echo "  WM det -> /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim/es_fm_wm_det_epoch0500_fail1500_it4_rs20_p64_e8/"
+echo "  WM mf  -> /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim/es_fm_wm_mf_epoch0450_expected_independent_fail1500_it4_rs20_p64_e8/"
 echo
 
 jid_cv=$(sbatch --parsable --job-name=es_fm_cv_fail1500 \

@@ -22,17 +22,17 @@
 #   ES_GROUP_DIR / ES_SPLIT / ES_NUM_SCENARIOS / ES_WORLD_DT_METHOD / ES_SAVE_TRAJ / ES_SEED
 #   ES_NUM_WORLDS / ES_POP / ES_ELITE / ES_IT / ES_RESAMPLE_TIMESTEPS / ES_REPLAN_INTERVAL
 
-ES_ROOT="${ES_ROOT:-/zfsauton2/home/yixiz/waymax_rs_es_idmfix}"
-ES_PYTHON="${ES_PYTHON:-/zfsauton/scratch/sbellad/conda_envs/waymax_rs/bin/python}"
-ES_LOG_DIR="${ES_LOG_DIR:-/zfsauton2/home/yixiz/waymax_rs/logs/es_idmfix}"
+ES_ROOT="${ES_ROOT:-/home/yixiz/waymax_rs_es_idmfix}"
+ES_PYTHON="${ES_PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/conda_envs/waymax_rs/bin/python}"
+ES_LOG_DIR="${ES_LOG_DIR:-/home/yixiz/waymax_rs/logs/es_idmfix}"
 # mineuih goal-conditioned policy (mini-hong/waymax_rs@new_model architecture + map sampling).
 # Use epoch_1000 explicitly: its sibling "latest" is a stale copy of epoch_0500 (same commit
 # timestamp and bytes), and a bare run-dir path resolves to that "latest".
-ES_DEFAULT_POLICY=/zfsauton/scratch/mineuih/waymax_rs/new_checkpoints/train_diffusion/goal_cond_diffusion_policy/epoch_1000
-ES_DEFAULT_MF_WM=/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20260916_200620/latest.pt
-ES_DEFAULT_DISC_WM=/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20260916_200620/epoch_0450.pt
+ES_DEFAULT_POLICY=/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/new_checkpoints/train_diffusion/goal_cond_diffusion_policy/epoch_1000
+ES_DEFAULT_MF_WM=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20260916_200620/latest.pt
+ES_DEFAULT_DISC_WM=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20260916_200620/epoch_0450.pt
 # Ishan Jain's multi-future WM (mini-hong/waymax_rs@ishan code, vendored in multiFuture_GaussianWorldModel_ishan/).
-ES_DEFAULT_ISHAN_WM=/zfsauton/scratch/ishanj/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20261005_092950/epoch_0450.pt
+ES_DEFAULT_ISHAN_WM=/data/user_data/yixiz/autonlab/zfsauton/scratch/ishanj/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20261005_092950/epoch_0450.pt
 
 # es_load_args ARG...: an env FILE is sourced, an array DIR resolves to <dir>/<task>.env,
 # VAR=value is exported. Config never travels by `sbatch --export` (it strands jobs here).
@@ -93,7 +93,7 @@ es_run_one() {
   echo "policy=$policy"
 
   # Every shard of this group must be readable on this node (a node without the
-  # /zfsauton/datasets mount would otherwise finish with 0 scenes and exit 0).
+  # /data/user_data/yixiz/autonlab/zfsauton/datasets mount would otherwise finish with 0 scenes and exit 0).
   local f n_bad=0
   for f in "$group_dir"/tfrecords/"$split"/*; do [[ -r "$f" ]] || { echo "unreadable: $f"; n_bad=$((n_bad + 1)); }; done
   if (( n_bad > 0 )); then echo "FATAL: $n_bad shards unreadable on $(hostname)" >&2; return 1; fi
@@ -139,7 +139,7 @@ es_run_one() {
     --planner "$planner" --other_agents "$view" --world_dt_method "$dt_method" \
     --diffusion_ckpt_path "$policy" --resample_timesteps "${ES_RESAMPLE_TIMESTEPS:-5}" \
     --tfrecord_dir "$group_dir/tfrecords" --split "$split" \
-    --lane_graph_dir "${ES_LANE_GRAPH_DIR:-/zfsauton/scratch/mineuih/waymax_rs/lane_graphs}" \
+    --lane_graph_dir "${ES_LANE_GRAPH_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs}" \
     --exp_dir "$out/$view/$arm" --start_from "$out_dir" --tag "$arm" \
     --num_worlds "${ES_NUM_WORLDS:-5}" --num_scenarios "${ES_NUM_SCENARIOS:-100000}" --seed "${ES_SEED:-0}" \
     --population_size "${ES_POP:-64}" --elite_size "${ES_ELITE:-8}" --num_es_iterations "${ES_IT:-4}" \

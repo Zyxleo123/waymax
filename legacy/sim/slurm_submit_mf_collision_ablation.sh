@@ -18,8 +18,8 @@
 #   VARIANTS="gaussian_learned_M08" bash slurm_submit_mf_collision_ablation.sh es   # pick variants
 #
 # Outputs:
-#   es    -> /zfsauton/scratch/sbellad/immediate_exp/mf_multiSampling_collision_ablation/<variant>/seed_<SEED>/
-#   es_fm -> /zfsauton/scratch/sbellad/Flow_matching_sim/mf_multiSampling_collision_ablation/<variant>/seed_<SEED>/
+#   es    -> /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/mf_multiSampling_collision_ablation/<variant>/seed_<SEED>/
+#   es_fm -> /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim/mf_multiSampling_collision_ablation/<variant>/seed_<SEED>/
 set -euo pipefail
 
 PLANNERS=("$@")
@@ -32,7 +32,7 @@ for p in "${PLANNERS[@]}"; do
   fi
 done
 
-ROOT="${WAYMAX_RS_ROOT:-/zfsauton2/home/sbellad/baseline/waymax_rs}"
+ROOT="${WAYMAX_RS_ROOT:-/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs}"
 SCRIPT="${ROOT}/legacy/sim/slurm_es_failure_subset_1500.sh"
 
 export SEED="${SEED:-0}"
@@ -51,10 +51,10 @@ VARIANTS="${VARIANTS:-${DEFAULT_VARIANTS}}"
 
 for PLANNER in "${PLANNERS[@]}"; do
   if [[ "${PLANNER}" == "es_fm" ]]; then
-    ABL_ROOT="/zfsauton/scratch/sbellad/Flow_matching_sim/mf_multiSampling_collision_ablation"
+    ABL_ROOT="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim/mf_multiSampling_collision_ablation"
     PTAG="fm"
   else
-    ABL_ROOT="/zfsauton/scratch/sbellad/immediate_exp/mf_multiSampling_collision_ablation"
+    ABL_ROOT="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/mf_multiSampling_collision_ablation"
     PTAG="diff"
   fi
   [[ -n "${MF_ABLATION_SUBDIR:-}" ]] && ABL_ROOT="${ABL_ROOT}/${MF_ABLATION_SUBDIR}"

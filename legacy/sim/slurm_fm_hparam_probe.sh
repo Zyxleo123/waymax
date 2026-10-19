@@ -1,23 +1,23 @@
 #!/bin/bash
 #SBATCH --job-name=fm_hparam_probe
-#SBATCH --partition=general
-#SBATCH --qos=qos_general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --time=2-00:00:00
-#SBATCH --chdir=/zfsauton2/home/sbellad/baseline/waymax_rs
-#SBATCH --output=/zfsauton/scratch/sbellad/Flow_matching_sim/logs/fm_hparam_probe_%j.out
-#SBATCH --error=/zfsauton/scratch/sbellad/Flow_matching_sim/logs/fm_hparam_probe_%j.err
+#SBATCH --chdir=/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs
+#SBATCH --output=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim/logs/fm_hparam_probe_%j.out
+#SBATCH --error=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim/logs/fm_hparam_probe_%j.err
 
 # FM-ES hyperparam probe on a fixed GT subset (default n=250).
-# ALL outputs go under /zfsauton/scratch/sbellad/Flow_matching_sim
+# ALL outputs go under /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim
 #
 # Usage:
 #   # 0) once: create log dir (script also mkdir -p)
-#   mkdir -p /zfsauton/scratch/sbellad/Flow_matching_sim/logs
+#   mkdir -p /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim/logs
 #
 #   # 1) build the shared n=250 subset (CPU ok; no GPU needed)
 #   sbatch --job-name=fm_probe_build --gres=gpu:0 slurm_fm_hparam_probe.sh build
@@ -48,10 +48,10 @@
 #
 set -euo pipefail
 
-ROOT="${WAYMAX_RS_ROOT:-/zfsauton2/home/sbellad/baseline/waymax_rs}"
+ROOT="${WAYMAX_RS_ROOT:-/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs}"
 cd "${ROOT}"
 
-FM_ROOT="${FM_SIM_ROOT:-/zfsauton/scratch/sbellad/Flow_matching_sim}"
+FM_ROOT="${FM_SIM_ROOT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim}"
 LOG_DIR="${FM_ROOT}/logs"
 PROBE_N="${PROBE_N:-250}"
 PROBE_SEED="${PROBE_SEED:-0}"
@@ -63,9 +63,9 @@ RUNS_DIR="${RUNS_DIR:-${FM_ROOT}/fm_hparam_probe_runs}"
 TARGET_JSON="${SUBSET_DIR}/target_scenarios.json"
 TFRECORD_DIR="${SUBSET_DIR}/tfrecords"
 
-LANE_GRAPH_DIR="/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
-DIFFUSION_CKPT="/zfsauton/scratch/sbellad/diffusion/diffusion_baseline_baseline_20260810_144559/epoch_0500"
-FM_CKPT="/zfsauton/scratch/mineuih/waymax_rs/checkpoints/pretrain_flow_matching/pretrain_fm_policy_20260828_011255/epoch_0500"
+LANE_GRAPH_DIR="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
+DIFFUSION_CKPT="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/diffusion/diffusion_baseline_baseline_20260810_144559/epoch_0500"
+FM_CKPT="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/checkpoints/pretrain_flow_matching/pretrain_fm_policy_20260828_011255/epoch_0500"
 
 POPULATION_SIZE="${POPULATION_SIZE:-64}"
 ELITE_SIZE="${ELITE_SIZE:-8}"
@@ -91,8 +91,8 @@ set --
 
 mkdir -p "${LOG_DIR}" "${RUNS_DIR}" "${FM_ROOT}"
 
-CONDA_ROOT="/zfsauton/scratch/sbellad/miniconda3"
-WAYMAX_ENV="/zfsauton/scratch/sbellad/conda_envs/waymax_rs"
+CONDA_ROOT="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/miniconda3"
+WAYMAX_ENV="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/conda_envs/waymax_rs"
 activate_env() {
   if [[ "${CONDA_PREFIX:-}" != "${WAYMAX_ENV}" ]]; then
     set +u

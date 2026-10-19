@@ -67,19 +67,19 @@ from viz.utils import plot_numpy_bounding_boxes  # noqa: E402
 from viz.viz import _index_pytree, plot_roadgraph_points  # noqa: E402
 
 DEFAULT_COMPARE_DIR = (
-    "/zfsauton/scratch/sbellad/immediate_exp/cv_wm_gt_compare_20260915_175107"
+    "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/cv_wm_gt_compare_20260915_175107"
 )
 DEFAULT_TFRECORD_DIR = (
-    "/zfsauton/scratch/sbellad/immediate_exp/es_failure_subset_n1500_seed0/tfrecords/training"
+    "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/es_failure_subset_n1500_seed0/tfrecords/training"
 )
-DEFAULT_LANE_GRAPH_DIR = "/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
+DEFAULT_LANE_GRAPH_DIR = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
 DEFAULT_DIFFUSION_CKPT = (
-    "/zfsauton/scratch/sbellad/diffusion/diffusion_baseline_baseline_20260810_144559/epoch_0500"
+    "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/diffusion/diffusion_baseline_baseline_20260810_144559/epoch_0500"
 )
 DEFAULT_WM_CKPT = (
-    "/zfsauton/scratch/sbellad/world_model/ckpts/world_model_20260912_170741/epoch_0500.pt"
+    "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/ckpts/world_model_20260912_170741/epoch_0500.pt"
 )
-DEFAULT_OUT_ROOT = "/zfsauton/scratch/sbellad/immediate_exp"
+DEFAULT_OUT_ROOT = "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp"
 
 COLOR_GT = np.array([0.12, 0.55, 0.18], dtype=np.float32)
 COLOR_CV = np.array([0.12, 0.38, 0.88], dtype=np.float32)

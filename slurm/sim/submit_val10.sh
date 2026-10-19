@@ -2,10 +2,10 @@
 # All planners on WOMD validation shards 00000-00009 (2916 scenes; 2895 run, since
 # each shard's leftover partial batch of 5 is skipped). 8 jobs per --other_agents value:
 #
-#   diffusion only                -> /zfsauton/scratch/sbellad/diffusion_sim/diffusion_only_val10_seed0
-#   flow matching only            -> /zfsauton/scratch/sbellad/Flow_matching_sim/fm_only_val10_seed0
-#   diffusion-ES  gt/cv/wm_mf     -> /zfsauton/scratch/sbellad/Diffusion_ES_sim/es_diffusion_*_val10
-#   flow-matching-ES gt/cv/wm_mf  -> /zfsauton/scratch/sbellad/Flow_matching_sim/es_fm_*_val10_it6_rs40_p64_e8
+#   diffusion only                -> /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/diffusion_sim/diffusion_only_val10_seed0
+#   flow matching only            -> /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim/fm_only_val10_seed0
+#   diffusion-ES  gt/cv/wm_mf     -> /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Diffusion_ES_sim/es_diffusion_*_val10
+#   flow-matching-ES gt/cv/wm_mf  -> /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim/es_fm_*_val10_it6_rs40_p64_e8
 #
 # wm_mf = multi-future world model, expected-independence scoring. Submit from rhea or lov4:
 #

@@ -55,7 +55,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tfrecord_dir",
         type=str,
-        default="/zfsauton/scratch/eshau/womd/tf_example/",
+        default="/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/",
     )
     parser.add_argument(
         "--split", type=str, default="training", choices=["training", "validation"]
@@ -63,12 +63,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--lane_graph_dir",
         type=str, 
-        default="/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
+        default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
     )
     parser.add_argument(
         "--exp_dir",
         type=str, 
-        default="/zfsauton/scratch/mineuih/waymax_rs/exp"
+        default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/exp"
     )
     parser.add_argument("--planner", type=str, default="diffusion",
                          choices=["diffusion", "es", "es_fm", "vla", "log-replay", "temporal-vla", "fm"])
@@ -214,7 +214,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--discriminator_wm_ckpt",
         type=str,
-        default="/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/"
+        default="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/"
         "multiFuture_GaussianWorldModel_20260916_200620/epoch_0450.pt",
         help="Frozen multi-future Gaussian WM feeding the discriminator (reused from the planner when "
         "--other_agent_forecast wm loads the same checkpoint).",

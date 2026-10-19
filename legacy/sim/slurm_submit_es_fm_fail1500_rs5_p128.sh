@@ -7,10 +7,10 @@
 #
 set -euo pipefail
 
-ROOT="${WAYMAX_RS_ROOT:-/zfsauton2/home/sbellad/baseline/waymax_rs}"
+ROOT="${WAYMAX_RS_ROOT:-/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs}"
 SCRIPT_IT4="${ROOT}/legacy/sim/slurm_es_fm_fail1500_it4_rs5_p128.sh"
 SCRIPT_IT6="${ROOT}/legacy/sim/slurm_es_fm_fail1500_it6_rs5_p128.sh"
-LOG_DIR="/zfsauton/scratch/sbellad/Flow_matching_sim/logs"
+LOG_DIR="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim/logs"
 mkdir -p "${LOG_DIR}"
 
 for s in "${SCRIPT_IT4}" "${SCRIPT_IT6}"; do
@@ -24,8 +24,8 @@ echo "Submitting FM-ES fail1500 GT:"
 echo "  it4_rs5_p128_e16: iters=4 resample=5 pop=128 elite=16 t=0.2"
 echo "  it6_rs5_p128_e16: iters=6 resample=5 pop=128 elite=16 t=0.2"
 echo "  Outputs:"
-echo "    /zfsauton/scratch/sbellad/Flow_matching_sim/es_fm_gt_fail1500_it4_rs5_p128_e16/"
-echo "    /zfsauton/scratch/sbellad/Flow_matching_sim/es_fm_gt_fail1500_it6_rs5_p128_e16/"
+echo "    /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim/es_fm_gt_fail1500_it4_rs5_p128_e16/"
+echo "    /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim/es_fm_gt_fail1500_it6_rs5_p128_e16/"
 echo
 
 jid_it4=$(sbatch --parsable \
