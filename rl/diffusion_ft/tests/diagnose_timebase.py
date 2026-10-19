@@ -73,7 +73,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--tfrecord", type=str,
-                    default="/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord")
+                    default="/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord")
     ap.add_argument("--n_scenes", type=int, default=8)
     ap.add_argument("--anchor", type=int, default=10, help="init_steps - 1")
     ap.add_argument("--predict_horizon", type=int, default=25)

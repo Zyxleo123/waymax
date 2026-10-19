@@ -1,20 +1,21 @@
 #!/bin/bash
 #SBATCH --job-name=hrd_risk
-#SBATCH --partition=general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_cpu_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=1:00:00
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%j.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%j.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%j.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%j.out
 #
 # Phase 2, stage 2: fit the risk model on the expert-clean labelled scenes and
 # score every scored shard. Fit and score read the SAME descriptor directory so
 # the feature definitions cannot drift between them.
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 mkdir -p "$ROOT/logs/hardness"
 
@@ -27,7 +28,7 @@ for arg in "$@"; do
   fi
 done
 
-export PYTHON="${PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
+export PYTHON="${PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 export PYTHONUNBUFFERED=1
 
 HRD_OUT="${HRD_OUT:-$ROOT/runs/hardness}"

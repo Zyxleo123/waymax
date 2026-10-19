@@ -46,11 +46,11 @@
 #   DFT_SELECT_SMOKE=1 bash rl/diffusion_ft/slurm/submit_es_opt.sh
 #   bash rl/diffusion_ft/slurm/submit_es_opt.sh
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 unset "${!SLURM_@}" 2>/dev/null || true
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
-OUT="${DFT_ES_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/es_opt_${STAMP}}"
-SPLITS3=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json
+OUT="${DFT_ES_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/es_opt_${STAMP}}"
+SPLITS3=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json
 POP="${DFT_ES_POP:-16}"
 OPT_CFG="${DFT_SELECT_OPT_CFG:-}"
 mkdir -p "$OUT/gate" "$ROOT/logs/dft"
@@ -67,7 +67,7 @@ ES+=";optmut=pop:${POP},iters:2,elite:4,opt:1,order:sp,t:3,scale:2,nb:cv"
 ARMS="base,o_0=bank@o0:cons:20,es_o1=es@o1:cons:20,es_opt=es@opt:cons:20"
 ARMS+=",es_optmut=es@optmut:cons:20"
 # The task tag only; no arm here loads a fine-tune.
-OLD=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
+OLD=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
 DFT_SPLITS3_JSON="$SPLITS3" \
 DFT_SELECT_DIR="$OUT/select" \
 DFT_SELECT_DEP="afterok:$GID" DFT_REQUIRE_GATE="$OUT/gate/verdict.txt" \

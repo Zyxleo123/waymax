@@ -13,14 +13,14 @@
 #   DFT_SIM_AGENTS=none bash rl/diffusion_ft/slurm/submit_probe_logreplay_collision.sh
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 mkdir -p "$ROOT/logs/dft/env"
 
 STAMP="$(date +%Y%m%d_%H%M%S)"
 ENVF="$ROOT/logs/dft/env/lrprobe_${STAMP}.env"
 {
-  echo "DFT_TFRECORD=${DFT_TFRECORD:-/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord}"
+  echo "DFT_TFRECORD=${DFT_TFRECORD:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord}"
   echo "DFT_INDICES=${DFT_INDICES:-0-31}"
   echo "DFT_LATERAL=${DFT_LATERAL:-0,0.25,0.5,1.0,1.5,2.0,3.0}"
   echo "DFT_DELAY=${DFT_DELAY:-0,2,5,10,20,40}"

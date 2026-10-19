@@ -58,7 +58,7 @@ def block_stats(obs: np.ndarray) -> dict[str, tuple[float, float]]:
 def main() -> None:
     p = argparse.ArgumentParser(description="Observation block occupancy on real scenarios.")
     p.add_argument("--failure-dir", type=str,
-                   default="/zfsauton/scratch/mineuih/waymax_rs/failure_samples")
+                   default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/failure_samples")
     p.add_argument("--limit", type=int, default=16, help="Scenarios to inspect.")
     p.add_argument("--steps", type=int, default=5, help="Zero-action steps per scenario.")
     args = p.parse_args()

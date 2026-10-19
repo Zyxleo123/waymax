@@ -11,7 +11,7 @@
 #                              HRD_N_PER_CELL HRD_SEED
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 
 HRD_OUT="${HRD_OUT:-$ROOT/runs/hardness}"
@@ -29,7 +29,7 @@ emit() { printf '%s=%q\n' "$1" "$2"; }
 {
   emit HRD_OUT       "$HRD_OUT"
   emit HRD_DESC_DIR  "${HRD_DESC_DIR:-$HRD_OUT/desc}"
-  emit HRD_CACHE_DIR "${HRD_CACHE_DIR:-/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/}"
+  emit HRD_CACHE_DIR "${HRD_CACHE_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/}"
   emit HRD_VIZ_DIR   "${HRD_VIZ_DIR:-$HRD_OUT/viz}"
   emit HRD_N_PER_CELL "${HRD_N_PER_CELL:-6}"
   emit HRD_SEED      "${HRD_SEED:-0}"

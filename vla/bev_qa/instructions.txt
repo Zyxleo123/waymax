@@ -10,7 +10,7 @@ python -m vla.bev_qa.train \
   --max_steps 2 \
   --batch_size 1 \
   --wandb_mode disabled \
-  --output_dir /zfsauton/scratch/sbellad/waymax_rs/bev_qa_debug
+  --output_dir /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/waymax_rs/bev_qa_debug
 
 Then a slightly bigger test:
 
@@ -20,7 +20,7 @@ python -m vla.bev_qa.train \
   --max_steps 50 \
   --batch_size 2 \
   --wandb_mode disabled \
-  --output_dir /zfsauton/scratch/sbellad/waymax_rs/bev_qa_debug_512
+  --output_dir /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/waymax_rs/bev_qa_debug_512
 
 Then the initial real run:
 
@@ -28,7 +28,7 @@ python -m vla.bev_qa.train \
   --batch_size 2 \
   --num_epochs 1 \
   --wandb_mode online \
-  --output_dir /zfsauton/scratch/sbellad/waymax_rs/bev_qa_output_gemma
+  --output_dir /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/waymax_rs/bev_qa_output_gemma
 
 By default this freezes:
 

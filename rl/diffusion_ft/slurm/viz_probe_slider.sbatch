@@ -1,14 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=dft_probeviz
-#SBATCH --partition=cpu
-#SBATCH --qos=qos_cpu
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_cpu_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=16G
 #SBATCH --time=00:30:00
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
 #
 # Render the optimization-step slider from the probe dumps two training runs
 # wrote. Reads saved npz/jsonl only -- no checkpoint, no corpus, no GPU -- so it
@@ -18,7 +18,7 @@
 # triggers SLURM_GET_USER_ENV and requeue-holds the job).
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"; mkdir -p "$ROOT/logs/dft"
 
 for arg in "$@"; do
@@ -28,7 +28,7 @@ for arg in "$@"; do
   elif [[ "$arg" == *=* ]]; then export "${arg?}"; fi
 done
 
-PY="${DFT_PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
+PY="${DFT_PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 # Space-separated NAME=OUT_DIR, one per row of the figure.
 DFT_PROBE_ARMS="${DFT_PROBE_ARMS:?set DFT_PROBE_ARMS='name=dir name=dir'}"
 DFT_PROBE_FIG_DIR="${DFT_PROBE_FIG_DIR:-}"

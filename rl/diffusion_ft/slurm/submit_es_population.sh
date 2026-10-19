@@ -58,11 +58,11 @@
 #   bash rl/diffusion_ft/slurm/submit_es_population.sh
 #   DFT_ES_POP=32 DFT_SELECT_REPEATS=2 bash ...     # bigger population, fewer repeats
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 unset "${!SLURM_@}" 2>/dev/null || true
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
-OUT="${DFT_ES_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/es_population_${STAMP}}"
-SPLITS3=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json
+OUT="${DFT_ES_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/es_population_${STAMP}}"
+SPLITS3=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json
 POP="${DFT_ES_POP:-16}"
 mkdir -p "$OUT/gate" "$ROOT/logs/dft"
 sb() { env -i HOME="$HOME" PATH="$PATH" USER="${USER:-}" sbatch "$@"; }
@@ -83,7 +83,7 @@ ES+=";raw=pop:${POP},iters:2,elite:4,t:3,scale:2,nb:cv"
 ARMS="base,b_cv=bank@l24cv:cons:20,es_p1=es@p1:cons:20,es_proj=es@proj:cons:20"
 ARMS+=",es_projns=es@projns:cons:20,es_projrn=es@projrn:cons:20,es_raw=es@raw:cons:20"
 # The task tag only; no arm here loads a fine-tune.
-OLD=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
+OLD=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
 DFT_SPLITS3_JSON="$SPLITS3" \
 DFT_SELECT_DIR="$OUT/select" \
 DFT_SELECT_DEP="afterok:$GID" DFT_REQUIRE_GATE="$OUT/gate/verdict.txt" \

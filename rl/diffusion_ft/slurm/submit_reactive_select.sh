@@ -31,7 +31,7 @@
 #   bash rl/diffusion_ft/slurm/submit_reactive_select.sh
 #   DFT_REACT_SIMS=idm_brake bash ...    # skip the rails arm (already measured)
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 
 # The shipping bank, verbatim from submit_ft_parity.sh so the two runs are the
 # same candidate set and any difference belongs to the simulator.
@@ -46,11 +46,11 @@ export DFT_SELECT_BANK="$L24"
 # choice does not have to be re-litigated if the ordering moves.
 export DFT_BASE_ARMS="${DFT_BASE_ARMS:-base,b_l24_r20=bank@l24:cons:20,b_l24_r10=bank@l24:cons:10}"
 export DFT_FT_ARMS="${DFT_FT_ARMS:-ft}"
-RUN=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
+RUN=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
 export DFT_SELECT_CKPTS="${DFT_SELECT_CKPTS:-$RUN/base_s0/iter_000110}"
 
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
-ROOT_DIR="/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/reactive_${STAMP}"
+ROOT_DIR="/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/reactive_${STAMP}"
 
 for sim in ${DFT_REACT_SIMS:-none idm_brake}; do
   echo "=== sim_agents=$sim ==="

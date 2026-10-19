@@ -137,11 +137,11 @@ def _with_scene_tokenizer_overrides(
 
 def parse_args() -> VLAFinetuningConfig:
 	parser = argparse.ArgumentParser(description="Finetune Scene VLA with LoRA.")
-	parser.add_argument("--cache_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/")
+	parser.add_argument("--cache_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/")
 	parser.add_argument("--tfrecord_dir", type=str, default=None, help="Deprecated alias for --cache_dir.")
-	parser.add_argument("--annotation_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/annotations/")
+	parser.add_argument("--annotation_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/annotations/")
 	parser.add_argument("--file_indices", type=str, nargs="*", default=None)
-	parser.add_argument("--output_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/vla/finetune_vla")
+	parser.add_argument("--output_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/finetune_vla")
 	parser.add_argument("--wandb_project", type=str, default="finetune_vla")
 	parser.add_argument("--wandb_run_name", type=str, default="finetune_vla")
 	parser.add_argument("--wandb_entity", type=str, default=None)

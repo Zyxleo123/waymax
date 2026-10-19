@@ -18,20 +18,20 @@
 # GPU class: the scan needs a6000/a5000 (general). If it lands on a v100/2080 Ti
 # it dies at cuDNN autotune -- pin with DFT_EXCLUDE if a scan task fails at iter 0.
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 ENV_DIR="$ROOT/logs/dft/env"; mkdir -p "$ENV_DIR" "$ROOT/logs/dft"
 
 DFT_SCAN_SEED="${DFT_SCAN_SEED:-0}"
-DFT_SCAN_OUT="${DFT_SCAN_OUT:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed${DFT_SCAN_SEED}}"
-DFT_SHARD_GLOB="${DFT_SHARD_GLOB:-/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
+DFT_SCAN_OUT="${DFT_SCAN_OUT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed${DFT_SCAN_SEED}}"
+DFT_SHARD_GLOB="${DFT_SHARD_GLOB:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
 ENV_FILE="$ENV_DIR/buildsplits_${STAMP}.env"
 {
   echo "DFT_SCAN_OUT=$DFT_SCAN_OUT"
   echo "DFT_SCAN_SEED=$DFT_SCAN_SEED"
   echo "DFT_SHARD_GLOB=$DFT_SHARD_GLOB"
-  echo "DFT_INDEX_DIR=${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
-  echo "DFT_CKPT=${DFT_CKPT:-/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
+  echo "DFT_INDEX_DIR=${DFT_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
+  echo "DFT_CKPT=${DFT_CKPT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
   echo "DFT_SCAN_SCENES=${DFT_SCAN_SCENES:-4096}"
   echo "DFT_SCAN_BATCH=${DFT_SCAN_BATCH:-32}"
   echo "DFT_SIGMA_FLOOR=${DFT_SIGMA_FLOOR:-0.03}"

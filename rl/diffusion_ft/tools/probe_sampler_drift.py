@@ -149,7 +149,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--ckpt", default=DEFAULT_CHECKPOINT_PATH)
-    p.add_argument("--tfrecord", default="/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord")
+    p.add_argument("--tfrecord", default="/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord")
     p.add_argument("--n_scenes", type=int, default=64)
     p.add_argument("--start", type=int, default=0)
     p.add_argument("--chunk", type=int, default=8)

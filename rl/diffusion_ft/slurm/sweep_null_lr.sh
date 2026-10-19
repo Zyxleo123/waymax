@@ -56,10 +56,10 @@
 #
 # Each arm is "lr:grad_accum".
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 ENV_DIR="$ROOT/logs/dft/env"; mkdir -p "$ENV_DIR" "$ROOT/logs/dft"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
-BASE_OUT="${DFT_SWEEP_OUT:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/null_lr_sweep/${STAMP}}"
+BASE_OUT="${DFT_SWEEP_OUT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/null_lr_sweep/${STAMP}}"
 
 ARMS="${DFT_LR_ARMS:-1e-5:1 1e-6:1 1e-7:1 1e-5:0}"
 # 200 to match the sweep being explained, at eval_every=10 => 20 eval points.
@@ -90,12 +90,12 @@ for ARM in $ARMS; do
   ENV_FILE="$ENV_DIR/nulllr_${STAMP}_${TAG}.env"
   {
     echo "DFT_OUT_DIR=$OUT_DIR"
-    echo "DFT_CKPT=${DFT_CKPT:-/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
+    echo "DFT_CKPT=${DFT_CKPT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
     # data -- same corpus and splits as the sweep being explained
     [[ -n "${DFT_TFRECORD:-}" ]] && echo "DFT_TFRECORD=${DFT_TFRECORD}"
     [[ -n "${DFT_INDICES:-}" ]]  && echo "DFT_INDICES=${DFT_INDICES}"
-    echo "DFT_SHARD_GLOB=${DFT_SHARD_GLOB:-/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
-    echo "DFT_INDEX_DIR=${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
+    echo "DFT_SHARD_GLOB=${DFT_SHARD_GLOB:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
+    echo "DFT_INDEX_DIR=${DFT_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
     echo "DFT_SCENES_PER_ITER=${DFT_SCENES_PER_ITER:-16}"
     echo "DFT_EVAL_SCENES=${DFT_EVAL_SCENES:-32}"
     echo "DFT_DATA_SEED=${DFT_DATA_SEED:-0}"
@@ -105,7 +105,7 @@ for ARM in $ARMS; do
     # the splits every claim in this diagnosis is stated on -- are never
     # measured. This is the same file the 09-02 sweep used; a different
     # one would make the arms incomparable to it.
-    echo "DFT_SPLITS_JSON=${DFT_SPLITS_JSON:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/eval_splits.json}"
+    echo "DFT_SPLITS_JSON=${DFT_SPLITS_JSON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/eval_splits.json}"
     echo "DFT_SPLITS=${DFT_SPLITS:-failure_heldout,success_heldout,failure_train,success_train}"
     echo "DFT_SPLIT_CAP=${DFT_SPLIT_CAP:-48}"
     # objective: THE NULL. Safety off, anchor at its native scale.
@@ -171,7 +171,7 @@ if ((${#TRAIN_IDS[@]})); then
   DIST_ENV="$ENV_DIR/nulllr_${STAMP}_paramdist.env"
   {
     echo "DFT_ARMS=$BASE_OUT/*/"
-    echo "DFT_CKPT=${DFT_CKPT:-/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
+    echo "DFT_CKPT=${DFT_CKPT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
     echo "DFT_DIST_OUT=$BASE_OUT/param_distance.json"
   } > "$DIST_ENV"
   DEPS=$(IFS=:; echo "${TRAIN_IDS[*]}")

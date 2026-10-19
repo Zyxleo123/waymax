@@ -59,14 +59,14 @@
 # Node: `general` advertises only a6000/a5000 (gpu24-31). This env's jaxlib dies
 # at cuDNN autotune on v100 and OOMs on the 2080 Ti -- do NOT widen the partition.
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 ENV_DIR="$ROOT/logs/dft/env"; mkdir -p "$ENV_DIR" "$ROOT/logs/dft"
 # $$ as well as the second: two submissions in the same second would otherwise
 # share an env filename and an out_dir and interleave one log.
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
 
 # ---- where things live -------------------------------------------------------
-SPLITS_DIR="${DFT_SPLITS_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0}"
+SPLITS_DIR="${DFT_SPLITS_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0}"
 # The splits being VERIFIED. A different file is silently wrong: scene ids are
 # positions in the scan's shard_glob order, so arms scored against another file
 # are not comparable to anything already measured, and nothing errors.
@@ -74,9 +74,9 @@ DFT_SPLITS_JSON="${DFT_SPLITS_JSON:-${SPLITS_DIR}/eval_splits.json}"
 VERIFY_DIR="${DFT_VERIFY_DIR:-${SPLITS_DIR}/verified_seed777}"
 DFT_VERIFY_OUT="${DFT_VERIFY_OUT:-${VERIFY_DIR}/verify_rows.jsonl}"
 DFT_VERIFIED_JSON="${DFT_VERIFIED_JSON:-${VERIFY_DIR}/eval_splits_verified.json}"
-OUT_DIR="${DFT_OUT_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/safety_train/verified_${STAMP}}"
-SHARD_GLOB="${DFT_SHARD_GLOB:-/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
-CKPT="${DFT_CKPT:-/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
+OUT_DIR="${DFT_OUT_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/safety_train/verified_${STAMP}}"
+SHARD_GLOB="${DFT_SHARD_GLOB:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
+CKPT="${DFT_CKPT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
 
 SB_FLAGS=()
 [[ -n "${DFT_PARTITION:-}" ]] && SB_FLAGS+=(--partition="$DFT_PARTITION")
@@ -98,7 +98,7 @@ if [[ "${DFT_SKIP_VERIFY:-0}" != "1" ]]; then
     echo "DFT_CKPT=$CKPT"
     echo "DFT_SPLITS_JSON=$DFT_SPLITS_JSON"
     echo "DFT_SHARD_GLOB=$SHARD_GLOB"
-    echo "DFT_INDEX_DIR=${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
+    echo "DFT_INDEX_DIR=${DFT_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
     echo "DFT_VERIFY_OUT=$DFT_VERIFY_OUT"
     echo "DFT_VERIFIED_JSON=$DFT_VERIFIED_JSON"
     echo "DFT_VERIFY_SPLITS=${DFT_VERIFY_SPLITS:-failure_heldout,failure_train,success_heldout,success_train}"
@@ -136,7 +136,7 @@ ENV_T="$ENV_DIR/verifiedsafety_${STAMP}.env"
   echo "DFT_OUT_DIR=$OUT_DIR"
   echo "DFT_CKPT=$CKPT"
   echo "DFT_SHARD_GLOB=$SHARD_GLOB"
-  echo "DFT_INDEX_DIR=${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
+  echo "DFT_INDEX_DIR=${DFT_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
   echo "DFT_SCENES_PER_ITER=${DFT_SCENES_PER_ITER:-32}"
   echo "DFT_EVAL_SCENES=${DFT_EVAL_SCENES:-16}"
   echo "DFT_DATA_SEED=${DFT_DATA_SEED:-0}"

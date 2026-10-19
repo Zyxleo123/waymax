@@ -1,14 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=dft_recov
-#SBATCH --partition=cpu
-#SBATCH --qos=qos_cpu
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_cpu_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8G
 #SBATCH --time=00:15:00
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
 #
 # Per-stratum headline figure (failure recovery / success non-regression /
 # intermittent) from select_summary.json (rl/diffusion_ft/tools/viz_recovery.py).
@@ -16,7 +16,7 @@
 #
 # Config arrives as a positional env FILE (or VAR=value args). Never sbatch --export.
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"; mkdir -p "$ROOT/logs/dft"
 for arg in "$@"; do
   if [[ -f "$arg" ]]; then
@@ -25,7 +25,7 @@ for arg in "$@"; do
   elif [[ "$arg" == *=* ]]; then export "${arg?}"; fi
 done
 
-PY="${DFT_PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
+PY="${DFT_PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 IN_JSON="${DFT_RECOV_IN_JSON:?set DFT_RECOV_IN_JSON (space-separated select_summary.json paths)}"
 OUT_PNG="${DFT_RECOV_OUT_PNG:?set DFT_RECOV_OUT_PNG}"
 ARMS="${DFT_RECOV_ARMS:-}"

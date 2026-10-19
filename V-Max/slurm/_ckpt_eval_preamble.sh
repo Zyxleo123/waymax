@@ -21,24 +21,24 @@ done
 unset _arg
 
 # ── Defaults (every one overridable from the env file) ────────────────────────
-export REPO_ROOT="${REPO_ROOT:-/zfsauton2/home/yixiz/waymax_rs}"
+export REPO_ROOT="${REPO_ROOT:-/home/yixiz/waymax_rs}"
 export VMAX_ROOT="${VMAX_ROOT:-${REPO_ROOT}/V-Max}"
 export SCENARIOMAX_ROOT="${SCENARIOMAX_ROOT:-${REPO_ROOT}/ScenarioMax}"
-export CONDA_SH="${CONDA_SH:-/zfsauton/scratch/yixiz/miniconda3/etc/profile.d/conda.sh}"
+export CONDA_SH="${CONDA_SH:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/miniconda3/etc/profile.d/conda.sh}"
 export CONDA_ENV="${CONDA_ENV:-waymax}"
 
 # Trained run whose checkpoints we sweep.
-export RUN_DIR="${RUN_DIR:-/zfsauton/scratch/yixiz/waymax_rs/vmax_repro/repro_sac_v2}"
+export RUN_DIR="${RUN_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/vmax_repro/repro_sac_v2}"
 export MODEL_DIR="${MODEL_DIR:-${RUN_DIR}/model}"
 export HYDRA_CONFIG="${HYDRA_CONFIG:-${RUN_DIR}/.hydra/config.yaml}"
 
 # Raw WOMD scenario-proto shards to convert (shard 0 and 1 of each split).
-export WOMD_SCENARIO_ROOT="${WOMD_SCENARIO_ROOT:-/zfsauton/scratch/eshau/womd/scenario}"
+export WOMD_SCENARIO_ROOT="${WOMD_SCENARIO_ROOT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/scenario}"
 export TRAIN_SHARDS="${TRAIN_SHARDS:-training.tfrecord-00000-of-01000 training.tfrecord-00001-of-01000}"
 export VALID_SHARDS="${VALID_SHARDS:-validation.tfrecord-00000-of-00150 validation.tfrecord-00001-of-00150}"
 
 # Workspace.
-export WORK_ROOT="${WORK_ROOT:-/zfsauton/scratch/yixiz/waymax_rs/ckpt_eval_shard01}"
+export WORK_ROOT="${WORK_ROOT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/ckpt_eval_shard01}"
 export RAW_DIR="${RAW_DIR:-${WORK_ROOT}/raw}"        # symlink farms, one dir per split
 export DATA_DIR="${DATA_DIR:-${WORK_ROOT}/data}"     # scenariomax-convert output
 export DS_DIR="${DS_DIR:-${WORK_ROOT}/ds}"           # short stable names for eval paths

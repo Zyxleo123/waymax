@@ -185,7 +185,7 @@ DFT_ADP_SMOKE=1 DFT_ADP_TAG=smoke bash rl/diffusion_ft/slurm/submit_adapter_pilo
 bash rl/diffusion_ft/slurm/submit_adapter_pilot.sh
 
 # retrain and re-evaluate on an earlier collection (e.g. the K=10 escalation)
-DFT_ADP_PAIRS_FROM=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/adapter/<stamp> \
+DFT_ADP_PAIRS_FROM=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/adapter/<stamp> \
   DFT_ADP_K=10 DFT_ADP_TAG=k10 bash rl/diffusion_ft/slurm/submit_adapter_pilot.sh
 
 # re-render the report from what is on disk
@@ -195,7 +195,7 @@ sbatch rl/diffusion_ft/slurm/adapter_report.sbatch <run>/report.env
 sbatch rl/diffusion_ft/slurm/test_adapter.sbatch
 ```
 
-The run dir is `/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/adapter/<stamp>/`,
+The run dir is `/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/adapter/<stamp>/`,
 and `logs/dft/adapter_pilot_latest.txt` holds the latest one. Its contents:
 
 * `collect/tasks/*/pair_data/<arm>/*.npz`;
@@ -229,11 +229,11 @@ post-training check measure this against the stored base draws.
 
 ## Splits file
 
-`/zfsauton/scratch/eshau/` vanished around 10-02. The verified splits file
+`/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/` vanished around 10-02. The verified splits file
 still names its glob, and `train_safety` refuses a splits file whose
 `shard_glob` resolves to a different file list. On 2026-10-04 I wrote
 `eval_splits_3strata_womd.json` next to the original, identical except for
-`shard_glob` (now `/zfsauton/datasets/womd/...`) and a `shard_glob_moved`
+`shard_glob` (now `/data/user_data/yixiz/autonlab/zfsauton/datasets/womd/...`) and a `shard_glob_moved`
 note. The scene ids are unchanged: the offset indices were verified on 10-03.
 `select_eval.sbatch`'s default shard glob points at the same place.
 

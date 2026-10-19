@@ -686,11 +686,11 @@ def run_training(cfg: TrainQAConfig) -> None:
 
 def _parse_args() -> TrainQAConfig:
 	parser = argparse.ArgumentParser(description="Train SceneQwenVLA on QA data.")
-	parser.add_argument("--cache_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/qa_cache/")
+	parser.add_argument("--cache_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/qa_cache/")
 	parser.add_argument("--tfrecord_dir", type=str, default=None, help="Deprecated alias for --cache_dir.")
-	parser.add_argument("--qa_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/qa_dataset/")
+	parser.add_argument("--qa_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/qa_dataset/")
 	parser.add_argument("--file_indices", type=str, nargs="*", default=None)
-	parser.add_argument("--output_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/qa_output")
+	parser.add_argument("--output_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/qa_output")
 	parser.add_argument("--wandb_project", type=str, default="waymax_rs_qa")
 	parser.add_argument("--wandb_run_name", type=str, default=None)
 	parser.add_argument("--wandb_entity", type=str, default=None)

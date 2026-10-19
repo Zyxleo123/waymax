@@ -15,11 +15,11 @@
 # Usage (from repo root; on lov4 sbatch is local):
 #   bash rl/diffusion_ft/slurm/submit_plot_failures.sh
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 unset "${!SLURM_@}" 2>/dev/null || true
-SEL=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/lateral_opt_argmin_20261002_142129_3029435/select
-OLD_BUNDLE=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/bank_honest_20260925_160329_3074201/scenes/scenes_20260925_161856.json
-SPLITS=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata_womd.json
+SEL=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/lateral_opt_argmin_20261002_142129_3029435/select
+OLD_BUNDLE=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/bank_honest_20260925_160329_3074201/scenes/scenes_20260925_161856.json
+SPLITS=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata_womd.json
 ARM="${DFT_FIX_ARM:-o_am}"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
 OUT="$SEL/failing_${ARM}_${STAMP}"
@@ -40,7 +40,7 @@ plot_env "$OUT/smoke/fix.env" "$OLD_BUNDLE" "$OUT/smoke"
 P0=$(sb --parsable rl/diffusion_ft/slurm/plot_fix_pairs.sbatch "$OUT/smoke/fix.env")
 
 { kv DFT_SPLITS_JSON "$SPLITS"; kv DFT_SELECT_DIR "$SEL"; kv DFT_OUT_JSON "$OUT/scenes/scenes.json"
-  kv DFT_SHARD_GLOB "/zfsauton/datasets/womd/tf_example/training/training_tfexample.tfrecord-*"
+  kv DFT_SHARD_GLOB "/data/user_data/yixiz/autonlab/zfsauton/datasets/womd/tf_example/training/training_tfexample.tfrecord-*"
   kv DFT_VIZ_ARMS "base,$ARM"; kv DFT_SOLVED_ARM "$ARM"
   kv DFT_UNRECOVERED "$UNREC"; kv DFT_REGRESSED "$REGR"; } > "$OUT/scenes/dump.env"
 D=$(sb --parsable rl/diffusion_ft/slurm/dump_reach_from_select.sbatch "$OUT/scenes/dump.env")

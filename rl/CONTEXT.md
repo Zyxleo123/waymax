@@ -38,7 +38,7 @@ back into the diffusion planner (`train_diffusion/`). Right now we are debugging
 
 ## Environment / how to run
 
-- Conda env: **`waymax`** at `/zfsauton/scratch/yixiz/miniconda3/envs/waymax`
+- Conda env: **`waymax`** at `/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/miniconda3/envs/waymax`
   (has `stable_baselines3 2.9.0`, `gymnasium 1.3.0`, `torch 2.11.0`, `jax 0.10`).
 - The login node (`rhea`) has **no GPU** — JAX fails with `cuInit 303` there.
   Always run through **`srun --gres=gpu:1 --partition=general ...`**.
@@ -50,7 +50,7 @@ back into the diffusion planner (`train_diffusion/`). Right now we are debugging
 ## Data directories
 
 - **Failure cases** (per-scenario result files):
-  `/zfsauton/scratch/mineuih/waymax_rs/failure_samples`
+  `/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/failure_samples`
   - 245 scenarios. Each scenario `<shard>.scenario_<NNN>` has 4 files:
     - `*.json` — result record (the one `ScenarioSource.from_failure_dir` reads)
     - `*.instructions.json` — language/instruction annotation
@@ -66,10 +66,10 @@ back into the diffusion planner (`train_diffusion/`). Right now we are debugging
     the actual scene from the TFRecord.
 
 - **Source WOMD TFRecords** (the real scenario data, referenced by the JSONs):
-  `/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-NNNNN-of-01000`
+  `/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-NNNNN-of-01000`
   - WOMD 1.3.1 training shards; 128 objects/scene, 91 timesteps, dt = 0.1 s.
 
-- **Run outputs**: `/zfsauton/scratch/yixiz/waymax_rs/runs/`
+- **Run outputs**: `/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/runs/`
   - `ppo_failures/ppo_waymax.zip` — fully-trained **bicycle** model (~1M steps).
   - `ppo_failures_delta/lr_*/` — delta sweep dirs (train + `eval_rollouts/`).
 
@@ -466,7 +466,7 @@ SB3 MLP on CPU (`--device cpu` in slurm — same torch+JAX coexistence rule as P
 | `bc_sac_staged_waymax.sh` | `staged` | BC + critic-only window, then full SAC |
 | `bc_only_waymax.sh` | `bc_only` | BC only + held-out expert eval |
 
-Defaults: `SAVE_ROOT=/zfsauton/scratch/yixiz/waymax_rs/runs`, `BC_SANITY=1`
+Defaults: `SAVE_ROOT=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/runs`, `BC_SANITY=1`
 (replays expert + BC policy on **exact BC train scenarios**, log-replay agents).
 Runs: `bc_expert`, `bc_sac_staged`, `bc_sac_unstaged`.
 
@@ -563,21 +563,21 @@ failure-compatible `*.trajectory.npz` for diffusion / VLA eval.
 
 | Step | Script / launcher | Output |
 |---|---|---|
-| Trace failures → ScenarioMax | `rl/trace_failure_to_womd.py` (once) | `/zfsauton/scratch/yixiz/failure_womd_trace.json` |
+| Trace failures → ScenarioMax | `rl/trace_failure_to_womd.py` (once) | `/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/failure_womd_trace.json` |
 | Roll policy | `~/slurm/waymax/pseudo_gt_rollout.sh` | `*.trajectory.npz` + `*.pseudo_gt.json` under `PSEUDO_GT_ROOT/NAME_RUN` |
 | Score rollouts | `~/slurm/waymax/pseudo_gt_eval.sh` | `eval_summary.csv` + `eval_summary.json` |
 | Video viz | `python -m rl.visualize_scenario … --mode video` | MP4 under `pseudo_gt_videos/repro_sac_v2/` |
 
 Shared settings: `~/slurm/waymax/_pseudo_gt_common.sh`
 (`NAME_RUN=repro_sac_v2`, checkpoint from
-`/zfsauton/scratch/yixiz/waymax_rs/vmax_repro/repro_sac_v2/model/`).
+`/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/vmax_repro/repro_sac_v2/model/`).
 
 **Note:** `pseudo_gt_eval.sh` only **scores** saved trajectories (CPU, ~1–2 min/scene).
 Rollouts come from `pseudo_gt_rollout.sh` (GPU).
 
 ## Data / code
 
-- **Rollout dir:** `/zfsauton/scratch/yixiz/pseudo_gt/repro_sac_v2/` (217 trajectories
+- **Rollout dir:** `/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/pseudo_gt/repro_sac_v2/` (217 trajectories
   as of 2026-07-01; trace has 245 failures but only mapped hits are rolled).
 - **Training run:** `repro_sac_v2` on native ScenarioMax
   (`path_dataset=…/ScenarioMaxWaymo/training.tfrecord`); eval accuracy on
@@ -654,12 +654,12 @@ For quick video preview, render on **WOMD** (fast, small `scenario_idx`):
 
 ```bash
 python -m rl.visualize_scenario \
-  --failure-json /zfsauton/scratch/mineuih/waymax_rs/failure_samples/…scenario_052.json \
-  --trajectory-npz /zfsauton/scratch/yixiz/pseudo_gt/repro_sac_v2/…scenario_052.trajectory.npz \
+  --failure-json /data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/failure_samples/…scenario_052.json \
+  --trajectory-npz /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/pseudo_gt/repro_sac_v2/…scenario_052.trajectory.npz \
   --mode video --out ./pseudo_gt_videos/repro_sac_v2/pseudo_gt_052
 ```
 
-Use `--scenariomax --trace-json /zfsauton/scratch/yixiz/failure_womd_trace.json`
+Use `--scenariomax --trace-json /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/failure_womd_trace.json`
 only when you need the exact training-map scene (slow for large record indices
 unless `rl/tfrecord_fast build` index exists).
 
@@ -702,12 +702,12 @@ A V-Max hydra config has **two** encoder nodes:
 
 An earlier version of this section claimed V-Max ran encoder-less. That was
 wrong: it read `algorithm.network.encoder`. **All 25 runs** in the live tree
-`/zfsauton/scratch/yixiz/waymax_rs/vmax_repro/` — including `repro_sac_v2`, the
+`/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/vmax_repro/` — including `repro_sac_v2`, the
 ~97% one — used `network.encoder.type: lq`.
 
 Also note the stale copies under `V-Max/runs/` are a *different, older* set (they
 do show `none`). The live pipeline writes to `vmax_repro/`
-(`name_exp=/zfsauton/scratch/yixiz/waymax_rs/vmax_repro`).
+(`name_exp=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/vmax_repro`).
 
 ## The reference: `repro_sac_v2`
 

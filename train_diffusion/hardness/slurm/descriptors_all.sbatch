@@ -1,13 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=hrd_desc_all
-#SBATCH --partition=general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_cpu_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=24G
 #SBATCH --time=4:00:00
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%A_%a.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%A_%a.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%A_%a.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%A_%a.out
 #
 # Phase 2, stage 1: descriptors for ALL 1000 cache shards, not just the 154 that
 # were evaluated. This is the point of using a-priori descriptors -- 3,135
@@ -22,7 +23,7 @@
 # CPU-only. Resumable: existing .desc.npz files are skipped.
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 mkdir -p "$ROOT/logs/hardness"
 
@@ -35,10 +36,10 @@ for arg in "$@"; do
   fi
 done
 
-export PYTHON="${PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
+export PYTHON="${PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 export PYTHONUNBUFFERED=1
 
-HRD_CACHE_DIR="${HRD_CACHE_DIR:-/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/}"
+HRD_CACHE_DIR="${HRD_CACHE_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/}"
 HRD_OUT="${HRD_OUT:-$ROOT/runs/hardness}"
 HRD_START_T="${HRD_START_T:-10}"
 HRD_ANCHORS="${HRD_ANCHORS:-0 10 20 30 40}"

@@ -22,7 +22,7 @@ python -m grpc_tools.protoc \
 Then you can set up lane graph files by running
 ```
 cd scripts
-python extract_roadgraph.py --split <training or validation> --output_dir <ex. /zfsauton/scratch/mineuih/waymax_rs/lane_graphs>
+python extract_roadgraph.py --split <training or validation> --output_dir <ex. /data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs>
 ```
 
 # Run goal reaching experiment

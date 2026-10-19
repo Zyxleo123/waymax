@@ -2,7 +2,7 @@
 # Submitter for the FlowMol3 arm evals. Only calls sbatch.
 #
 # Score the four arms plus the untrained base reference:
-#   FM3_SAVE_DIR=/zfsauton/scratch/yixiz/waymax_rs/flowmol3/<stamp> \
+#   FM3_SAVE_DIR=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/flowmol3/<stamp> \
 #   DFT_SPLITS_JSON=<verified splits.json> \
 #   DFT_SHARD_GLOB='<the glob splits.json was built against>' \
 #   bash rl/diffusion_ft/slurm/submit_eval_flowmol3.sh
@@ -17,7 +17,7 @@
 # DependencyNeverSatisfied forever.
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 : "${FM3_SAVE_DIR:?set FM3_SAVE_DIR to the save dir of the training run}"
 : "${DFT_SPLITS_JSON:?set DFT_SPLITS_JSON}"
@@ -26,7 +26,7 @@ cd "$ROOT"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 ENV_DIR="$ROOT/logs/dft/env/fm3eval_${STAMP}"; mkdir -p "$ENV_DIR"
 OUT_DIR="${FM3_EVAL_OUT:-$FM3_SAVE_DIR/eval_${STAMP}}"
-BASE_CKPT="${FM3_INIT_FROM:-/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
+BASE_CKPT="${FM3_INIT_FROM:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
 ARMS=(base sc dist sc_dist)
 
 emit_env() {  # $1 = file, $2 = name, $3 = ckpt glob

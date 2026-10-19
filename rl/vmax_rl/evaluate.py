@@ -10,10 +10,10 @@ behaviour instead of the human log.
 Example::
 
     python -m rl.vmax_rl.evaluate \
-        --run-dir /zfsauton/scratch/yixiz/waymax_rs/runs/bcsac_failures \
-        --failure-dir /zfsauton/scratch/mineuih/waymax_rs/failure_samples \
+        --run-dir /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/runs/bcsac_failures \
+        --failure-dir /data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/failure_samples \
         --goal-threshold-m 3.0 \
-        --export-diffusion /zfsauton/scratch/yixiz/waymax_rs/runs/bcsac_failures/diffusion_states.pkl
+        --export-diffusion /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/runs/bcsac_failures/diffusion_states.pkl
 """
 
 from __future__ import annotations

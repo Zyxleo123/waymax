@@ -14,11 +14,11 @@
 
 set -euo pipefail
 
-REPO_ROOT="${REPO_ROOT:-/zfsauton2/home/yixiz/waymax_rs}"
+REPO_ROOT="${REPO_ROOT:-/home/yixiz/waymax_rs}"
 SLURM_SCRIPTS="${REPO_ROOT}/V-Max/slurm"
-WORK_ROOT="${WORK_ROOT:-/zfsauton/scratch/yixiz/waymax_rs/ckpt_eval_shard01}"
+WORK_ROOT="${WORK_ROOT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/ckpt_eval_shard01}"
 
-GPU_PARTITION="${GPU_PARTITION:-general}"
+GPU_PARTITION="${GPU_PARTITION:-preempt}"
 GPU_GRES="${GPU_GRES:-gpu:1}"
 
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -34,7 +34,7 @@ fi
     echo "# generated $(date) by submit_ckpt_eval.sh"
     echo "export REPO_ROOT='${REPO_ROOT}'"
     echo "export WORK_ROOT='${WORK_ROOT}'"
-    echo "export RUN_DIR='${RUN_DIR:-/zfsauton/scratch/yixiz/waymax_rs/vmax_repro/repro_sac_v2}'"
+    echo "export RUN_DIR='${RUN_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/vmax_repro/repro_sac_v2}'"
     # Point a new WORK_ROOT at an existing DS_DIR to reuse converted data across runs.
     [ -n "${DS_DIR:-}" ] && echo "export DS_DIR='${DS_DIR}'"
     echo "export CKPT_FILTER='${CKPT_FILTER:-*.pkl}'"

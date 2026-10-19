@@ -40,7 +40,7 @@ import numpy as np
 
 from rl.diffusion_ft.safety_objective import WM_PREDICTIONS
 
-_CKPT_ROOT = "/zfsauton/scratch/sbellad/world_model"
+_CKPT_ROOT = "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model"
 # det: es_WM README section 8's default. mf: the run's latest.pt, as handed over
 # 2026-10-11 (the README's fail1500 rows used epoch_0450.pt of the same run; the
 # two files differ, latest.pt was written 7 min after it).

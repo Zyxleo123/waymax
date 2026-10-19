@@ -892,10 +892,10 @@ def main() -> None:
     p.add_argument("--load_batch", type=int, default=8)
     p.add_argument("--splits_json", default="")
     p.add_argument("--shard_glob",
-                   default="/zfsauton/scratch/eshau/womd/tf_example/training/"
+                   default="/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/"
                            "training_tfexample.tfrecord-*")
     p.add_argument("--index_dir",
-                   default="/zfsauton/scratch/yixiz/waymax_rs/womd_offsets")
+                   default="/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets")
     p.add_argument("--num_paths", type=int, default=45)
     p.add_argument("--num_points_per_path", type=int, default=800)
     p.add_argument("--edge_margin", type=float, default=0.3)

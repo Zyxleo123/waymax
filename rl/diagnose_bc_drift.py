@@ -2,7 +2,7 @@
 
 Usage (GPU node recommended):
     python -m rl.diagnose_bc_drift \\
-        --model /zfsauton/scratch/yixiz/waymax_rs/runs/bc_expert/bc_waymax.zip \\
+        --model /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/runs/bc_expert/bc_waymax.zip \\
         --n-scenarios 64 --bc-seed 0
 """
 

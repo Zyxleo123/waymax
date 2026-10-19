@@ -1,14 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=dft_gate
-#SBATCH --partition=cpu
-#SBATCH --qos=qos_cpu
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_cpu_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8G
 #SBATCH --time=00:30:00
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
 #
 # Hardness-gate analysis: read per-scene verify rows (base + fine-tuned
 # checkpoints) and the risk table, write gate_curve.json, then redraw the figure
@@ -17,13 +17,13 @@
 # Gate inside the job: if the scoring array left a rows file missing or empty,
 # say which and exit 0, so nothing downstream strands on a non-zero exit.
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"; mkdir -p "$ROOT/logs/dft"
 for arg in "$@"; do
   if [[ -f "$arg" ]]; then source "$arg"
   elif [[ "$arg" == *=* ]]; then export "${arg?}"; fi
 done
-PY="${DFT_PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
+PY="${DFT_PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 GATE_DIR="${DFT_GATE_DIR:?set DFT_GATE_DIR}"
 SPLITS_JSON="${DFT_SPLITS_JSON:?set DFT_SPLITS_JSON}"
 RISK="${DFT_RISK:-$ROOT/runs/hardness/risk.npz}"

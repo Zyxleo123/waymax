@@ -11,7 +11,7 @@ Reads from disk only, so the table redraws without touching the GPU. When an arm
 has been re-evaluated more than once, the newest timestamped subdir wins.
 
     python -m train_diffusion.hardness.aggregate_reeval \
-        --reeval_dir /zfsauton/scratch/yixiz/waymax_rs/hardness_reeval
+        --reeval_dir /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/hardness_reeval
 """
 from __future__ import annotations
 
@@ -75,7 +75,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--reeval_dir",
-        default="/zfsauton/scratch/yixiz/waymax_rs/hardness_reeval",
+        default="/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/hardness_reeval",
     )
     parser.add_argument("--epoch", default="epoch_0010",
                         help="label only, recorded in comparison.json")

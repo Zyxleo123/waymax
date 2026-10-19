@@ -46,17 +46,17 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"; cd "$ROOT"
 for v in $(compgen -v SLURM_); do unset "$v"; done
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
 SMOKE="${DFT_AMFIX_SMOKE:-}"
-OUT="${DFT_AMFIX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/amfix${SMOKE:+_smoke}_${STAMP}}"
-VDIR=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777
+OUT="${DFT_AMFIX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/amfix${SMOKE:+_smoke}_${STAMP}}"
+VDIR=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777
 SPLITS3="$VDIR/eval_splits_3strata_womd.json"
-SHARD_GLOB=/zfsauton/datasets/womd/tf_example/training/training_tfexample.tfrecord-*
+SHARD_GLOB=/data/user_data/yixiz/autonlab/zfsauton/datasets/womd/tf_example/training/training_tfexample.tfrecord-*
 NB=cv
 AM_CFG="lon=1,w_lon_prox=0.05,lon_back_m=1000"
 FIX_CFG="${DFT_AMFIX_CFG:-w_contact_edge=1,w_contact_agent=1,w_curv=0.02}"
 STARTS_S="init0,initbrake,initleft,initright"
-OLD_RUN=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/lateral_opt_argmin_20261002_142129_3029435/select
+OLD_RUN=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/lateral_opt_argmin_20261002_142129_3029435/select
 [[ -s "$SPLITS3" ]] || { echo "FATAL: missing $SPLITS3" >&2; exit 1; }
-mkdir -p "$OUT/gate" "/zfsauton2/home/yixiz/waymax_rs/logs/dft"
+mkdir -p "$OUT/gate" "/home/yixiz/waymax_rs/logs/dft"
 sb() { echo "+ sbatch $*" >&2; env -i HOME="$HOME" PATH="$PATH" USER="${USER:-}" sbatch "$@"; }
 kv() { printf "%s='%s'\n" "$1" "${2//\'/\'\\\'\'}"; }
 echo "code: $ROOT @ $(git rev-parse --short HEAD) (+ $(git status --porcelain | wc -l) uncommitted paths)"
@@ -75,7 +75,7 @@ echo "gate    -> job $GID (CPU) -> $OUT/gate/verdict.txt"
 DFT_SPLITS3_JSON="$SPLITS3" DFT_SHARD_GLOB="$SHARD_GLOB" \
 DFT_SELECT_DIR="$OUT/select" \
 DFT_SELECT_DEP="afterok:$GID" DFT_REQUIRE_GATE="$OUT/gate/verdict.txt" \
-DFT_SELECT_CKPTS="/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947/base_s0/iter_000110" \
+DFT_SELECT_CKPTS="/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947/base_s0/iter_000110" \
 DFT_FT_ARMS="" \
 DFT_BASE_ARMS="base,o_am=bank@am:argmin:20,o_am3=bank@am3:argmin:20,o_am3s=bank@am3s:argmin:20" \
 DFT_SELECT_BANKS="am=;am3=;am3s=" \

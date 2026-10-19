@@ -23,13 +23,13 @@ SCENARIOMAX_NUM_PATHS = 10
 SCENARIOMAX_NUM_POINTS_PER_PATH = 300
 
 DEFAULT_LOCAL_TFEXAMPLE = (
-    "/zfsauton/scratch/eshau/womd/tf_example/training/"
+    "/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/"
     "training_tfexample.tfrecord-00000-of-01000"
 )
 DEFAULT_RAW_SCENARIO = (
-    "/zfsauton/scratch/eshau/womd/scenario/training/training.tfrecord-00000-of-01000"
+    "/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/scenario/training/training.tfrecord-00000-of-01000"
 )
-DEFAULT_SCENARIOMAX_SMOKE = "/zfsauton/scratch/yixiz/ScenarioMaxWaymo_smoke/training.tfrecord"
+DEFAULT_SCENARIOMAX_SMOKE = "/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymo_smoke/training.tfrecord"
 
 
 def _read_varint(data: bytes, i: int) -> tuple[int | None, int | None]:

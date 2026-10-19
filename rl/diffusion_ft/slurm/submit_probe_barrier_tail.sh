@@ -26,14 +26,14 @@
 # DFT_AGENT_MARGIN/TAU, DFT_AGENT_GEOMETRY (exact|disc).
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 ENV_DIR="$ROOT/logs/dft/env"; mkdir -p "$ENV_DIR"
 STAMP="$(date +%Y%m%d_%H%M%S)"
-OUT_ROOT="${DFT_TAIL_OUT_ROOT:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/barrier_tail/${STAMP}}"
+OUT_ROOT="${DFT_TAIL_OUT_ROOT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/barrier_tail/${STAMP}}"
 
-FAILURES="${DFT_FAILURES_TFRECORD:-/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord}"
-WOMD="${DFT_WOMD_TFRECORD:-/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-00000-of-01000}"
+FAILURES="${DFT_FAILURES_TFRECORD:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord}"
+WOMD="${DFT_WOMD_TFRECORD:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-00000-of-01000}"
 
 submit_one () {   # $1 = tag, $2 = tfrecord
   local tag="$1" rec="$2"

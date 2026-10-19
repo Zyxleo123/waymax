@@ -1,20 +1,21 @@
 #!/bin/bash
 #SBATCH --job-name=hrd_rank
-#SBATCH --partition=general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_cpu_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #SBATCH --time=0:30:00
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%j.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%j.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%j.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%j.out
 #
 # Stage 3/3: rank the heuristic families against the failure labels.
 # Reads only saved artefacts (labels.npz + desc/*.npz), so the ranking and any
 # figures drawn from it can be recomputed without touching the cache shards.
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 mkdir -p "$ROOT/logs/hardness"
 
@@ -27,7 +28,7 @@ for arg in "$@"; do
   fi
 done
 
-export PYTHON="${PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
+export PYTHON="${PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 export PYTHONUNBUFFERED=1
 
 HRD_OUT="${HRD_OUT:-$ROOT/runs/hardness}"

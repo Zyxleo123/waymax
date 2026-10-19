@@ -27,16 +27,16 @@
 #   DFT_ADP_PAIRS_FROM=<earlier run dir> bash ...     # reuse its collection, retrain + eval
 #   DFT_ADP_EXTRA='--adapter_K 10' DFT_ADP_TAG=k10 DFT_ADP_PAIRS_FROM=... bash ...  # escalation
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 for v in $(compgen -v SLURM_); do unset "$v"; done
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
-OUT="${DFT_ADP_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/adapter/${STAMP}${DFT_ADP_TAG:+_$DFT_ADP_TAG}}"
-# The verified three-stratum splits with `shard_glob` moved to /zfsauton/datasets/womd
+OUT="${DFT_ADP_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/adapter/${STAMP}${DFT_ADP_TAG:+_$DFT_ADP_TAG}}"
+# The verified three-stratum splits with `shard_glob` moved to /data/user_data/yixiz/autonlab/zfsauton/datasets/womd
 # (eshau vanished ~10-02; same shards, offsets verified 10-03). train_safety refuses a
 # splits file whose shard_glob resolves to a different file list than --shard_glob.
-SPLITS3="${DFT_ADP_SPLITS:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata_womd.json}"
-SHARD_GLOB=/zfsauton/datasets/womd/tf_example/training/training_tfexample.tfrecord-*
-REF="${DFT_ADP_REF:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/lateral_opt_proj_20260930_171718_1665097/select}"
+SPLITS3="${DFT_ADP_SPLITS:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata_womd.json}"
+SHARD_GLOB=/data/user_data/yixiz/autonlab/zfsauton/datasets/womd/tf_example/training/training_tfexample.tfrecord-*
+REF="${DFT_ADP_REF:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/lateral_opt_proj_20260930_171718_1665097/select}"
 TEACHER=o_lpA3
 SMOKE="${DFT_ADP_SMOKE:-}"
 PAIRS_FROM="${DFT_ADP_PAIRS_FROM:-}"
@@ -134,7 +134,7 @@ EVAL="$OUT/eval"; mkdir -p "$EVAL/env" "$EVAL/tasks"
 # a6000 only for the real eval (gpu28 is the a5000): the teacher's rows came from
 # a6000s, and the pairing rests on this eval's base arm reproducing them bit for bit.
 if [[ -n "$SMOKE" ]]; then E_SH=1; E_REP=1; E_CHUNK=4; E_CAP=4; EXCL=()
-else E_SH=4; E_REP=4; E_CHUNK=32; E_CAP=-1; EXCL=(--exclude=gpu28); fi
+else E_SH=4; E_REP=4; E_CHUNK=32; E_CAP=-1; EXCL=(); fi
 for ((s = 0; s < E_SH; s++)); do
   d="$EVAL/tasks/adapter_shard${s}"; mkdir -p "$d"; f="$EVAL/env/$s.env"
   { kv DFT_OUT_DIR "$d"; select_common

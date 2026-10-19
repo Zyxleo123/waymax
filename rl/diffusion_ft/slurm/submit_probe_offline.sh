@@ -11,11 +11,11 @@
 #   bash rl/diffusion_ft/slurm/submit_probe_offline.sh
 #   DFT_OFFLINE_RUN_DIR=/path/to/run DFT_OFFLINE_K=4 bash rl/diffusion_ft/slurm/submit_probe_offline.sh
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 ENV_DIR="$ROOT/logs/dft/env"; mkdir -p "$ENV_DIR" "$ROOT/logs/dft"
 
-RUN_DIR="${DFT_OFFLINE_RUN_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/base_anchor_sweep/20260908_225908_492838/beta100_succ}"
-SPLITS_JSON="${DFT_SPLITS_JSON:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_verified.json}"
+RUN_DIR="${DFT_OFFLINE_RUN_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/base_anchor_sweep/20260908_225908_492838/beta100_succ}"
+SPLITS_JSON="${DFT_SPLITS_JSON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_verified.json}"
 K="${DFT_OFFLINE_K:-3}"
 ARM_NAME="${DFT_ARM_NAME:-beta100}"
 OFFLINE_DIR="${DFT_OFFLINE_DIR:-$RUN_DIR/probe_offline}"

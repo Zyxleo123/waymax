@@ -1,13 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=dft_vizsafe
-#SBATCH --partition=cpu
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_cpu_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=16G
 #SBATCH --time=0:30:00
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
 #
 # Draw the safety-loss probe from the artifacts it wrote. Reads only
 # safety_probe.{npz,jsonl} + _summary.json -- no model, no GPU -- so the figures
@@ -15,7 +16,7 @@
 # DFT_PROBE_OUT).
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 mkdir -p "$ROOT/logs/dft"
 
@@ -43,7 +44,7 @@ if [[ ! -f "$PROBE_DIR/safety_probe_summary.json" ]]; then
   exit 0
 fi
 
-export PYTHON="${PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
+export PYTHON="${PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 export PYTHONUNBUFFERED=1
 export CUDA_VISIBLE_DEVICES=""
 export JAX_PLATFORMS=cpu

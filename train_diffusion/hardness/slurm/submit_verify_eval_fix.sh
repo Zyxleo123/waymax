@@ -10,7 +10,7 @@
 #     HRD_CKPT=/path/to/pretrained/latest bash train_diffusion/hardness/slurm/submit_verify_eval_fix.sh
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 
 : "${HRD_CKPT:?set HRD_CKPT to the pretrained diffusion checkpoint}"
@@ -27,10 +27,10 @@ ENV_FILE="$ENV_DIR/verify_$(date +%Y%m%d_%H%M%S).env"
 emit() { printf '%s=%q\n' "$1" "$2"; }
 {
   emit HRD_CKPT "$HRD_CKPT"
-  emit HRD_EVAL_TFRECORD_DIR "${HRD_EVAL_TFRECORD_DIR:-/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures}"
-  emit HRD_EVAL_LANE_GRAPH_DIR "${HRD_EVAL_LANE_GRAPH_DIR:-/zfsauton/scratch/mineuih/waymax_rs/lane_graphs}"
+  emit HRD_EVAL_TFRECORD_DIR "${HRD_EVAL_TFRECORD_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures}"
+  emit HRD_EVAL_LANE_GRAPH_DIR "${HRD_EVAL_LANE_GRAPH_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs}"
   emit HRD_VERIFY_NUM "${HRD_VERIFY_NUM:-20}"
-  emit HRD_VERIFY_OUT "${HRD_VERIFY_OUT:-/zfsauton/scratch/yixiz/waymax_rs/hardness_verify}"
+  emit HRD_VERIFY_OUT "${HRD_VERIFY_OUT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/hardness_verify}"
 } > "$ENV_FILE"
 
 job="$(env -i HOME="$HOME" PATH="$PATH" USER="${USER:-}" sbatch --parsable \

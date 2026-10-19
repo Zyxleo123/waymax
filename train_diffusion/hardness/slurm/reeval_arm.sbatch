@@ -1,15 +1,15 @@
 #!/bin/bash
 #SBATCH --job-name=hrd_reeval
-#SBATCH --partition=general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:a6000:1
+#SBATCH --gres=gpu:A6000:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=96G
 #SBATCH --time=03:00:00
-#SBATCH --nodelist=gpu29
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%j.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%j.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%j.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%j.out
 #
 # Re-evaluate one alpha-sweep checkpoint with the FIXED eval (verify job 35289):
 #   A) the planner drives with the weights it is handed, and
@@ -30,7 +30,7 @@
 # (f32[num_worlds,512,30000]) that OOM'd the 24G retries in run 35150/35199.
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 mkdir -p "$ROOT/logs/hardness"
 
@@ -43,19 +43,19 @@ for arg in "$@"; do
   fi
 done
 
-export PYTHON="${PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
+export PYTHON="${PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 export PYTHONUNBUFFERED=1
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
 export TF_FORCE_GPU_ALLOW_GROWTH="${TF_FORCE_GPU_ALLOW_GROWTH:-true}"
 
 RE_ARM="${RE_ARM:?set RE_ARM to the arm label, e.g. control}"
 RE_CKPT="${RE_CKPT:?set RE_CKPT to the epoch_0010 checkpoint directory}"
-RE_OUT="${RE_OUT:-/zfsauton/scratch/yixiz/waymax_rs/hardness_reeval}"
-RE_FAIL_TFRECORD_DIR="${RE_FAIL_TFRECORD_DIR:-/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures}"
+RE_OUT="${RE_OUT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/hardness_reeval}"
+RE_FAIL_TFRECORD_DIR="${RE_FAIL_TFRECORD_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures}"
 RE_FAIL_NUM="${RE_FAIL_NUM:-218}"
-RE_WOMD_TFRECORD_DIR="${RE_WOMD_TFRECORD_DIR:-/zfsauton/scratch/eshau/womd/tf_example/training}"
+RE_WOMD_TFRECORD_DIR="${RE_WOMD_TFRECORD_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training}"
 RE_WOMD_NUM="${RE_WOMD_NUM:-200}"
-RE_LANE_GRAPH_DIR="${RE_LANE_GRAPH_DIR:-/zfsauton/scratch/mineuih/waymax_rs/lane_graphs}"
+RE_LANE_GRAPH_DIR="${RE_LANE_GRAPH_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs}"
 RE_NUM_WORLDS="${RE_NUM_WORLDS:-10}"
 
 if [[ ! -f "$RE_CKPT/metadata.json" ]]; then

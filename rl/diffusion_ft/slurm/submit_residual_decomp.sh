@@ -22,8 +22,8 @@
 #   bash rl/diffusion_ft/slurm/submit_residual_decomp.sh <select_dir>
 #   DFT_RESID_SPLITS=failure_heldout bash rl/diffusion_ft/slurm/submit_residual_decomp.sh
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
-SEL_ROOT=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
+SEL_ROOT=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select
 
 SEL_DIR="${1:-${DFT_SELECT_DIR:-}}"
 if [[ -z "$SEL_DIR" ]]; then

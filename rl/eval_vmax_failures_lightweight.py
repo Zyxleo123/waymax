@@ -9,9 +9,9 @@ render path), dumps per-scenario CSV, optionally writes a few mp4s.
 Example::
 
     JAX_PLATFORMS=cpu python -m rl.eval_vmax_failures_lightweight \\
-      --run-dir /zfsauton/scratch/yixiz/waymax_rs/vmax_repro/_eval_staged_overfit_best_261120 \\
-      --path-dataset /zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord \\
-      --out-dir /zfsauton/scratch/yixiz/waymax_rs/vmax_repro/_eval_failures_best_261120_lw \\
+      --run-dir /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/vmax_repro/_eval_staged_overfit_best_261120 \\
+      --path-dataset /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord \\
+      --out-dir /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/vmax_repro/_eval_failures_best_261120_lw \\
       --render-indices 0,1,2
 """
 
@@ -47,7 +47,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--run-dir", required=True, help="Hydra run dir with model/ + .hydra/")
     p.add_argument(
         "--path-dataset",
-        default="/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord",
+        default="/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord",
     )
     p.add_argument("--out-dir", required=True)
     p.add_argument("--seed", type=int, default=0)

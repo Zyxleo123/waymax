@@ -123,7 +123,7 @@ Two defaults follow, both changed on 2026-09-03:
 Usage::
 
     python -m rl.diffusion_ft.train_safety --out_dir DIR \\
-        --shard_glob '/zfsauton/scratch/eshau/womd/tf_example/training/*' \\
+        --shard_glob '/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/*' \\
         --iters 500 --scenes_per_iter 16 --k_trainable 10
 """
 
@@ -3233,7 +3233,7 @@ def build_argparser():
     p.add_argument("--tfrecord", default="")
     p.add_argument("--indices", default="0,1,2,3,4,5,6,7")
     p.add_argument("--shard_glob", default="")
-    p.add_argument("--index_dir", default="/zfsauton/scratch/yixiz/waymax_rs/womd_offsets")
+    p.add_argument("--index_dir", default="/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets")
     p.add_argument("--scenes_per_iter", type=int, default=16)
     p.add_argument("--eval_scenes", type=int, default=32)
     p.add_argument("--data_seed", type=int, default=0)

@@ -13,13 +13,13 @@ Run on a GPU node::
 
     conda activate waymax
     srun --gres=gpu:1 --partition=general --mem=32G --cpus-per-task=8 bash -lc '
-      source /zfsauton/scratch/yixiz/miniconda3/etc/profile.d/conda.sh
+      source /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/miniconda3/etc/profile.d/conda.sh
       conda activate waymax
-      cd /zfsauton2/home/yixiz/waymax_rs
+      cd /home/yixiz/waymax_rs
       python -m rl.rollout_pseudo_gt \
-        --trace-json /zfsauton/scratch/yixiz/failure_womd_trace.json \
-        --run-dir /zfsauton/scratch/yixiz/waymax_rs/vmax_repro/repro_sac \
-        --output-dir /zfsauton/scratch/yixiz/pseudo_gt/repro_sac \
+        --trace-json /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/failure_womd_trace.json \
+        --run-dir /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/vmax_repro/repro_sac \
+        --output-dir /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/pseudo_gt/repro_sac \
         --limit 5
     '
 """
@@ -74,7 +74,7 @@ def _parse_args() -> argparse.Namespace:
         help="Explicit checkpoint .pkl (default: latest in run-dir/model/).",
     )
     p.add_argument("--output-dir", required=True)
-    p.add_argument("--failure-dir", default="/zfsauton/scratch/mineuih/waymax_rs/failure_samples")
+    p.add_argument("--failure-dir", default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/failure_samples")
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument(

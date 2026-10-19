@@ -11,7 +11,7 @@ if it is high and clean, the gap is real and worth optimizing.
 CPU-only (no model forward on the expert path). Submitted, not run inline.
 
     python -m rl.diffusion_ft.winnability \
-        --tfrecord /zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord \
+        --tfrecord /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord \
         --indices 0-31 --out runs/dft_winnability/failures_0_31.json
 """
 
@@ -58,7 +58,7 @@ def parse_indices(spec: str) -> list[int]:
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--tfrecord", type=str,
-                   default="/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord")
+                   default="/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord")
     p.add_argument("--indices", type=str, default="0-31",
                    help="e.g. '0-31' or '0,1,2,5'")
     p.add_argument("--ckpt", type=str, default=DEFAULT_CHECKPOINT_PATH)

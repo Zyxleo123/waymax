@@ -30,11 +30,11 @@
 # Usage (from repo root, ON RHEA):
 #   bash rl/diffusion_ft/slurm/submit_retrain_worlddt.sh
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
-OUT="${DFT_RETRAIN_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/retrain_worlddt/${STAMP}}"
-OLD=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
-SPLITS3=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json
+OUT="${DFT_RETRAIN_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/retrain_worlddt/${STAMP}}"
+OLD=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
+SPLITS3=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json
 ITER="${DFT_EVAL_ITER:-000110}"
 mkdir -p "$OUT"
 export DFT_WORLD_DT_METHOD=median

@@ -22,15 +22,15 @@
 #        DFT_UNROLL_ETA DFT_N_MC DFT_GRAD_STEPS DFT_K_TRAINABLE DFT_INDICES
 #        DFT_PARTITION/DFT_QOS/DFT_NODELIST/DFT_EXCLUDE
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 ENV_DIR="$ROOT/logs/dft/env"; mkdir -p "$ENV_DIR" "$ROOT/logs/dft"
 # `$$` guards against two sibling submissions in the same second sharing one env
 # file and one out_dir -- see submit_train_safety.sh for the incident.
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"; ENV_FILE="$ENV_DIR/bondunroll_${STAMP}.env"
-DFT_GATE_OUT="${DFT_GATE_OUT:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/bond_unroll/${STAMP}}"
+DFT_GATE_OUT="${DFT_GATE_OUT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/bond_unroll/${STAMP}}"
 {
-  echo "DFT_CKPT=${DFT_CKPT:-/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
-  echo "DFT_TFRECORD=${DFT_TFRECORD:-/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord}"
+  echo "DFT_CKPT=${DFT_CKPT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
+  echo "DFT_TFRECORD=${DFT_TFRECORD:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord}"
   echo "DFT_INDICES=${DFT_INDICES:-0,1,2,3,4,5,6,7}"
   echo "DFT_GRAD_STEPS=${DFT_GRAD_STEPS:-30}"
   echo "DFT_SAFETY_LR=${DFT_SAFETY_LR:-1e-5}"

@@ -120,10 +120,10 @@ def _parse_args() -> argparse.Namespace:
 	parser = argparse.ArgumentParser(
 		description="Run manual annotation from cached sim_state npz and lane graph zip."
 	)
-	parser.add_argument("--tfrecord_dir", type=str, default="/zfsauton/scratch/eshau/womd/tf_example/training/", help="Directory containing TFRecord files.")
-	parser.add_argument("--lane_graph_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/lane_graphs/", help="Directory containing matching lane graph zip files.")
-	parser.add_argument("--cache_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/", help="Directory containing cached sim_state npz files.")
-	parser.add_argument("--output_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/annotations/", help="Directory where JSONL files will be written.")
+	parser.add_argument("--tfrecord_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/", help="Directory containing TFRecord files.")
+	parser.add_argument("--lane_graph_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs/", help="Directory containing matching lane graph zip files.")
+	parser.add_argument("--cache_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/", help="Directory containing cached sim_state npz files.")
+	parser.add_argument("--output_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/annotations/", help="Directory where JSONL files will be written.")
 	parser.add_argument("--start_timestep", type=int, default=0, help="Start timestep for the annotation window.")
 	parser.add_argument(
 		"--trajectory_length",

@@ -2,7 +2,7 @@
 # Submit the parameter-distance probe. Only calls sbatch.
 #
 # Usage (from repo root, ON RHEA):
-#   DFT_ARMS='/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/safety_anchor_sweep/20260902_200735_785143/*/' \
+#   DFT_ARMS='/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/safety_anchor_sweep/20260902_200735_785143/*/' \
 #     bash rl/diffusion_ft/slurm/submit_param_distance.sh
 #
 # DFT_ARMS is a glob of RUN DIRECTORIES (each holding latest/tparams.npz and
@@ -11,7 +11,7 @@
 # pattern would be expanded by the calling shell into many words and only the
 # first would survive the assignment.
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 ENV_DIR="$ROOT/logs/dft/env"; mkdir -p "$ENV_DIR" "$ROOT/logs/dft"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
 ENV_FILE="$ENV_DIR/paramdist_${STAMP}.env"
@@ -20,7 +20,7 @@ ENV_FILE="$ENV_DIR/paramdist_${STAMP}.env"
 
 {
   echo "DFT_ARMS=${DFT_ARMS}"
-  echo "DFT_CKPT=${DFT_CKPT:-/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
+  echo "DFT_CKPT=${DFT_CKPT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
   echo "DFT_LR=${DFT_LR:-1e-5}"
   echo "DFT_DIST_OUT=${DFT_DIST_OUT:-$ROOT/logs/dft/param_distance_${STAMP}.json}"
 } > "$ENV_FILE"

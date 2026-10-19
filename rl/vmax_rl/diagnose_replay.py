@@ -23,7 +23,7 @@ error, m), and the bimodal split ``frac_track`` (<0.1 m) / ``frac_diverge``
 Example (on a GPU node / inside an srun alloc)::
 
     python -m rl.vmax_rl.diagnose_replay \
-        --failure-dir /zfsauton/scratch/mineuih/waymax_rs/failure_samples \
+        --failure-dir /data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/failure_samples \
         --limit 32 --scenario-length 80
 """
 
@@ -226,7 +226,7 @@ def main() -> None:
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Diagnose the expert-replay reward artifact + refit fix.")
-    p.add_argument("--failure-dir", default="/zfsauton/scratch/mineuih/waymax_rs/failure_samples")
+    p.add_argument("--failure-dir", default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/failure_samples")
     p.add_argument("--limit", type=int, default=32, help="Cap scenarios (default 32 for a quick check).")
     p.add_argument("--max-num-objects", type=int, default=64)
     p.add_argument("--scenario-length", type=int, default=80)

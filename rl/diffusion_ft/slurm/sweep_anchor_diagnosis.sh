@@ -57,15 +57,15 @@
 # v100 and OOMs on the 2080 Ti. Do not widen the partition.
 #
 # Usage (from repo root, ON RHEA):
-#   DFT_EXTRA_ARMS='/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/null_lr_sweep/<STAMP>/*/' \
+#   DFT_EXTRA_ARMS='/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/null_lr_sweep/<STAMP>/*/' \
 #     bash rl/diffusion_ft/slurm/sweep_anchor_diagnosis.sh
 #
 # Each arm is "anchor_states:seed".
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 ENV_DIR="$ROOT/logs/dft/env"; mkdir -p "$ENV_DIR" "$ROOT/logs/dft"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
-BASE_OUT="${DFT_SWEEP_OUT:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/anchor_diagnosis/${STAMP}}"
+BASE_OUT="${DFT_SWEEP_OUT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/anchor_diagnosis/${STAMP}}"
 
 ARMS="${DFT_DIAG_ARMS:-policy:1 log:0}"
 DFT_ITERS="${DFT_ITERS:-200}"
@@ -99,12 +99,12 @@ for ARM in $ARMS; do
   ENV_FILE="$ENV_DIR/anchordiag_${STAMP}_${TAG}.env"
   {
     echo "DFT_OUT_DIR=$OUT_DIR"
-    echo "DFT_CKPT=${DFT_CKPT:-/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
+    echo "DFT_CKPT=${DFT_CKPT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
     # data -- must match the null ladder exactly for the cross-sweep comparison
     [[ -n "${DFT_TFRECORD:-}" ]] && echo "DFT_TFRECORD=${DFT_TFRECORD}"
     [[ -n "${DFT_INDICES:-}" ]]  && echo "DFT_INDICES=${DFT_INDICES}"
-    echo "DFT_SHARD_GLOB=${DFT_SHARD_GLOB:-/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
-    echo "DFT_INDEX_DIR=${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
+    echo "DFT_SHARD_GLOB=${DFT_SHARD_GLOB:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
+    echo "DFT_INDEX_DIR=${DFT_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
     echo "DFT_SCENES_PER_ITER=${DFT_SCENES_PER_ITER:-16}"
     echo "DFT_EVAL_SCENES=${DFT_EVAL_SCENES:-32}"
     echo "DFT_DATA_SEED=${DFT_DATA_SEED:-0}"
@@ -114,7 +114,7 @@ for ARM in $ARMS; do
     # the splits every claim in this diagnosis is stated on -- are never
     # measured. This is the same file the 09-02 sweep used; a different
     # one would make the arms incomparable to it.
-    echo "DFT_SPLITS_JSON=${DFT_SPLITS_JSON:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/eval_splits.json}"
+    echo "DFT_SPLITS_JSON=${DFT_SPLITS_JSON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/eval_splits.json}"
     # Heldout only: the *_train pools double the eval cost and answer nothing here.
     echo "DFT_SPLITS=${DFT_SPLITS:-failure_heldout,success_heldout}"
     echo "DFT_SPLIT_CAP=${DFT_SPLIT_CAP:-48}"
@@ -183,7 +183,7 @@ if ((${#TRAIN_IDS[@]})); then
   [[ -n "${DFT_EXTRA_ARMS:-}" ]] && ARMS_GLOB="$ARMS_GLOB,${DFT_EXTRA_ARMS}"
   {
     echo "DFT_ARMS=$ARMS_GLOB"
-    echo "DFT_CKPT=${DFT_CKPT:-/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
+    echo "DFT_CKPT=${DFT_CKPT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
     echo "DFT_DIST_OUT=$BASE_OUT/param_distance.json"
   } > "$DIST_ENV"
   DEPS=$(IFS=:; echo "${TRAIN_IDS[*]}")

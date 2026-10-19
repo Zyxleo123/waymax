@@ -10,7 +10,7 @@
 # Usage (from repo root, ON RHEA -- every partition sets AllocNodes=rhea, so a
 # compute node fails with "Access/permission denied"):
 #
-#   DFT_OUT_DIR=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/safety_train/<STAMP> \
+#   DFT_OUT_DIR=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/safety_train/<STAMP> \
 #     bash rl/diffusion_ft/slurm/submit_eval_reach.sh
 #
 # Knobs (optional): DFT_LOAD_CKPT (default <OUT_DIR>/latest), DFT_EVAL_SCENES
@@ -20,7 +20,7 @@
 #   DFT_NODELIST DFT_EXCLUDE. Model config (k_trainable, margins) is read from
 #   <OUT_DIR>/latest/meta.json when present, else falls back to defaults.
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 ENV_DIR="$ROOT/logs/dft/env"; mkdir -p "$ENV_DIR" "$ROOT/logs/dft"
 
 DFT_OUT_DIR="${DFT_OUT_DIR:?set DFT_OUT_DIR to a finished safety_train run dir}"
@@ -41,7 +41,7 @@ read_meta() {  # key default
 K_TRAINABLE="${DFT_K_TRAINABLE:-$(read_meta k_trainable 10)}"
 EDGE_MARGIN="${DFT_EDGE_MARGIN:-$(read_meta edge_margin_m 0.3)}"
 AGENT_MARGIN="${DFT_AGENT_MARGIN:-$(read_meta agent_margin_m 0.75)}"
-BASE_CKPT="${DFT_CKPT:-$(read_meta base_ckpt /zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest)}"
+BASE_CKPT="${DFT_CKPT:-$(read_meta base_ckpt /data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest)}"
 
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
 ENV_FILE="$ENV_DIR/evalreach_${STAMP}.env"
@@ -50,8 +50,8 @@ ENV_FILE="$ENV_DIR/evalreach_${STAMP}.env"
   echo "DFT_LOAD_CKPT=$LOAD_CKPT"
   echo "DFT_DUMP_DIR=${DFT_DUMP_DIR:-${DFT_OUT_DIR}/eval}"
   echo "DFT_CKPT=$BASE_CKPT"
-  echo "DFT_SHARD_GLOB=${DFT_SHARD_GLOB:-/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
-  echo "DFT_INDEX_DIR=${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
+  echo "DFT_SHARD_GLOB=${DFT_SHARD_GLOB:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
+  echo "DFT_INDEX_DIR=${DFT_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
   echo "DFT_EVAL_SCENES=${DFT_EVAL_SCENES:-32}"
   echo "DFT_EVAL_TRAIN=${DFT_EVAL_TRAIN:-1}"
   echo "DFT_EVAL_TRAIN_SCENES=${DFT_EVAL_TRAIN_SCENES:-100}"

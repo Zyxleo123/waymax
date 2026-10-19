@@ -16,7 +16,7 @@ into the risk table.  Resumable: an existing JSON is skipped.
     JAX_PLATFORMS=cpu python -m rl.vmax_hardness.rescore \
         --run-dir /path/to/staged_best_run \
         --shard-glob '/.../training_tfexample.tfrecord-*-of-01000' \
-        --index-dir /zfsauton/scratch/yixiz/waymax_rs/womd_offsets \
+        --index-dir /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets \
         --n-shards 200 --per-shard 40 --out-dir /.../rescore_labels
 """
 from __future__ import annotations

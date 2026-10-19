@@ -1,12 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=ckpteval-convert
-#SBATCH --partition=cpu
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_cpu_qos
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --time=12:00:00
 #SBATCH --array=0-1
-#SBATCH --output=/zfsauton/scratch/yixiz/waymax_rs/ckpt_eval_shard01/logs/convert-%A_%a.out
-#SBATCH --error=/zfsauton/scratch/yixiz/waymax_rs/ckpt_eval_shard01/logs/convert-%A_%a.out
+#SBATCH --output=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/ckpt_eval_shard01/logs/convert-%A_%a.out
+#SBATCH --error=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/ckpt_eval_shard01/logs/convert-%A_%a.out
 #
 # Convert raw WOMD scenario-proto shards 0 and 1 of one split into a single
 # ScenarioMax tfexample tfrecord that V-Max can read.
@@ -19,9 +20,9 @@
 
 set -euo pipefail
 
-SUBMIT_DIR="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+SUBMIT_DIR="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 PREAMBLE="${SUBMIT_DIR}/V-Max/slurm/_ckpt_eval_preamble.sh"
-[ -f "${PREAMBLE}" ] || PREAMBLE=/zfsauton2/home/yixiz/waymax_rs/V-Max/slurm/_ckpt_eval_preamble.sh
+[ -f "${PREAMBLE}" ] || PREAMBLE=/home/yixiz/waymax_rs/V-Max/slurm/_ckpt_eval_preamble.sh
 # shellcheck source=/dev/null
 . "${PREAMBLE}" "$@"
 

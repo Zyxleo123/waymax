@@ -3,9 +3,9 @@
 Example (smoke, 1 GPU)::
 
     python -m rl.vmax_rl.refine \
-        --failure-dir /zfsauton/scratch/mineuih/waymax_rs/failure_samples \
-        --womd-dir /zfsauton/scratch/eshau/womd/tf_example/training \
-        --save-dir /zfsauton/scratch/yixiz/waymax_rs/runs/bcsac_smoke \
+        --failure-dir /data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/failure_samples \
+        --womd-dir /data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training \
+        --save-dir /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/runs/bcsac_smoke \
         --total-timesteps 20000 --num-envs 8 --num-episode-per-epoch 2 \
         --learning-start 500 --buffer-size 50000 --limit-failures 32
 
@@ -327,8 +327,8 @@ def main() -> None:
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="BC_SAC refinement (V-Max) on Waymax failure cases.")
     # Data
-    p.add_argument("--failure-dir", default="/zfsauton/scratch/mineuih/waymax_rs/failure_samples")
-    p.add_argument("--womd-dir", default="/zfsauton/scratch/eshau/womd/tf_example/training")
+    p.add_argument("--failure-dir", default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/failure_samples")
+    p.add_argument("--womd-dir", default="/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training")
     p.add_argument("--total-shards", type=int, default=1000)
     p.add_argument("--limit-failures", type=int, default=None, help="Cap failure scenarios (smoke tests).")
     p.add_argument("--refit-sdc-log", action="store_true",

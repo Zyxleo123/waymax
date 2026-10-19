@@ -58,10 +58,10 @@ set -euo pipefail
 # inside an allocation SLURM_SUBMIT_DIR may be unset or point elsewhere.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"; cd "$ROOT"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
-SEL_DIR="${DFT_SELECT_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/${STAMP}}"
-VDIR=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777
+SEL_DIR="${DFT_SELECT_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/${STAMP}}"
+VDIR=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777
 SPLITS3="${DFT_SPLITS3_JSON:-$VDIR/eval_splits_3strata.json}"
-RUN=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
+RUN=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
 CKPTS="${DFT_SELECT_CKPTS:-$RUN/base_s0/iter_000110 $RUN/base_s1/iter_000110 $RUN/base_s2/iter_000110}"
 # `-`, not `:-`: an explicitly EMPTY DFT_FT_ARMS means "no fine-tune arms" (a
 # base/bank-only job still needs one checkpoint dir, but never loads it).
@@ -73,7 +73,7 @@ SHARDS="${DFT_NUM_SHARDS:-2}"
 CHUNK="${DFT_EVAL_CHUNK:-32}"
 CAP="${DFT_SELECT_CAP:--1}"
 MAX_CONCURRENT="${DFT_MAX_CONCURRENT:-3}"
-EXCLUDE="${DFT_EXCLUDE-gpu28}"        # a5000: two candidates per replan; keep to a6000
+EXCLUDE="${DFT_EXCLUDE-}"        # a5000: two candidates per replan; keep to a6000
 ENV_DIR="$SEL_DIR/env"; mkdir -p "$ENV_DIR" "$SEL_DIR/tasks" "$ROOT/logs/dft"
 
 [[ "$SEED" != "777" && "$SEED" != "12345" ]] || {
@@ -132,8 +132,8 @@ for c in $CKPTS; do
       kv DFT_SPLITS_JSON "$SPLITS3"
       # The corpus the splits' scene ids index (validation shards, say). Written
       # explicitly so the job never falls back to the training glob.
-      kv DFT_SHARD_GLOB "${DFT_SHARD_GLOB:-/zfsauton/datasets/womd/tf_example/training/training_tfexample.tfrecord-*}"
-      kv DFT_INDEX_DIR "${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
+      kv DFT_SHARD_GLOB "${DFT_SHARD_GLOB:-/data/user_data/yixiz/autonlab/zfsauton/datasets/womd/tf_example/training/training_tfexample.tfrecord-*}"
+      kv DFT_INDEX_DIR "${DFT_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
       kv DFT_SELECT_SPLITS "${DFT_SELECT_SPLITS:-failure_heldout,success_heldout,intermittent_heldout}"
       kv DFT_FT_CKPT "$c"
       kv DFT_ARMS "$arms"

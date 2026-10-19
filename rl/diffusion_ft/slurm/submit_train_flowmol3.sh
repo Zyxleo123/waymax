@@ -16,13 +16,13 @@
 # no such knob, which is the only reason this is an array and not four jobs.
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 ENV_DIR_BASE="$ROOT/logs/dft/env"; mkdir -p "$ENV_DIR_BASE"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 ENV_DIR="$ENV_DIR_BASE/flowmol3_${STAMP}"; mkdir -p "$ENV_DIR"
 
-SAVE_DIR="${FM3_SAVE_DIR:-/zfsauton/scratch/yixiz/waymax_rs/flowmol3/${STAMP}}"
+SAVE_DIR="${FM3_SAVE_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/flowmol3/${STAMP}}"
 ARMS=(base sc dist sc_dist)
 
 for i in "${!ARMS[@]}"; do

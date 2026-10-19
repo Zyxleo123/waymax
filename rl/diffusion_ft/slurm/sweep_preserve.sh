@@ -32,17 +32,17 @@
 #   bash rl/diffusion_ft/slurm/sweep_preserve.sh
 #   DFT_ARMS="pres3_s0" DFT_ITERS=2 DFT_EVAL_EVERY=1 DFT_SPLIT_CAP=8 bash ...   # smoke
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
-BASE_OUT="${DFT_SWEEP_OUT:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/preserve/${STAMP}}"
+BASE_OUT="${DFT_SWEEP_OUT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/preserve/${STAMP}}"
 ENV_DIR="$BASE_OUT/env"
 mkdir -p "$ENV_DIR" "$ROOT/logs/dft"
 
-VDIR=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777
+VDIR=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777
 SPLITS_JSON="${DFT_SPLITS3_JSON:-$VDIR/eval_splits_3strata.json}"
-CKPT="${DFT_CKPT:-/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
-GLOB="${DFT_SHARD_GLOB:-/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
-IDX="${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
+CKPT="${DFT_CKPT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
+GLOB="${DFT_SHARD_GLOB:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
+IDX="${DFT_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
 RISK="${DFT_PRESERVE_RISK:-$ROOT/runs/hardness/risk.npz}"
 [[ -s "$RISK" ]] || { echo "FATAL: no risk table $RISK (set DFT_PRESERVE_RISK= to sample uniformly)" >&2; exit 1; }
 
@@ -76,7 +76,7 @@ GROUP="${DFT_WANDB_GROUP:-preserve_${STAMP}}"
 
 sb() { env -i HOME="$HOME" PATH="$PATH" USER="${USER:-}" sbatch "$@"; }
 SB_FLAGS=()
-[[ -n "${DFT_EXCLUDE-gpu28}" ]] && SB_FLAGS+=(--exclude="${DFT_EXCLUDE-gpu28}")
+[[ -n "${DFT_EXCLUDE-}" ]] && SB_FLAGS+=(--exclude="${DFT_EXCLUDE-}")
 [[ -n "${DFT_TIME:-}" ]] && SB_FLAGS+=(--time="$DFT_TIME")
 
 DEP=()

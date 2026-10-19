@@ -13,8 +13,8 @@ Checks (all optional via ``--checks``):
 Example::
 
     python -m rl.verify_pseudo_gt \\
-        --pseudo-gt-dir /zfsauton/scratch/yixiz/pseudo_gt/repro_sac_v2 \\
-        --run-dir /zfsauton/scratch/yixiz/waymax_rs/vmax_repro/repro_sac_v2
+        --pseudo-gt-dir /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/pseudo_gt/repro_sac_v2 \\
+        --run-dir /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/vmax_repro/repro_sac_v2
 
     python -m rl.verify_pseudo_gt --checks indices mapping --limit 20
 """
@@ -59,16 +59,16 @@ from vmax.simulator.metrics.collector import check_episode_success  # noqa: E402
 from vmax.simulator.wrappers.interfaces.brax import BraxWrapper  # noqa: E402
 from viz import viz as viz_module  # noqa: E402
 
-DEFAULT_SCENARIOMAX_TFRECORD = "/zfsauton/scratch/yixiz/ScenarioMaxWaymo/training.tfrecord"
-DEFAULT_SCENARIOMAX_INDEX = "/zfsauton/scratch/yixiz/scenariomax_scenario_id_index.sqlite3"
-DEFAULT_WOMD_INDEX = "/zfsauton/scratch/yixiz/womd_scenario_id_index.sqlite3"
+DEFAULT_SCENARIOMAX_TFRECORD = "/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymo/training.tfrecord"
+DEFAULT_SCENARIOMAX_INDEX = "/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/scenariomax_scenario_id_index.sqlite3"
+DEFAULT_WOMD_INDEX = "/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/womd_scenario_id_index.sqlite3"
 
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--pseudo-gt-dir", required=True)
     p.add_argument("--run-dir", default=None, help="V-Max run dir (required for metrics check).")
-    p.add_argument("--failure-dir", default="/zfsauton/scratch/mineuih/waymax_rs/failure_samples")
+    p.add_argument("--failure-dir", default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/failure_samples")
     p.add_argument(
         "--checks",
         nargs="+",

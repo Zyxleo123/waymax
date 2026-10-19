@@ -35,16 +35,16 @@
 #   DFT_SIM_AGENTS=idm bash rl/diffusion_ft/slurm/submit_wm_posthoc.sh
 #   DFT_WM_MF_CKPT=/path/epoch_0450.pt bash ...       # another checkpoint
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 for v in $(compgen -v SLURM_); do unset "$v"; done
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
 SIM="${DFT_SIM_AGENTS:-none}"
 case "$SIM" in none|idm|idm_brake) ;; *) echo "FATAL: DFT_SIM_AGENTS=$SIM not none|idm|idm_brake" >&2; exit 1;; esac
 SMOKE="${DFT_WM_SMOKE:-}"
-OUT="${DFT_WM_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/wm_posthoc_${SIM}${SMOKE:+_smoke}_${STAMP}}"
-# Same scene ids as eval_splits_3strata.json, re-pointed at /zfsauton/datasets/womd
+OUT="${DFT_WM_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/wm_posthoc_${SIM}${SMOKE:+_smoke}_${STAMP}}"
+# Same scene ids as eval_splits_3strata.json, re-pointed at /data/user_data/yixiz/autonlab/zfsauton/datasets/womd
 # (the eshau copy is gone; the runner refuses a splits file built on another glob).
-SPLITS3=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata_womd.json
+SPLITS3=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata_womd.json
 AM_CFG="${DFT_ARGMIN_CFG:-lon=1,w_lon_prox=0.05,lon_back_m=1000}"
 mkdir -p "$OUT/gate" "$ROOT/logs/dft"
 sb() { env -i HOME="$HOME" PATH="$PATH" USER="${USER:-}" sbatch "$@"; }
@@ -60,7 +60,7 @@ GID=$(sb --parsable rl/diffusion_ft/slurm/test_wm_forecast.sbatch "$OUT/gate/gat
 echo "gate    -> job $GID (CPU) -> $OUT/gate/verdict.txt"
 
 # The base checkpoint dir is required by the runner but never loaded (no ft arms).
-OLD=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
+OLD=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
 DFT_SPLITS3_JSON="$SPLITS3" DFT_SELECT_DIR="$OUT/select" \
 DFT_SELECT_DEP="afterok:$GID" DFT_REQUIRE_GATE="$OUT/gate/verdict.txt" \
 DFT_SELECT_CKPTS="$OLD/base_s0/iter_000110" DFT_FT_ARMS="" \

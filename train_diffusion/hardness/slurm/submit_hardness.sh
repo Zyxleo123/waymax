@@ -16,7 +16,7 @@
 #     HRD_ARRAY_TASKS=16 bash train_diffusion/hardness/slurm/submit_hardness.sh
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 
 ENV_DIR="$ROOT/logs/hardness/env"
@@ -33,10 +33,10 @@ emit() { printf '%s=%q\n' "$1" "$2"; }
 
 {
   # The 08-16 policy eval: 73,920 scenarios over 154 shards, 3,135 failures.
-  emit HRD_POLICY_DIR "${HRD_POLICY_DIR:-/zfsauton/scratch/mineuih/waymax_rs/exp/simulation_diffusion_training_20260816_141401}"
+  emit HRD_POLICY_DIR "${HRD_POLICY_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/exp/simulation_diffusion_training_20260816_141401}"
   # Expert log replay over 21 of those shards: the validity gate.
-  emit HRD_EXPERT_DIR "${HRD_EXPERT_DIR:-/zfsauton/scratch/mineuih/waymax_rs/exp/simulation_log-replay_training_20260716_025213}"
-  emit HRD_CACHE_DIR "${HRD_CACHE_DIR:-/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/}"
+  emit HRD_EXPERT_DIR "${HRD_EXPERT_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/exp/simulation_log-replay_training_20260716_025213}"
+  emit HRD_CACHE_DIR "${HRD_CACHE_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/}"
   emit HRD_OUT "${HRD_OUT:-$ROOT/runs/hardness}"
   # Must match the eval's --start_timestep (simulation/run_simulation.py default 10).
   emit HRD_START_T "${HRD_START_T:-10}"

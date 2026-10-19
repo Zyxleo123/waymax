@@ -1,15 +1,15 @@
 #!/bin/bash
 #SBATCH --job-name=hrd_verify
-#SBATCH --partition=general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:a5000:1
+#SBATCH --gres=gpu:A6000:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=02:00:00
-#SBATCH --nodelist=gpu28
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%j.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%j.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%j.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/hardness/slurm-%x-%j.out
 #
 # Verifies the two fixes that invalidated the 2026-08-20 alpha sweep, before any
 # arm is resubmitted:
@@ -26,7 +26,7 @@
 # with no Python traceback.
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 mkdir -p "$ROOT/logs/hardness"
 
@@ -39,7 +39,7 @@ for arg in "$@"; do
   fi
 done
 
-export PYTHON="${PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
+export PYTHON="${PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 export PYTHONUNBUFFERED=1
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
 # Belt and braces with data/scenario_loader.py hiding the GPU from TF: if some
@@ -48,13 +48,13 @@ export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
 export TF_FORCE_GPU_ALLOW_GROWTH="${TF_FORCE_GPU_ALLOW_GROWTH:-true}"
 
 HRD_CKPT="${HRD_CKPT:?set HRD_CKPT to the pretrained diffusion checkpoint}"
-HRD_EVAL_TFRECORD_DIR="${HRD_EVAL_TFRECORD_DIR:-/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures}"
-HRD_EVAL_LANE_GRAPH_DIR="${HRD_EVAL_LANE_GRAPH_DIR:-/zfsauton/scratch/mineuih/waymax_rs/lane_graphs}"
+HRD_EVAL_TFRECORD_DIR="${HRD_EVAL_TFRECORD_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures}"
+HRD_EVAL_LANE_GRAPH_DIR="${HRD_EVAL_LANE_GRAPH_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs}"
 HRD_VERIFY_NUM="${HRD_VERIFY_NUM:-20}"
 # Parameterised so a memory retry is one variable, not an edit: the offroad
 # metric allocates f32[num_worlds,512,30000], ~61MB per world per intermediate.
 HRD_VERIFY_WORLDS="${HRD_VERIFY_WORLDS:-10}"
-HRD_VERIFY_OUT="${HRD_VERIFY_OUT:-/zfsauton/scratch/yixiz/waymax_rs/hardness_verify}"
+HRD_VERIFY_OUT="${HRD_VERIFY_OUT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/hardness_verify}"
 
 echo "host=${SLURMD_NODENAME:-unknown} gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
 # Run 35199 died in waymax's offroad metric with "Allocator (GPU_0_bfc) ran out

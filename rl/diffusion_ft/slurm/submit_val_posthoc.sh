@@ -22,18 +22,18 @@
 #   DFT_SIM_AGENTS=idm_brake bash ...   # reactive (braking) NPCs; base is re-scored in the same job
 #   DFT_VAL_GLOB='.../validation_tfexample.tfrecord-000[0-4]?-of-00150' DFT_VAL_SPLIT=val50 bash ...
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 for v in $(compgen -v SLURM_); do unset "$v"; done
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
-GLOB="${DFT_VAL_GLOB:-/zfsauton/datasets/womd/tf_example/validation/validation_tfexample.tfrecord-0000[0-9]-of-00150}"
+GLOB="${DFT_VAL_GLOB:-/data/user_data/yixiz/autonlab/zfsauton/datasets/womd/tf_example/validation/validation_tfexample.tfrecord-0000[0-9]-of-00150}"
 SPLIT="${DFT_VAL_SPLIT:-val10}"
-INDEX_DIR="${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
+INDEX_DIR="${DFT_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
 # `none` log-replays the other cars; `idm_brake` makes them brake for the ego
 # (rl/diffusion_ft/sim_agents.py). It changes what `overlap` means, so it is in
 # the run's name and both arms are always scored under the same simulator.
 SIM="${DFT_SIM_AGENTS:-none}"
 case "$SIM" in none|idm_brake) ;; *) echo "FATAL: DFT_SIM_AGENTS=$SIM not none|idm_brake" >&2; exit 1;; esac
-OUT="${DFT_VAL_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/val_posthoc_${SPLIT}_${SIM}_${STAMP}}"
+OUT="${DFT_VAL_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/val_posthoc_${SPLIT}_${SIM}_${STAMP}}"
 SPLITS="$OUT/${SPLIT}_splits.json"
 AM_CFG="${DFT_ARGMIN_CFG:-lon=1,w_lon_prox=0.05,lon_back_m=1000}"
 n_shards="$(compgen -G "$GLOB" | wc -l)"
@@ -49,7 +49,7 @@ PID=$(sb --parsable rl/diffusion_ft/slurm/prep_shard_splits.sbatch "$OUT/prep.en
 echo "prep    -> job $PID (CPU) $n_shards shards -> $SPLITS"
 
 # The base checkpoint dir is required by the runner but never loaded (no ft arms).
-OLD=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
+OLD=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
 DFT_SPLITS3_JSON="$SPLITS" DFT_SPLITS_UPSTREAM=1 \
 DFT_SELECT_DIR="$OUT/select" DFT_SELECT_DEP="afterok:$PID" \
 DFT_SHARD_GLOB="$GLOB" DFT_INDEX_DIR="$INDEX_DIR" DFT_SELECT_SPLITS="$SPLIT" \

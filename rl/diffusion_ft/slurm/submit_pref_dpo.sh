@@ -73,12 +73,12 @@
 #   DFT_PREF_STAGE=eval DFT_PREF_DIR=$ZFS/.../pref_dpo/<run> DFT_PREF_ARMS="b1e4" bash ...
 #   DFT_PREF_DATA_FROM=$ZFS/.../pref_dpo/<run> DFT_PREF_ARMS="b1" bash ...   # reuse pairs
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
-OUT="${DFT_PREF_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/pref_dpo/${STAMP}}"
-BCD=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/bank_bc/20260928_121223_39589
-BCSW=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/bank_bc/20260930_000014_1275746
-SPLITS3=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json
+OUT="${DFT_PREF_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/pref_dpo/${STAMP}}"
+BCD=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/bank_bc/20260928_121223_39589
+BCSW=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/bank_bc/20260930_000014_1275746
+SPLITS3=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json
 ARM="b_l24_r20"
 L24="lat0.1,lat-0.1,lat0.175,lat-0.175,lat0.25,lat-0.25,lat0.325,lat-0.325,\
 lat0.4,lat-0.4,lat0.5,lat-0.5,lat0.6,lat-0.6,lat0.75,lat-0.75,\
@@ -195,7 +195,7 @@ for t in ${TASKS[@]+"${TASKS[@]}"}; do
   i=$((i + 1))
 done
 if [[ -z "$DATA_FROM" ]]; then
-  CID=$(sb --parsable --exclude=gpu28 --array="0-$((i - 1))%3" --job-name=dft_pref_collect \
+  CID=$(sb --parsable --array="0-$((i - 1))%3" --job-name=dft_pref_collect \
     rl/diffusion_ft/slurm/select_eval.sbatch "$OUT/collect/env")
   echo "collect -> array $CID ($i tasks, GPU) -> $OUT/collect/tasks/*/bc_data/$ARM/"
   DATA="$OUT/collect/tasks/*/bc_data/$ARM/*.npz"
@@ -308,7 +308,7 @@ if [[ -z "$SMOKE" ]]; then PCK+="$BCD/train/bcd_s0/iter_000150 $BCSW/train/bcsw5
   kv DFT_OUT "$OUT/probe/pref_transfer.json"; kv DFT_N_ROWS "$NROWS"; } > "$OUT/probe.env"
 roundtrip "$OUT/probe.env"
 mkdir -p "$OUT/probe"
-PID=$(sb --parsable --exclude=gpu28 --time=3:00:00 --dependency="afterok:$TID" rl/diffusion_ft/slurm/probe_bc_transfer.sbatch "$OUT/probe.env")
+PID=$(sb --parsable --time=3:00:00 --dependency="afterok:$TID" rl/diffusion_ft/slurm/probe_bc_transfer.sbatch "$OUT/probe.env")
 echo "probe   -> job $PID (GPU, afterok:$TID) -> $OUT/probe/pref_transfer.json"
 echo
 fi

@@ -59,9 +59,9 @@ if __name__ == "__main__":
     import json
     from collections import OrderedDict
     from tqdm import tqdm
-    with open("/zfsauton/scratch/eshau/query_waymax_outputs/gemma4_waymax_structured_best_50k_merged.jsonl") as f:
+    with open("/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/query_waymax_outputs/gemma4_waymax_structured_best_50k_merged.jsonl") as f:
         data = list(jsonlines.Reader(f))
-    file_path = "/zfsauton/scratch/mineuih/waymax_rs/gemma4_50k_merged_instructions.jsonl"
+    file_path = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/gemma4_50k_merged_instructions.jsonl"
     with open(file_path, "w", encoding="utf-8") as f:
         for item in tqdm(data):
             image_path = item['image_path'].split("/")[-1]

@@ -1,20 +1,21 @@
 #!/bin/bash
 #SBATCH --job-name=ckpteval-report
-#SBATCH --partition=cpu
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_cpu_qos
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8G
 #SBATCH --time=00:30:00
-#SBATCH --output=/zfsauton/scratch/yixiz/waymax_rs/ckpt_eval_shard01/logs/report-%j.out
-#SBATCH --error=/zfsauton/scratch/yixiz/waymax_rs/ckpt_eval_shard01/logs/report-%j.out
+#SBATCH --output=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/ckpt_eval_shard01/logs/report-%j.out
+#SBATCH --error=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/ckpt_eval_shard01/logs/report-%j.out
 #
 # Aggregate the sweep's per-episode CSVs into the clean-success / failure-mode
 # table. Reads only saved artefacts, so it runs on CPU and can be rerun freely.
 
 set -euo pipefail
 
-SUBMIT_DIR="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+SUBMIT_DIR="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 PREAMBLE="${SUBMIT_DIR}/V-Max/slurm/_ckpt_eval_preamble.sh"
-[ -f "${PREAMBLE}" ] || PREAMBLE=/zfsauton2/home/yixiz/waymax_rs/V-Max/slurm/_ckpt_eval_preamble.sh
+[ -f "${PREAMBLE}" ] || PREAMBLE=/home/yixiz/waymax_rs/V-Max/slurm/_ckpt_eval_preamble.sh
 # shellcheck source=/dev/null
 . "${PREAMBLE}" "$@"
 

@@ -32,13 +32,13 @@
 #   # re-analyze only (rows already written):
 #   sbatch rl/diffusion_ft/slurm/gate_analysis.sbatch <gate_dir>/analyze.env
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
-GATE_DIR="${DFT_GATE_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/gate/${STAMP}}"
-RUN="${DFT_GATE_RUN:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947}"
+GATE_DIR="${DFT_GATE_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/gate/${STAMP}}"
+RUN="${DFT_GATE_RUN:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947}"
 ITER="${DFT_GATE_ITER:-110}"
 SEEDS="${DFT_GATE_SEEDS:-base_s0 base_s1 base_s2}"
-SPLITS_JSON="${DFT_SPLITS_JSON:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_verified.json}"
+SPLITS_JSON="${DFT_SPLITS_JSON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_verified.json}"
 VSEED="${DFT_VERIFY_SEED:-4242}"
 REPEATS="${DFT_VERIFY_REPEATS:-4}"
 MAX_CONCURRENT="${DFT_MAX_CONCURRENT:-3}"

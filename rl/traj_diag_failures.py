@@ -41,7 +41,7 @@ def _parse() -> argparse.Namespace:
     p.add_argument("--run-dir", required=True)
     p.add_argument(
         "--path-dataset",
-        default="/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord",
+        default="/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord",
     )
     p.add_argument("--out-dir", required=True)
     p.add_argument("--indices", default="0,1,2,3,4,5,6,7,8,9")

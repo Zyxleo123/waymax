@@ -1,14 +1,15 @@
 #!/bin/bash
 #SBATCH --job-name=dft_dppo
-#SBATCH --partition=general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:A6000:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G
 #SBATCH --time=8:00:00
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/dft/slurm-%x-%j.out
 #
 # DPPO fine-tuning of the diffusion policy. `general` hosts only a6000/a5000
 # (>=24 GB), pinning the GPU class away from the 11 GB 2080 Tis.
@@ -17,7 +18,7 @@
 # path as $1). Never use `sbatch --export` (requeue-hold on this cluster).
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 mkdir -p "$ROOT/logs/dft"
 
@@ -30,12 +31,12 @@ for arg in "$@"; do
   fi
 done
 
-export PYTHON="${PYTHON:-/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
+export PYTHON="${PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/conda_envs/waymax_rs/bin/python}"
 export PYTHONUNBUFFERED=1
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
 export TF_CPP_MIN_LOG_LEVEL="${TF_CPP_MIN_LOG_LEVEL:-2}"
 export TF_FORCE_GPU_ALLOW_GROWTH="${TF_FORCE_GPU_ALLOW_GROWTH:-true}"
-export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-/zfsauton/scratch/yixiz/waymax_rs/.jax_compilation_cache}"
+export JAX_COMPILATION_CACHE_DIR="${JAX_COMPILATION_CACHE_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/.jax_compilation_cache}"
 
 # Config (overridable via the env file / positional VAR=value args).
 DFT_INDICES="${DFT_INDICES:-0,1,2,3,4,5,6,7}"
@@ -75,9 +76,9 @@ DFT_WANDB="${DFT_WANDB:-0}"   # 1 = mirror per-iter rows to Weights & Biases
 DFT_WANDB_PROJECT="${DFT_WANDB_PROJECT:-diffusion_ft_dppo}"
 DFT_WANDB_GROUP="${DFT_WANDB_GROUP:-}"
 DFT_WANDB_NAME="${DFT_WANDB_NAME:-${DFT_JOBNAME:-}}"
-DFT_OUT_DIR="${DFT_OUT_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/dppo}"
-DFT_CKPT="${DFT_CKPT:-/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
-DFT_TFRECORD="${DFT_TFRECORD:-/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-00000-of-01000}"
+DFT_OUT_DIR="${DFT_OUT_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/dppo}"
+DFT_CKPT="${DFT_CKPT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
+DFT_TFRECORD="${DFT_TFRECORD:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-00000-of-01000}"
 # Reward design (defaults reproduce the original goal-distance reward exactly).
 DFT_ROUTE_REWARD="${DFT_ROUTE_REWARD:-0}"
 DFT_TERMINATE_OFFROAD="${DFT_TERMINATE_OFFROAD:-0}"
@@ -141,7 +142,7 @@ DFT_SHARD_GLOB="${DFT_SHARD_GLOB:-}"
 # on WOMD means the base policy already solves ~95-98% and there is no headroom to
 # read a result in. Requires DFT_SHARD_GLOB and the SAME glob it was scanned with.
 DFT_SCENE_IDS_JSON="${DFT_SCENE_IDS_JSON:-}"
-DFT_INDEX_DIR="${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
+DFT_INDEX_DIR="${DFT_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
 DFT_SCENES_PER_ITER="${DFT_SCENES_PER_ITER:-32}"
 DFT_RESAMPLE_EVERY="${DFT_RESAMPLE_EVERY:-1}"
 DFT_EVAL_SCENES="${DFT_EVAL_SCENES:-32}"

@@ -24,8 +24,8 @@ Env variants (``--env-variant``):
 Example (GPU node)::
 
     python -m rl.vmax_rl.diagnose_sac --limit 32 \\
-        --sac-run-dir /zfsauton/scratch/yixiz/waymax_rs/runs/sac_failures \\
-        --bcsac-run-dir /zfsauton/scratch/yixiz/waymax_rs/runs/bcsac_failures_bconfail
+        --sac-run-dir /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/runs/sac_failures \\
+        --bcsac-run-dir /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/runs/bcsac_failures_bconfail
 """
 
 from __future__ import annotations
@@ -492,7 +492,7 @@ def main() -> None:
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Diagnose SAC vs BC performance on failure cases.")
-    p.add_argument("--failure-dir", default="/zfsauton/scratch/mineuih/waymax_rs/failure_samples")
+    p.add_argument("--failure-dir", default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/failure_samples")
     p.add_argument("--limit", type=int, default=32)
     p.add_argument("--max-num-objects", type=int, default=64)
     p.add_argument("--scenario-length", type=int, default=80)

@@ -49,11 +49,11 @@
 #   DFT_SIGMA_LIST="0.0 0.005 0.01" bash rl/diffusion_ft/slurm/submit_sweep_sigma_womd.sh
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 
 # WOMD, and its route dims. 10x300 (ScenarioMax) would give zero valid paths.
-export DFT_TFRECORD="${DFT_TFRECORD:-/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-00000-of-01000}"
+export DFT_TFRECORD="${DFT_TFRECORD:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-00000-of-01000}"
 export DFT_INDICES="${DFT_INDICES:-$(seq -s, 0 31)}"
 export DFT_NUM_PATHS="${DFT_NUM_PATHS:-45}"
 export DFT_NUM_POINTS_PER_PATH="${DFT_NUM_POINTS_PER_PATH:-800}"
@@ -63,13 +63,13 @@ export DFT_NUM_POINTS_PER_PATH="${DFT_NUM_POINTS_PER_PATH:-800}"
 # sweep to a measured point rather than an extrapolation.
 export DFT_SIGMA_LIST="${DFT_SIGMA_LIST:-0.0 0.003 0.006 0.01 0.02 0.03 0.05 0.1}"
 export DFT_DIAG_SEEDS="${DFT_DIAG_SEEDS:-4}"
-export DFT_SWEEP_OUT="${DFT_SWEEP_OUT:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/sigma_sweep_womd/$(date +%Y%m%d_%H%M%S)}"
+export DFT_SWEEP_OUT="${DFT_SWEEP_OUT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/sigma_sweep_womd/$(date +%Y%m%d_%H%M%S)}"
 
 # Do not pin gpu28 (the 24 GB a5000) the way submit_sweep_sigma.sh defaults to:
 # these are 32-scene WOMD batches at 45x800 routes, and gpu28 is where an
 # equivalently sized eval transfer died (job 37156).
 export DFT_NODELIST="${DFT_NODELIST:-}"
-export DFT_EXCLUDE="${DFT_EXCLUDE-gpu28}"
+export DFT_EXCLUDE="${DFT_EXCLUDE-}"
 
 echo "sigma sweep on WOMD: [$DFT_SIGMA_LIST]"
 echo "  data=$DFT_TFRECORD  routes=${DFT_NUM_PATHS}x${DFT_NUM_POINTS_PER_PATH}"

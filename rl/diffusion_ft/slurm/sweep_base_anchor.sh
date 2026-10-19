@@ -43,16 +43,16 @@
 #     DFT_SPLITS_JSON=/path/to/splits.json \
 #     bash rl/diffusion_ft/slurm/sweep_base_anchor.sh
 #   # extend an existing sweep past its chain: re-run with the SAME out dir
-#   DFT_SWEEP_OUT=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/base_anchor_sweep/<STAMP> \
+#   DFT_SWEEP_OUT=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/base_anchor_sweep/<STAMP> \
 #     bash rl/diffusion_ft/slurm/sweep_base_anchor.sh
 #
 # Each arm is one beta (base_anchor_weight). safety_weight is pinned at 1.0. All
 # other train_safety knobs pass through (same env-var names as train_safety.sbatch).
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 ENV_DIR="$ROOT/logs/dft/env"; mkdir -p "$ENV_DIR" "$ROOT/logs/dft"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
-BASE_OUT="${DFT_SWEEP_OUT:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/base_anchor_sweep/${STAMP}}"
+BASE_OUT="${DFT_SWEEP_OUT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/base_anchor_sweep/${STAMP}}"
 
 # The swept axis: beta = base_anchor_weight. 0 = the safety-only baseline that
 # regressed; the rest is a wide geometric ladder to be re-centered from the logged
@@ -151,12 +151,12 @@ for ARM in $ARMS; do
   ENV_FILE="$ENV_DIR/baseanchor_${STAMP}_${TAG}.env"
   {
     echo "DFT_OUT_DIR=$OUT_DIR"
-    echo "DFT_CKPT=${DFT_CKPT:-/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
+    echo "DFT_CKPT=${DFT_CKPT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
     # data (defaults to full WOMD corpus; set DFT_TFRECORD for a fixed batch)
     [[ -n "${DFT_TFRECORD:-}" ]] && echo "DFT_TFRECORD=${DFT_TFRECORD}"
     [[ -n "${DFT_INDICES:-}" ]]  && echo "DFT_INDICES=${DFT_INDICES}"
-    echo "DFT_SHARD_GLOB=${DFT_SHARD_GLOB:-/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
-    echo "DFT_INDEX_DIR=${DFT_INDEX_DIR:-/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
+    echo "DFT_SHARD_GLOB=${DFT_SHARD_GLOB:-/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord-*}"
+    echo "DFT_INDEX_DIR=${DFT_INDEX_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets}"
     echo "DFT_SCENES_PER_ITER=${DFT_SCENES_PER_ITER:-16}"
     echo "DFT_EVAL_SCENES=${DFT_EVAL_SCENES:-32}"
     echo "DFT_DATA_SEED=${DFT_DATA_SEED:-0}"

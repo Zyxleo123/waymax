@@ -294,7 +294,7 @@ rollouts, not from the student's own. DAgger was not tried.
 # from the repo root on rhea or lov4 (lov4 submits directly)
 DFT_BCD_SMOKE=1 bash rl/diffusion_ft/slurm/submit_bank_bc.sh        # smoke, ~8 scenes, 3 iters
 bash rl/diffusion_ft/slurm/submit_bank_bc.sh                        # run 1 (collect + bcd)
-DFT_BCD_DATA_FROM=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/bank_bc/20260928_121223_39589 \
+DFT_BCD_DATA_FROM=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/bank_bc/20260928_121223_39589 \
 DFT_BCD_SWITCH_SHARE=0.5 DFT_BCD_TAG=bcsw50 \
   bash rl/diffusion_ft/slurm/submit_bank_bc.sh                      # run 2, reuses run 1's rows
 ```
@@ -302,7 +302,7 @@ DFT_BCD_SWITCH_SHARE=0.5 DFT_BCD_TAG=bcsw50 \
 The chain is collect → train (3 seeds) → `select_eval` @150 → analysis +
 paired compares, plus the probe after training.
 
-Artifacts live under `/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/bank_bc/`:
+Artifacts live under `/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/bank_bc/`:
 * `20260928_121223_39589/` — run 1. `collect/tasks/*/{rows.jsonl, bc_data/b_l24_r20/*.npz}`
   (the 16,748 rows), `train/bcd_s*`, `eval/`, `probe/`.
 * `20260930_000014_1275746/` — run 2. `train/bcsw50_s*`, `eval/`, `probe/`.

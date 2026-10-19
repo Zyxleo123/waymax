@@ -2,7 +2,7 @@
 
 The constants here mirror the `observation_config` of **`repro_sac_v2`**, the
 V-Max SAC run that reached ~97% on ScenarioMaxWaymoValid
-(`/zfsauton/scratch/yixiz/waymax_rs/vmax_repro/repro_sac_v2/.hydra/config.yaml`),
+(`/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/vmax_repro/repro_sac_v2/.hydra/config.yaml`),
 so the SB3 path sees the same information V-Max did -- but computed directly from
 raw WOMD, with no ScenarioMax conversion.
 

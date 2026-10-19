@@ -4,7 +4,7 @@
 #
 # 71188 shard 3 died on 2026-10-02 in intermittent_heldout (69 scenes) when the
 # eshau shards vanished; every other split and shard finished. select_eval.sbatch
-# now defaults to /zfsauton/datasets/womd (same 1000 files, offsets verified
+# now defaults to /data/user_data/yixiz/autonlab/zfsauton/datasets/womd (same 1000 files, offsets verified
 # 10-03), and the runner skips finished chunks, so re-running array task 3 with
 # its ORIGINAL env file resumes it: same seed, same fixed chunk slices, same arms.
 #
@@ -16,11 +16,11 @@
 # Usage (from repo root; on lov4 sbatch is local):
 #   bash rl/diffusion_ft/slurm/submit_argmin_finish.sh
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 unset "${!SLURM_@}" 2>/dev/null || true
-RUN=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/lateral_opt_argmin_20261002_142129_3029435
+RUN=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/lateral_opt_argmin_20261002_142129_3029435
 SEL="$RUN/select"
-BUNDLE=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/bank_honest_20260925_160329_3074201/scenes/scenes_20260925_161856.json
+BUNDLE=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/select/bank_honest_20260925_160329_3074201/scenes/scenes_20260925_161856.json
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
 ARM="${DFT_FIX_ARM:-o_am}"
 mkdir -p "$ROOT/logs/dft"
@@ -43,7 +43,7 @@ F0ENV=$(fix_env "$SEL/fix_pairs_${ARM}_partial_${STAMP}" "33174,59208")
 F0=$(sb --parsable rl/diffusion_ft/slurm/plot_fix_pairs.sbatch "$F0ENV")
 
 # ---- resume shard 3 -------------------------------------------------------------
-R=$(sb --parsable --array=3 --exclude=gpu28 --job-name=dft_select \
+R=$(sb --parsable --array=3 --job-name=dft_select \
       rl/diffusion_ft/slurm/select_eval.sbatch "$SEL/env")
 R="${R%%;*}"
 

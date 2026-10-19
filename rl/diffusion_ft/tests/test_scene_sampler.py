@@ -33,9 +33,9 @@ if str(REPO_ROOT) not in sys.path:
 
 import numpy as np
 
-WOMD_GLOB = ("/zfsauton/scratch/eshau/womd/tf_example/training/"
+WOMD_GLOB = ("/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/"
              "training_tfexample.tfrecord-*-of-01000")
-SHARD0 = ("/zfsauton/scratch/eshau/womd/tf_example/training/"
+SHARD0 = ("/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/"
           "training_tfexample.tfrecord-00000-of-01000")
 
 
@@ -157,7 +157,7 @@ def test_prefetch(index_dir: str, batch_size: int = 32) -> bool:
 
 def main() -> int:
     index_dir = (sys.argv[1] if len(sys.argv) > 1
-                 else "/zfsauton/scratch/yixiz/waymax_rs/womd_offsets")
+                 else "/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets")
     print(f"index_dir={index_dir}")
     results = {}
     print("\n[1/3] byte-offset assembly == scan loader")

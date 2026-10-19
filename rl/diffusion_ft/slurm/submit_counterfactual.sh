@@ -30,12 +30,12 @@
 #   DFT_CF_PARTS=repair DFT_NUM_SHARDS=4 DFT_REPAIR_SPLITS=failure_train,success_train \
 #     DFT_REPAIR_CAPS=-1,4000 bash ...
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
-CF_DIR="${DFT_CF_DIR:-/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/counterfactual/${STAMP}}"
-VDIR=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777
+CF_DIR="${DFT_CF_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/counterfactual/${STAMP}}"
+VDIR=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777
 SPLITS3="${DFT_SPLITS3_JSON:-$VDIR/eval_splits_3strata.json}"
-RUN=/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
+RUN=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/stopping/20260911_160658_962947
 FT_CKPT="${DFT_FT_CKPT:-$RUN/base_s0/iter_000110}"
 PARTS="${DFT_CF_PARTS:-repair labels}"
 SHARDS="${DFT_NUM_SHARDS:-2}"
@@ -54,7 +54,7 @@ REWINDS="${DFT_REWINDS:-3}"
 ITERS="${DFT_ITERS:-150}"
 SEL_CAP=-1; REPEATS="${DFT_SELECT_REPEATS:-4}"
 MAX_CONCURRENT="${DFT_MAX_CONCURRENT:-3}"
-EXCLUDE="${DFT_EXCLUDE-gpu28}"
+EXCLUDE="${DFT_EXCLUDE-}"
 RISK="$ROOT/runs/hardness/risk.npz"
 if [[ -n "${DFT_CF_SMOKE:-}" ]]; then
   SHARDS=1; CHUNK=8; SUCC_CAP=8; ITERS=2; SEL_CAP=4; REPEATS=1

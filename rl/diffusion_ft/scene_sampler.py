@@ -45,7 +45,7 @@ Pick = tuple[int, int]  # (shard_id, record_index_within_shard)
 # The WOMD shards live in another user's scratch (`eshau`). It is writable, but
 # scattering 1000 sidecar files through someone else's data directory is not ours
 # to do, so the indexes live under our own scratch and are addressed by basename.
-DEFAULT_INDEX_DIR = "/zfsauton/scratch/yixiz/waymax_rs/womd_offsets"
+DEFAULT_INDEX_DIR = "/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/womd_offsets"
 
 
 def index_path_for(shard_path: str, index_dir: str | None = None) -> str:

@@ -405,8 +405,8 @@ __all__ = [
 def _main() -> None:
 	parser = argparse.ArgumentParser(description="Smoke test the VLA QA cache dataloader.")
 	parser.add_argument("--cache_dir", type=str, help="Directory containing NPZ cache shards.",
-					    default="/zfsauton/scratch/mineuih/waymax_rs/qa_cache/")
-	parser.add_argument("--qa_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/qa_dataset/", help="Directory containing per-shard QA JSON files.")
+					    default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/qa_cache/")
+	parser.add_argument("--qa_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/qa_dataset/", help="Directory containing per-shard QA JSON files.")
 	parser.add_argument(
 		"--file_indices",
 		type=str,

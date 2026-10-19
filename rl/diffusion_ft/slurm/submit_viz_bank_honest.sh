@@ -18,7 +18,7 @@
 # Usage (from repo root, ON RHEA):
 #   bash rl/diffusion_ft/slurm/submit_viz_bank_honest.sh <honest-bank run dir>
 set -euo pipefail
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"; cd "$ROOT"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"; cd "$ROOT"
 RUN="${1:?usage: submit_viz_bank_honest.sh <select/bank_honest_* run dir>}"
 SEL="$RUN/select"
 [[ -s "$SEL/jobid.txt" ]] || { echo "FATAL: no $SEL/jobid.txt" >&2; exit 1; }
@@ -30,7 +30,7 @@ STAMP="$(date +%Y%m%d_%H%M%S)"
 ENVF="$OUT_DIR/scenes_${STAMP}.env"
 kv() { printf "%s='%s'\n" "$1" "${2//\'/\'\\\'\'}"; }
 { kv DFT_SELECT_DIR "$SEL"
-  kv DFT_SPLITS_JSON /zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json
+  kv DFT_SPLITS_JSON /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/diffusion_ft/hard_womd/scan_seed0/verified_seed777/eval_splits_3strata.json
   kv DFT_OUT_JSON "$OUT_DIR/scenes_${STAMP}.json"
   kv DFT_OUT_HTML "$OUT_DIR/scenes_${STAMP}.html"
   kv DFT_VIZ_ARMS "base,b_oracle,b_cv,b_edge"
@@ -38,7 +38,7 @@ kv() { printf "%s='%s'\n" "$1" "${2//\'/\'\\\'\'}"; }
   kv DFT_SOLVED_ARM "${DFT_SOLVED_ARM:-b_oracle}"
   kv DFT_AUTO_PICK "${DFT_AUTO_PICK:-6}"; } > "$ENVF"
 sb() { env -i HOME="$HOME" PATH="$PATH" USER="${USER:-}" sbatch "$@"; }
-DID=$(sb --parsable --dependency="afterok:${AID}" --exclude=gpu28 \
+DID=$(sb --parsable --dependency="afterok:${AID}" \
   rl/diffusion_ft/slurm/dump_reach_from_select.sbatch "$ENVF")
 VID=$(sb --parsable --dependency="afterok:${DID}" rl/diffusion_ft/slurm/viz_scenes.sbatch "$ENVF")
 echo "dump -> job $DID (GPU, afterok:$AID)"

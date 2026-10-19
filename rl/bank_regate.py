@@ -46,8 +46,8 @@ from rl.bank import (  # noqa: E402
     truncate_at,
 )
 
-DEFAULT_BANK = "/zfsauton/scratch/yixiz/waymax_rs/vmax_repro/bank_pretrained_probe/bank"
-DEFAULT_DATASET = "/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord"
+DEFAULT_BANK = "/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/vmax_repro/bank_pretrained_probe/bank"
+DEFAULT_DATASET = "/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/ScenarioMaxWaymoFailures/failures.tfrecord"
 
 
 def _parse_args():

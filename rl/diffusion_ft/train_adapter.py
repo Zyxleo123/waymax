@@ -60,7 +60,7 @@ writes ``preflight.json`` and exits 0 with no checkpoint, so downstream jobs rep
 "not run" instead of stranding.
 
     python -m rl.diffusion_ft.train_adapter --out_dir DIR --pairs 'COLLECT/tasks/*/pair_data/*/*.npz' \\
-        --shard_glob '/zfsauton/datasets/womd/tf_example/training/training_tfexample.tfrecord-*' \\
+        --shard_glob '/data/user_data/yixiz/autonlab/zfsauton/datasets/womd/tf_example/training/training_tfexample.tfrecord-*' \\
         --splits_json SPLITS3 --edge_margin 0.3 --agent_margin 0.75
 """
 

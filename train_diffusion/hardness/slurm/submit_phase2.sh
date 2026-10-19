@@ -8,7 +8,7 @@
 #     HRD_ARRAY_TASKS=32 bash train_diffusion/hardness/slurm/submit_phase2.sh
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 
 ENV_DIR="$ROOT/logs/hardness/env"
@@ -20,7 +20,7 @@ ARRAY_TASKS="${HRD_ARRAY_TASKS:-16}"
 # parses as an assignment followed by a command.
 emit() { printf '%s=%q\n' "$1" "$2"; }
 {
-  emit HRD_CACHE_DIR "${HRD_CACHE_DIR:-/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/}"
+  emit HRD_CACHE_DIR "${HRD_CACHE_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/}"
   emit HRD_OUT "${HRD_OUT:-$ROOT/runs/hardness}"
   emit HRD_START_T "${HRD_START_T:-10}"
   emit HRD_ANCHORS "${HRD_ANCHORS:-0 10 20 30 40}"

@@ -8,7 +8,7 @@
 #   DFT_GROUP_DIR=/path/to/dppo/<group> bash rl/diffusion_ft/slurm/submit_viz_compare.sh
 set -euo pipefail
 
-ROOT="${SLURM_SUBMIT_DIR:-/zfsauton2/home/yixiz/waymax_rs}"
+ROOT="${SLURM_SUBMIT_DIR:-/home/yixiz/waymax_rs}"
 cd "$ROOT"
 
 GROUP_DIR="${1:-${DFT_GROUP_DIR:-}}"

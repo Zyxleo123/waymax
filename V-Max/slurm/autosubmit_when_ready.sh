@@ -4,8 +4,8 @@
 #
 #   nohup bash V-Max/slurm/autosubmit_when_ready.sh >/dev/null 2>&1 &
 
-cd /zfsauton2/home/yixiz/waymax_rs || exit 1
-LOG=/zfsauton2/home/yixiz/waymax_rs/autosubmit_goal.log
+cd /home/yixiz/waymax_rs || exit 1
+LOG=/home/yixiz/waymax_rs/autosubmit_goal.log
 echo "[$(date)] watcher started (polling every 60s, up to ~6h)" >> "$LOG"
 
 for i in $(seq 1 360); do

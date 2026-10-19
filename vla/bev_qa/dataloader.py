@@ -12,8 +12,8 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 
-DEFAULT_QA_DIR = "/zfsauton/scratch/mineuih/waymax_rs/qa_dataset/"
-DEFAULT_IMG_ROOT = "/zfsauton/scratch/eshau/imgs_past/"
+DEFAULT_QA_DIR = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/qa_dataset/"
+DEFAULT_IMG_ROOT = "/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/imgs_past/"
 
 
 def _extract_tfrecord_index(path: Path) -> int:
