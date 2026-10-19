@@ -9,7 +9,7 @@ from data.types import PreprocessConfig
 @dataclass
 class FlowMatchingPretrainConfig:
     seed: int = 0
-    tfrecord_path: str = "/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord@1000"
+    tfrecord_path: str = "/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord@1000"
     max_num_objects: int = 128
     batch_size: int = 64
     shuffle_seed: int | None = 0
@@ -22,7 +22,7 @@ class FlowMatchingPretrainConfig:
     epochs: int = 500
     steps_per_epoch: int = 1000
     save_every: int = 50
-    save_dir: str = "/zfsauton/scratch/mineuih/waymax_rs/checkpoints/pretrain_flow_matching"
+    save_dir: str = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/checkpoints/pretrain_flow_matching"
     resume_path: str | None = None
 
     lr: float = 1e-4
@@ -76,7 +76,7 @@ class FlowMatchingPretrainConfig:
     wandb_entity: str | None = None
     wandb_mode: str = "online"
     data_parallel: bool = False
-    jax_compilation_cache_dir: str = "/zfsauton/scratch/mineuih/waymax_rs/.jax_compilation_cache"
+    jax_compilation_cache_dir: str = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/.jax_compilation_cache"
 
     preprocess_cfg: PreprocessConfig = PreprocessConfig()
     subgoal_conditioned: bool = False
@@ -87,7 +87,7 @@ def parse_args() -> FlowMatchingPretrainConfig:
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--tfrecord_path", type=str, default="/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord@1000")
+    parser.add_argument("--tfrecord_path", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/training_tfexample.tfrecord@1000")
     parser.add_argument("--max_num_objects", type=int, default=128)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--shuffle_seed", type=int, default=0)
@@ -100,7 +100,7 @@ def parse_args() -> FlowMatchingPretrainConfig:
     parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--steps_per_epoch", type=int, default=1000)
     parser.add_argument("--save_every", type=int, default=50)
-    parser.add_argument("--save_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/checkpoints/pretrain_flow_matching")
+    parser.add_argument("--save_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/checkpoints/pretrain_flow_matching")
     parser.add_argument("--resume_path", type=str, default=None)
 
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -167,7 +167,7 @@ def parse_args() -> FlowMatchingPretrainConfig:
     parser.add_argument("--tag", type=str, default=None)
     parser.add_argument("--data_parallel", action="store_true")
     parser.add_argument("--subgoal_conditioned", action="store_true", default=False)
-    parser.add_argument("--jax_compilation_cache_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/.jax_compilation_cache")
+    parser.add_argument("--jax_compilation_cache_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/.jax_compilation_cache")
 
     args = parser.parse_args()
 

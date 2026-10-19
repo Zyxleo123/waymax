@@ -1,16 +1,16 @@
 #!/bin/bash
 #SBATCH --job-name=es_fm_fail1500_it6_rs5_p128
-#SBATCH --partition=general
-#SBATCH --qos=qos_general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --time=2-00:00:00
-#SBATCH --chdir=/zfsauton2/home/sbellad/baseline/waymax_rs
-#SBATCH --output=/zfsauton/scratch/sbellad/Flow_matching_sim/logs/es_fail1500_it6_rs5_p128_%j.out
-#SBATCH --error=/zfsauton/scratch/sbellad/Flow_matching_sim/logs/es_fail1500_it6_rs5_p128_%j.err
+#SBATCH --chdir=/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs
+#SBATCH --output=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim/logs/es_fail1500_it6_rs5_p128_%j.out
+#SBATCH --error=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim/logs/es_fail1500_it6_rs5_p128_%j.err
 
 # FM-ES fail1500: match Diffusion resample budget (5 steps), it6, pop/elite 128/16.
 # Env set in job body (no sbatch --export).
@@ -35,5 +35,5 @@ export FM_NUM_STEPS=50
 export FM_SOLVER=euler
 export POPULATION_SIZE=128
 export ELITE_SIZE=16
-ROOT="${WAYMAX_RS_ROOT:-/zfsauton2/home/sbellad/baseline/waymax_rs}"
+ROOT="${WAYMAX_RS_ROOT:-/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs}"
 exec bash "${ROOT}/legacy/sim/slurm_es_failure_subset_1500.sh" es_fm "${FORECAST}"

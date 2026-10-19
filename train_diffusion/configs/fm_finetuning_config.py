@@ -7,8 +7,8 @@ from dataclasses import asdict, dataclass
 @dataclass
 class FlowMatchingFinetuningConfig:
 	seed: int = 0
-	source_cache_dir: str = "/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz"
-	failure_cache_dir: str = "/zfsauton/scratch/mineuih/waymax_rs/failure_sim_state_cache/"
+	source_cache_dir: str = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz"
+	failure_cache_dir: str = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/failure_sim_state_cache/"
 	source_file_indices: list[int] | None = None
 	failure_file_indices: list[int] | None = None
 	failure_sampling_prob: float = 0.5
@@ -26,8 +26,8 @@ class FlowMatchingFinetuningConfig:
 	num_workers: int = 0
 	pin_memory: bool = False
 
-	output_dir: str = "/zfsauton/scratch/mineuih/waymax_rs/checkpoints/finetune_fm_policy"
-	save_dir: str = "/zfsauton/scratch/mineuih/waymax_rs/checkpoints/finetune_fm_policy"
+	output_dir: str = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/checkpoints/finetune_fm_policy"
+	save_dir: str = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/checkpoints/finetune_fm_policy"
 	wandb_project: str | None = "fm_policy"
 	wandb_name: str = "finetune_fm_policy"
 	wandb_entity: str | None = None
@@ -64,18 +64,18 @@ class FlowMatchingFinetuningConfig:
 	model_dt: float = 0.2
 	world_dt_fallback: float = 0.1
 
-	jax_compilation_cache_dir: str = "/zfsauton/scratch/mineuih/waymax_rs/.jax_compilation_cache"
+	jax_compilation_cache_dir: str = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/.jax_compilation_cache"
 
 
 def parse_args() -> FlowMatchingFinetuningConfig:
 	parser = argparse.ArgumentParser()
 
 	parser.add_argument("--seed", type=int, default=0)
-	parser.add_argument("--source_cache_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz")
+	parser.add_argument("--source_cache_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz")
 	parser.add_argument(
 		"--failure_cache_dir",
 		type=str,
-		default="/zfsauton/scratch/mineuih/waymax_rs/failure_sim_state_cache/",
+		default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/failure_sim_state_cache/",
 	)
 	parser.add_argument("--source_file_indices", type=int, nargs="*", default=None)
 	parser.add_argument("--failure_file_indices", type=int, nargs="*", default=None)
@@ -95,7 +95,7 @@ def parse_args() -> FlowMatchingFinetuningConfig:
 	parser.add_argument("--num_workers", type=int, default=0)
 	parser.add_argument("--pin_memory", action="store_true")
 
-	parser.add_argument("--output_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/checkpoints/finetune_fm_policy")
+	parser.add_argument("--output_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/checkpoints/finetune_fm_policy")
 	parser.add_argument("--save_dir", type=str, default=None)
 	parser.add_argument("--wandb_project", type=str, default="fm_policy")
 	parser.add_argument("--wandb_name", type=str, default="finetune_fm_policy")
@@ -133,7 +133,7 @@ def parse_args() -> FlowMatchingFinetuningConfig:
 	parser.add_argument("--model_dt", type=float, default=0.2)
 	parser.add_argument("--world_dt_fallback", type=float, default=0.1)
 
-	parser.add_argument("--jax_compilation_cache_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/.jax_compilation_cache")
+	parser.add_argument("--jax_compilation_cache_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/.jax_compilation_cache")
 
 	args = parser.parse_args()
 

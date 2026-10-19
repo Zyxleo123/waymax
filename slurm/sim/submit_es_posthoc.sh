@@ -29,15 +29,15 @@
 #   ES_SUBSET=val10 bash ...                            # WOMD validation shards 0-9, every scene
 #                                                       # (the set o_am-on-policy was validated on)
 set -euo pipefail
-ROOT="/zfsauton2/home/yixiz/waymax_rs_es_posthoc"; cd "$ROOT"
+ROOT="/home/yixiz/waymax_rs_es_posthoc"; cd "$ROOT"
 for v in $(compgen -v SLURM_); do unset "$v"; done
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
 SMOKE="${ES_SMOKE:-}"
-SCR=/zfsauton/scratch/yixiz/waymax_rs/es_posthoc
+SCR=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/es_posthoc
 ES_SUBSET="${ES_SUBSET:-fail1500}"
 case "$ES_SUBSET" in fail1500|val10) ;; *) echo "FATAL: ES_SUBSET=$ES_SUBSET not fail1500|val10" >&2; exit 1;; esac
-VAL_GLOB="${ES_VAL_GLOB:-/zfsauton/datasets/womd/tf_example/validation/validation_tfexample.tfrecord-0000[0-9]-of-00150}"
-SOURCE_RUN="${ES_SOURCE_RUN:-/zfsauton/scratch/sbellad/world_model_sim/es_diffusion_wm_mf_epoch0450_expected_independent_fail1500/simulation_es_training_es_diffusion_wm_mf_epoch0450_expected_independent_fail1500_20260919_170306}"
+VAL_GLOB="${ES_VAL_GLOB:-/data/user_data/yixiz/autonlab/zfsauton/datasets/womd/tf_example/validation/validation_tfexample.tfrecord-0000[0-9]-of-00150}"
+SOURCE_RUN="${ES_SOURCE_RUN:-/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model_sim/es_diffusion_wm_mf_epoch0450_expected_independent_fail1500/simulation_es_training_es_diffusion_wm_mf_epoch0450_expected_independent_fail1500_20260919_170306}"
 if [[ "$ES_SUBSET" == val10 ]]; then
   PER="${ES_VAL_PER_GROUP:-1}"
   SUBSET="${ES_SUBSET_DIR:-$SCR/val10_subset$([[ $PER -gt 1 ]] && echo "_x$PER")}"; SPLIT=validation
@@ -49,7 +49,7 @@ fi
 OUT="${ES_OUT:-$SCR/runs/${ES_SUBSET}${SMOKE:+_smoke}_${STAMP}}"
 ARMS="${ES_ARMS_SEL:-diff,diff_posthoc,gt,cv,cv_posthoc,wm_mf,wm_mf_posthoc}"
 MAX_CONCURRENT="${ES_MAX_CONCURRENT:-24}"
-mkdir -p "$OUT/env" /zfsauton2/home/yixiz/waymax_rs/logs/es_posthoc
+mkdir -p "$OUT/env" /home/yixiz/waymax_rs/logs/es_posthoc
 sb() { env -i HOME="$HOME" PATH="$PATH" USER="${USER:-}" sbatch "$@"; }
 kv() { printf "%s='%s'\n" "$1" "${2//\'/\'\\\'\'}"; }
 
@@ -89,15 +89,15 @@ for arm in "${ARM_LIST[@]}"; do
       kv ES_SAVE_TRAJ "${ES_SAVE_TRAJ:-1}"
       kv ES_GROUP_DIR "$SUBSET/group_$g"; kv ES_SPLIT "$SPLIT"
       kv ES_NUM_SCENARIOS "$([[ -n "$SMOKE" ]] && echo 10 || echo 100000)"
-      kv ES_DIFFUSION_CKPT "${ES_DIFFUSION_CKPT:-/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
-      kv ES_MF_WM_CKPT "${ES_MF_WM_CKPT:-/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20260916_200620/latest.pt}"
+      kv ES_DIFFUSION_CKPT "${ES_DIFFUSION_CKPT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
+      kv ES_MF_WM_CKPT "${ES_MF_WM_CKPT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20260916_200620/latest.pt}"
       kv ES_SEED "${ES_SEED:-0}"; } > "$OUT/env/$i.env"
     printf '%2d  %-14s group %d\n' "$i" "$arm" "$g"
     i=$((i + 1))
   done
 done
-# gpu30 cannot read /zfsauton/datasets (jobs 85314_8-10 died on it, 2026-10-15).
-SB_FLAGS=(); [[ -n "${ES_EXCLUDE-gpu30}" ]] && SB_FLAGS+=(--exclude="${ES_EXCLUDE-gpu30}")
+# gpu30 cannot read /data/user_data/yixiz/autonlab/zfsauton/datasets (jobs 85314_8-10 died on it, 2026-10-15).
+SB_FLAGS=(); [[ -n "${ES_EXCLUDE-}" ]] && SB_FLAGS+=(--exclude="${ES_EXCLUDE-}")
 AID=$(sb --parsable ${SB_FLAGS[@]+"${SB_FLAGS[@]}"} ${PREP_DEP[@]+"${PREP_DEP[@]}"} --array="0-$((i - 1))%${MAX_CONCURRENT}" \
   slurm/sim/es_posthoc.sbatch "$OUT/env")
 echo "+ sbatch --array=0-$((i - 1))%$MAX_CONCURRENT slurm/sim/es_posthoc.sbatch $OUT/env -> array $AID (GPU, $i tasks)"

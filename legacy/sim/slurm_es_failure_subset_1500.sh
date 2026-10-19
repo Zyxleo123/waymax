@@ -1,16 +1,16 @@
 #!/bin/bash
 #SBATCH --job-name=es_fail1500
-#SBATCH --partition=general
-#SBATCH --qos=qos_general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --time=2-00:00:00
-#SBATCH --chdir=/zfsauton2/home/sbellad/baseline/waymax_rs
-#SBATCH --output=/zfsauton/scratch/sbellad/Flow_matching_sim/logs/es_fail1500_%j.out
-#SBATCH --error=/zfsauton/scratch/sbellad/Flow_matching_sim/logs/es_fail1500_%j.err
+#SBATCH --chdir=/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs
+#SBATCH --output=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim/logs/es_fail1500_%j.out
+#SBATCH --error=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim/logs/es_fail1500_%j.err
 
 # Shared FM-failure subset (default n=1500, seed=0) — same scenes for all runs.
 # Ego replan + WM refresh are fixed at 10 steps.
@@ -23,9 +23,9 @@
 #   bash slurm_submit_es_fm_fail1500.sh
 #
 # Outputs:
-#   Diffusion es + cv|gt  -> /zfsauton/scratch/sbellad/immediate_exp/
-#   Flow-matching es_fm + any forecast -> /zfsauton/scratch/sbellad/Flow_matching_sim/
-#   Diffusion es + wm_*   -> /zfsauton/scratch/sbellad/world_model_sim/
+#   Diffusion es + cv|gt  -> /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/
+#   Flow-matching es_fm + any forecast -> /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim/
+#   Diffusion es + wm_*   -> /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model_sim/
 #
 set -euo pipefail
 
@@ -52,11 +52,11 @@ case "${FORECAST_MODE}" in
     ;;
 esac
 
-ROOT="${WAYMAX_RS_ROOT:-/zfsauton2/home/sbellad/baseline/waymax_rs}"
+ROOT="${WAYMAX_RS_ROOT:-/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs}"
 cd "${ROOT}"
 
-CONDA_ROOT="/zfsauton/scratch/sbellad/miniconda3"
-WAYMAX_ENV="/zfsauton/scratch/sbellad/conda_envs/waymax_rs"
+CONDA_ROOT="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/miniconda3"
+WAYMAX_ENV="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/conda_envs/waymax_rs"
 if [[ "${CONDA_PREFIX:-}" != "${WAYMAX_ENV}" ]]; then
   set +u
   # shellcheck source=/dev/null
@@ -68,12 +68,12 @@ fi
 # CUDA_ERROR_STREAM_CAPTURE_INVALIDATED; run without them.
 export XLA_FLAGS="${XLA_FLAGS:+${XLA_FLAGS} }--xla_gpu_enable_command_buffer="
 
-SUBSET_DIR="${SUBSET_DIR:-/zfsauton/scratch/sbellad/immediate_exp/es_failure_subset_n1500_seed0}"
+SUBSET_DIR="${SUBSET_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/es_failure_subset_n1500_seed0}"
 TARGET_JSON="${SUBSET_DIR}/target_scenarios.json"
 TFRECORD_DIR="${SUBSET_DIR}/tfrecords"
-LANE_GRAPH_DIR="/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
-DIFFUSION_CKPT="/zfsauton/scratch/sbellad/diffusion/diffusion_baseline_baseline_20260810_144559/epoch_0500"
-FM_CKPT="/zfsauton/scratch/mineuih/waymax_rs/checkpoints/pretrain_flow_matching/pretrain_fm_policy_20260828_011255/epoch_0500"
+LANE_GRAPH_DIR="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
+DIFFUSION_CKPT="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/diffusion/diffusion_baseline_baseline_20260810_144559/epoch_0500"
+FM_CKPT="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/checkpoints/pretrain_flow_matching/pretrain_fm_policy_20260828_011255/epoch_0500"
 
 # Fixed: ego replan every 10 steps; WM refresh every replan.
 REPLAN_INTERVAL_STEPS="${REPLAN_INTERVAL_STEPS:-10}"
@@ -84,7 +84,7 @@ COLLISION_REDUCE="${COLLISION_REDUCE:-mean}"
 COLLISION_SAMPLE_SEED="${COLLISION_SAMPLE_SEED:-0}"
 WM_BACKEND="production"
 WM_PLANNING_MODE=""
-GAU_CKPT_ROOT="/zfsauton/scratch/sbellad/world_model/ckpts_gaussian/gaussian_world_model_20260916_194054"
+GAU_CKPT_ROOT="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/ckpts_gaussian/gaussian_world_model_20260916_194054"
 
 # Map CLI forecast mode -> run_simulation --other_agent_forecast + WM settings.
 # Note: mf/occ/ego trainings hit the 2-day time limit; defaults use latest usable epochs.
@@ -100,7 +100,7 @@ case "${FORECAST_MODE}" in
   wm_det)
     OTHER_AGENT_FORECAST="wm"
     WM_BACKEND="production"
-    WORLD_MODEL_CKPT="${WORLD_MODEL_CKPT_DET:-/zfsauton/scratch/sbellad/world_model/ckpts/world_model_20260912_170741/epoch_0500.pt}"
+    WORLD_MODEL_CKPT="${WORLD_MODEL_CKPT_DET:-/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/ckpts/world_model_20260912_170741/epoch_0500.pt}"
     NUM_COLLISION_WORLDS=1
     ;;
   wm_gau)
@@ -121,7 +121,7 @@ case "${FORECAST_MODE}" in
   wm_mf)
     OTHER_AGENT_FORECAST="wm"
     WM_BACKEND="multifuture"
-    WORLD_MODEL_CKPT="${WORLD_MODEL_CKPT_MF:-/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20260916_200620/epoch_0450.pt}"
+    WORLD_MODEL_CKPT="${WORLD_MODEL_CKPT_MF:-/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20260916_200620/epoch_0450.pt}"
     # Agent-wise multimodal risk (not joint same-k worlds).
     # Prefer 3rd CLI arg; else env WM_PLANNING_MODE; else expected_independent.
     if [[ -n "${PLANNING_MODE_ARG}" ]]; then
@@ -144,14 +144,14 @@ case "${FORECAST_MODE}" in
   wm_occ)
     OTHER_AGENT_FORECAST="wm"
     WM_BACKEND="occupancy"
-    WORLD_MODEL_CKPT="${WORLD_MODEL_CKPT_OCC:-/zfsauton/scratch/sbellad/world_model/ckpts_occupancy/occupancy_worldModel_20260916_202827/epoch_0255.pt}"
+    WORLD_MODEL_CKPT="${WORLD_MODEL_CKPT_OCC:-/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/ckpts_occupancy/occupancy_worldModel_20260916_202827/epoch_0255.pt}"
     # SAT collision still uses mean boxes (occupancy risk not in main ES metrics yet).
     NUM_COLLISION_WORLDS=1
     ;;
   wm_ego)
     OTHER_AGENT_FORECAST="wm"
     WM_BACKEND="ego"
-    WORLD_MODEL_CKPT="${WORLD_MODEL_CKPT_EGO:-/zfsauton/scratch/sbellad/world_model/ckpts_ego_conditioned/egoConditioned_WM_20260916_203857/epoch_0455.pt}"
+    WORLD_MODEL_CKPT="${WORLD_MODEL_CKPT_EGO:-/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/ckpts_ego_conditioned/egoConditioned_WM_20260916_203857/epoch_0455.pt}"
     NUM_COLLISION_WORLDS=1
     ;;
 esac
@@ -214,11 +214,11 @@ fi
 # Diffusion WM -> world_model_sim.
 # Diffusion CV/GT -> immediate_exp.
 if [[ "${PLANNER}" == "es_fm" ]]; then
-  EXP_ROOT="${FM_SIM_ROOT:-/zfsauton/scratch/sbellad/Flow_matching_sim}"
+  EXP_ROOT="${FM_SIM_ROOT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim}"
 elif [[ "${OTHER_AGENT_FORECAST}" == "wm" ]]; then
-  EXP_ROOT="${WM_SIM_ROOT:-/zfsauton/scratch/sbellad/world_model_sim}"
+  EXP_ROOT="${WM_SIM_ROOT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model_sim}"
 else
-  EXP_ROOT="${CV_GT_SIM_ROOT:-/zfsauton/scratch/sbellad/immediate_exp}"
+  EXP_ROOT="${CV_GT_SIM_ROOT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp}"
 fi
 EXP_DIR="${EXP_ROOT}/${RUN_NAME}"
 
@@ -245,9 +245,9 @@ if [[ -n "${MF_COLLISION_METHOD}" ]]; then
     *) echo "ERROR: unknown MF_COLLISION_METHOD '${MF_COLLISION_METHOD}'"; exit 1 ;;
   esac
   if [[ "${PLANNER}" == "es_fm" ]]; then
-    MF_ABL_ROOT="/zfsauton/scratch/sbellad/Flow_matching_sim/mf_multiSampling_collision_ablation"
+    MF_ABL_ROOT="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim/mf_multiSampling_collision_ablation"
   else
-    MF_ABL_ROOT="/zfsauton/scratch/sbellad/immediate_exp/mf_multiSampling_collision_ablation"
+    MF_ABL_ROOT="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/mf_multiSampling_collision_ablation"
   fi
   [[ -n "${MF_ABLATION_SUBDIR:-}" ]] && MF_ABL_ROOT="${MF_ABL_ROOT}/${MF_ABLATION_SUBDIR}"
   RUN_NAME="${RUN_NAME/_${WM_PLANNING_MODE}_fail1500/_${MF_VARIANT}_fail1500}_seed${SEED}"

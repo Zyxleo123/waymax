@@ -116,9 +116,9 @@ Use the same Waymax environment as the baseline project.
 Example on the current cluster:
 
 ```bash
-cd /zfsauton2/home/sbellad/baseline/waymax_rs
-source /zfsauton/scratch/sbellad/miniconda3/bin/activate \
-  /zfsauton/scratch/sbellad/conda_envs/waymax_rs
+cd /data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs
+source /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/miniconda3/bin/activate \
+  /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/conda_envs/waymax_rs
 export PYTHONPATH=$PWD:$PYTHONPATH
 ```
 
@@ -134,7 +134,7 @@ already used by the VLA/diffusion code.
 Default/example cache directory used elsewhere in this repository:
 
 ```bash
-/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz
+/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz
 ```
 
 The world-model loader reads logged future states **only as supervised training
@@ -149,8 +149,8 @@ Before launching a long job, train only a few steps:
 
 ```bash
 python train_world_model.py \
-  --cache_dir /zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz \
-  --save_dir /zfsauton/scratch/sbellad/world_model_ckpts/smoke \
+  --cache_dir /data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz \
+  --save_dir /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model_ckpts/smoke \
   --device cuda \
   --epochs 1 \
   --steps_per_epoch 10 \
@@ -164,7 +164,7 @@ Expected output includes training/validation loss plus ADE/FDE in meters.
 A checkpoint is written to:
 
 ```text
-/zfsauton/scratch/sbellad/world_model_ckpts/smoke/latest.pt
+/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model_ckpts/smoke/latest.pt
 ```
 
 ---
@@ -173,8 +173,8 @@ A checkpoint is written to:
 
 ```bash
 python train_world_model.py \
-  --cache_dir /zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz \
-  --save_dir /zfsauton/scratch/sbellad/world_model_ckpts/v1 \
+  --cache_dir /data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz \
+  --save_dir /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model_ckpts/v1 \
   --device cuda \
   --epochs 50 \
   --batch_size 16 \
@@ -208,8 +208,8 @@ mostly overlap with dynamic objects.
 ### SLURM alternative
 
 ```bash
-CACHE_DIR=/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz \
-SAVE_DIR=/zfsauton/scratch/sbellad/world_model_ckpts/v1 \
+CACHE_DIR=/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz \
+SAVE_DIR=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model_ckpts/v1 \
 sbatch slurm_train_world_model.sh
 ```
 
@@ -219,9 +219,9 @@ sbatch slurm_train_world_model.sh
 
 ```bash
 python train_world_model.py \
-  --cache_dir /zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz \
-  --save_dir /zfsauton/scratch/sbellad/world_model_ckpts/v1 \
-  --resume /zfsauton/scratch/sbellad/world_model_ckpts/v1/latest.pt \
+  --cache_dir /data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz \
+  --save_dir /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model_ckpts/v1 \
+  --resume /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model_ckpts/v1/latest.pt \
   --device cuda \
   --epochs 80 \
   --batch_size 16 \
@@ -248,8 +248,8 @@ Do this **before** spending time on a full FM-ES closed-loop run.
 
 ```bash
 python evaluate_world_model.py \
-  --cache_dir /zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz \
-  --world_model_ckpt /zfsauton/scratch/sbellad/world_model_ckpts/v1/latest.pt \
+  --cache_dir /data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz \
+  --world_model_ckpt /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model_ckpts/v1/latest.pt \
   --device cuda \
   --batch_size 16 \
   --max_batches 100 \
@@ -288,13 +288,13 @@ Example:
 ```bash
 python simulation/run_simulation.py \
   --planner es_fm \
-  --fm_ckpt_path /zfsauton/scratch/mineuih/waymax_rs/checkpoints/pretrain_flow_matching/pretrain_fm_policy_20260828_011255/epoch_0500 \
-  --world_model_ckpt /zfsauton/scratch/sbellad/world_model_ckpts/v1/latest.pt \
+  --fm_ckpt_path /data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/checkpoints/pretrain_flow_matching/pretrain_fm_policy_20260828_011255/epoch_0500 \
+  --world_model_ckpt /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model_ckpts/v1/latest.pt \
   --world_model_device cpu \
   --other_agent_forecast wm \
-  --tfrecord_dir /zfsauton/scratch/eshau/womd/tf_example \
-  --lane_graph_dir /zfsauton/scratch/mineuih/waymax_rs/lane_graphs \
-  --exp_dir /zfsauton/scratch/sbellad/immediate_exp/es_fm_wm \
+  --tfrecord_dir /data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example \
+  --lane_graph_dir /data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs \
+  --exp_dir /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/es_fm_wm \
   --split validation \
   --num_worlds 5 \
   --num_scenarios 1000 \
@@ -335,7 +335,7 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 `slurm_es_fm_baseline.sh` now accepts `cv`, `wm`, or `gt`.
 
 ```bash
-WORLD_MODEL_CKPT=/zfsauton/scratch/sbellad/world_model_ckpts/v1/latest.pt \
+WORLD_MODEL_CKPT=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model_ckpts/v1/latest.pt \
 WORLD_MODEL_DEVICE=cpu \
 sbatch --job-name=es_fm_wm slurm_es_fm_baseline.sh wm
 ```
@@ -355,7 +355,7 @@ This is the experiment most directly comparable to the 1500-case numbers already
 reported.
 
 ```bash
-WORLD_MODEL_CKPT=/zfsauton/scratch/sbellad/world_model_ckpts/v1/latest.pt \
+WORLD_MODEL_CKPT=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model_ckpts/v1/latest.pt \
 WORLD_MODEL_DEVICE=cpu \
 sbatch --job-name=es_fm_wm_fail1500 \
   slurm_es_failure_subset.sh es_fm wm
@@ -366,7 +366,7 @@ For a clean three-way comparison, run the same exact subset with:
 ```bash
 sbatch --job-name=es_fm_cv_fail1500 slurm_es_failure_subset.sh es_fm cv
 
-WORLD_MODEL_CKPT=/zfsauton/scratch/sbellad/world_model_ckpts/v1/latest.pt \
+WORLD_MODEL_CKPT=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model_ckpts/v1/latest.pt \
 WORLD_MODEL_DEVICE=cpu \
 sbatch --job-name=es_fm_wm_fail1500 slurm_es_failure_subset.sh es_fm wm
 

@@ -7,9 +7,9 @@
 #
 set -euo pipefail
 
-ROOT="${WAYMAX_RS_ROOT:-/zfsauton2/home/sbellad/baseline/waymax_rs}"
+ROOT="${WAYMAX_RS_ROOT:-/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs}"
 SCRIPT="${ROOT}/legacy/sim/slurm_es_failure_subset_1500.sh"
-LOG_DIR="/zfsauton/scratch/sbellad/Flow_matching_sim/logs"
+LOG_DIR="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim/logs"
 mkdir -p "${LOG_DIR}"
 
 if [[ ! -f "${SCRIPT}" ]]; then

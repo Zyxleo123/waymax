@@ -1,14 +1,14 @@
 #!/bin/bash
 #SBATCH --job-name=es_posthoc_cpu
-#SBATCH --partition=cpu
-#SBATCH --qos=qos_cpu
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_cpu_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8G
 #SBATCH --time=1:00:00
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/es_posthoc/slurm-%x-%j.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/es_posthoc/slurm-%x-%j.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/es_posthoc/slurm-%x-%j.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/es_posthoc/slurm-%x-%j.out
 #
 # CPU side of the ES post-hoc experiment (slurm/sim/submit_es_posthoc.sh):
 #   ES_CPU_MODE=prep     rebuild fail1500 from a finished run into shard groups
@@ -24,9 +24,9 @@ for arg in "$@"; do
     source "$arg"
   elif [[ "$arg" == *=* ]]; then export "${arg?}"; fi
 done
-ES_ROOT="${ES_ROOT:-/zfsauton2/home/yixiz/waymax_rs_es_posthoc}"
+ES_ROOT="${ES_ROOT:-/home/yixiz/waymax_rs_es_posthoc}"
 cd "$ES_ROOT"
-PY="${ES_PYTHON:-/zfsauton/scratch/sbellad/conda_envs/waymax_rs/bin/python}"
+PY="${ES_PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/conda_envs/waymax_rs/bin/python}"
 echo "host=$(hostname) job=${SLURM_JOB_ID:-?} mode=${ES_CPU_MODE:?set ES_CPU_MODE} (CPU job, no GPU)"
 case "$ES_CPU_MODE" in
   prep)

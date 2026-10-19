@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-CKPT_PATH="/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_vla/pretrain_vla_gemma_20260603_012414/checkpoints/step_00010000.pt"
+CKPT_PATH="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_vla/pretrain_vla_gemma_20260603_012414/checkpoints/step_00010000.pt"
 CHECK_INTERVAL_SECONDS=60
 
 echo "Waiting for checkpoint: ${CKPT_PATH}"

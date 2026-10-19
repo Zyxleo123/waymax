@@ -19,7 +19,7 @@ Reuse an existing GT filter (skip expensive GT rollout)::
 
 Outputs::
 
-  /zfsauton/scratch/sbellad/immediate_exp/gt_filtered_fail1500_<stamp>/
+  /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/gt_filtered_fail1500_<stamp>/
 """
 
 from __future__ import annotations
@@ -50,10 +50,10 @@ from simulation.evaluation_utils import (
     rollout_predicted_trajectories_with_metrics,
 )
 
-DEFAULT_SUBSET_DIR = "/zfsauton/scratch/sbellad/immediate_exp/es_failure_subset_n1500_seed0"
-DEFAULT_TF_ROOT = "/zfsauton/scratch/eshau/womd/tf_example/training"
-DEFAULT_EXP_ROOT = "/zfsauton/scratch/sbellad/immediate_exp"
-DEFAULT_OUT_ROOT = "/zfsauton/scratch/sbellad/immediate_exp"
+DEFAULT_SUBSET_DIR = "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/es_failure_subset_n1500_seed0"
+DEFAULT_TF_ROOT = "/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training"
+DEFAULT_EXP_ROOT = "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp"
+DEFAULT_OUT_ROOT = "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp"
 
 EXPERIMENT_RUNS = {
     "diffusion_es_cv": "es_diffusion_cv_fail1500",

@@ -1,12 +1,13 @@
 #!/bin/bash
-#SBATCH --partition=general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:a6000:1
+#SBATCH --gres=gpu:A6000:1
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=128G
 #SBATCH --time=48:00:00
-#SBATCH --chdir=/zfsauton2/home/sbellad/baseline/waymax_rs
+#SBATCH --chdir=/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs
 
 # Diffusion policy pre-training / training (train_diffusion/). Submits itself.
 #   bash slurm/train/diffusion.sh pretrain [--subgoal] [--tag T] [--resume_path P]
@@ -21,7 +22,7 @@ case "${MODE}" in
 esac
 
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
-  REPO="${WAYMAX_RS_ROOT:-/zfsauton2/home/sbellad/baseline/waymax_rs}"
+  REPO="${WAYMAX_RS_ROOT:-/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs}"
   mkdir -p "${REPO}/logs"
   exec sbatch --job-name="${MODE}_diffusion" \
     --output="${REPO}/logs/${MODE}_diffusion_%j.out" --error="${REPO}/logs/${MODE}_diffusion_%j.err" \

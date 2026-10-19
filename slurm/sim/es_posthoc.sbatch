@@ -1,16 +1,17 @@
 #!/bin/bash
 #SBATCH --job-name=es_posthoc
-#SBATCH --partition=general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:A6000:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=2-00:00:00
 #SBATCH --requeue
 #SBATCH --open-mode=append
-#SBATCH --output=/zfsauton2/home/yixiz/waymax_rs/logs/es_posthoc/slurm-%x-%A_%a.out
-#SBATCH --error=/zfsauton2/home/yixiz/waymax_rs/logs/es_posthoc/slurm-%x-%A_%a.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/es_posthoc/slurm-%x-%A_%a.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/es_posthoc/slurm-%x-%A_%a.out
 #
 # One Diffusion-ES arm on one shard group of fail1500 (planner/diffusion_es_planner.py),
 # optionally with every candidate repaired by the o_am post-hoc optimizer before the
@@ -38,9 +39,9 @@ for arg in "$@"; do
   elif [[ "$arg" == *=* ]]; then export "${arg?}"; fi
 done
 
-ES_ROOT="${ES_ROOT:-/zfsauton2/home/yixiz/waymax_rs_es_posthoc}"
+ES_ROOT="${ES_ROOT:-/home/yixiz/waymax_rs_es_posthoc}"
 cd "$ES_ROOT"
-PY="${ES_PYTHON:-/zfsauton/scratch/sbellad/conda_envs/waymax_rs/bin/python}"
+PY="${ES_PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/conda_envs/waymax_rs/bin/python}"
 ES_OUT="${ES_OUT:?set ES_OUT}"
 ES_ARM="${ES_ARM:?set ES_ARM}"
 ES_GROUP_DIR="${ES_GROUP_DIR:?set ES_GROUP_DIR (a build_fail1500_from_run.py group)}"
@@ -60,9 +61,9 @@ ES_SAVE_TRAJ="${ES_SAVE_TRAJ:-0}"
 # training = fail1500 groups (with a target_scenarios.json); validation = whole shards.
 ES_SPLIT="${ES_SPLIT:-training}"
 ES_POSTHOC="${ES_POSTHOC:-0}"
-ES_DIFFUSION_CKPT="${ES_DIFFUSION_CKPT:-/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
-ES_MF_WM_CKPT="${ES_MF_WM_CKPT:-/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20260916_200620/latest.pt}"
-ES_LANE_GRAPH_DIR="${ES_LANE_GRAPH_DIR:-/zfsauton/scratch/mineuih/waymax_rs/lane_graphs}"
+ES_DIFFUSION_CKPT="${ES_DIFFUSION_CKPT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/pretrain_diffusion/pretrain_diffusion_without_subgoal_20260616_013642/latest}"
+ES_MF_WM_CKPT="${ES_MF_WM_CKPT:-/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20260916_200620/latest.pt}"
+ES_LANE_GRAPH_DIR="${ES_LANE_GRAPH_DIR:-/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs}"
 ES_NUM_SCENARIOS="${ES_NUM_SCENARIOS:-100000}"
 ES_NUM_WORLDS="${ES_NUM_WORLDS:-5}"
 ES_SEED="${ES_SEED:-0}"
@@ -84,7 +85,7 @@ echo "group=$ES_GROUP_DIR scenes<=$ES_NUM_SCENARIOS worlds=$ES_NUM_WORLDS seed=$
 echo "policy=$ES_DIFFUSION_CKPT"
 
 # Gate: every shard of this group must be readable on this node (a node without the
-# /zfsauton/datasets mount would otherwise finish with 0 scenes and exit 0).
+# /data/user_data/yixiz/autonlab/zfsauton/datasets mount would otherwise finish with 0 scenes and exit 0).
 n_bad=0
 for f in "$ES_GROUP_DIR"/tfrecords/"$ES_SPLIT"/*; do [[ -r "$f" ]] || { echo "unreadable: $f"; n_bad=$((n_bad+1)); }; done
 if (( n_bad > 0 )); then echo "FATAL: $n_bad shards unreadable on $(hostname)" >&2; exit 1; fi

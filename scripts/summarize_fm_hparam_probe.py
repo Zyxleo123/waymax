@@ -9,7 +9,7 @@ from collections import defaultdict
 from pathlib import Path
 
 
-DEFAULT_FM_ROOT = Path("/zfsauton/scratch/sbellad/Flow_matching_sim")
+DEFAULT_FM_ROOT = Path("/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Flow_matching_sim")
 DEFAULT_SUBSET = DEFAULT_FM_ROOT / "fm_hparam_probe_n250_seed0"
 DEFAULT_RUNS = DEFAULT_FM_ROOT / "fm_hparam_probe_runs"
 

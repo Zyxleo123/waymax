@@ -73,13 +73,13 @@ def _parse_args() -> argparse.Namespace:
 	parser.add_argument(
 		"--tfrecord_dir",
 		type=str,
-		default="/zfsauton/scratch/eshau/womd/tf_example/training/",
+		default="/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training/",
 		help="Directory containing TFRecord files.",
 	)
 	parser.add_argument(
 		"--output_dir",
 		type=str,
-		default="/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/",
+		default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/",
 		help="Directory where cached npz files will be written.",
 	)
 	parser.add_argument(

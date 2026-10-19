@@ -27,9 +27,9 @@ from train_vla.utils.utils import (
 )
 
 
-DEFAULT_SUCCESS_CACHE_DIR = "/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz"
-DEFAULT_FAILURE_CACHE_DIR = "/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz"
-DEFAULT_FAILURE_RESULT_ROOT = "/zfsauton/scratch/mineuih/waymax_rs/exp"
+DEFAULT_SUCCESS_CACHE_DIR = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz"
+DEFAULT_FAILURE_CACHE_DIR = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz"
+DEFAULT_FAILURE_RESULT_ROOT = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/exp"
 DEFAULT_SUCCESS_ANCHOR_STEPS = (0, 10, 20, 30, 40, 50, 60, 70, 80)
 
 
@@ -40,7 +40,7 @@ class FDTrainingConfig:
 	failure_result_root: str | None = DEFAULT_FAILURE_RESULT_ROOT
 	success_file_indices: list[int] | None = None
 	failure_file_indices: list[int] | None = None
-	output_dir: str = "/zfsauton/scratch/mineuih/waymax_rs/checkpoints/train_fd_vla"
+	output_dir: str = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/checkpoints/train_fd_vla"
 	wandb_project: str | None = "train_fd_vla"
 	wandb_run_name: str | None = "train_fd_vla"
 	wandb_entity: str | None = None
@@ -545,7 +545,7 @@ def parse_args() -> FDTrainingConfig:
 	parser.add_argument("--failure_result_root", type=str, default=DEFAULT_FAILURE_RESULT_ROOT)
 	parser.add_argument("--success_file_indices", type=str, nargs="*", default=None)
 	parser.add_argument("--failure_file_indices", type=str, nargs="*", default=None)
-	parser.add_argument("--output_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/checkpoints/train_fd_vla")
+	parser.add_argument("--output_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/checkpoints/train_fd_vla")
 	parser.add_argument("--wandb_project", type=str, default="train_fd_vla")
 	parser.add_argument("--wandb_run_name", type=str, default="train_fd_vla")
 	parser.add_argument("--wandb_entity", type=str, default=None)
