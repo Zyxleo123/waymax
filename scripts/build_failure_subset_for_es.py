@@ -43,22 +43,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--failure_exp_dir",
         type=str,
-        default="/zfsauton/scratch/mineuih/waymax_rs/exp/simulation_fm_training_collect_failure_20260903_030456",
+        default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/exp/simulation_fm_training_collect_failure_20260903_030456",
     )
     p.add_argument(
         "--tf_root",
         type=str,
-        default="/zfsauton/scratch/eshau/womd/tf_example/training",
+        default="/data/user_data/yixiz/autonlab/zfsauton/scratch/eshau/womd/tf_example/training",
     )
     p.add_argument(
         "--lane_graph_dir",
         type=str,
-        default="/zfsauton/scratch/mineuih/waymax_rs/lane_graphs",
+        default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs",
     )
     p.add_argument(
         "--out_dir",
         type=str,
-        default="/zfsauton/scratch/sbellad/immediate_exp/es_failure_subset_n1500_seed0",
+        default="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/es_failure_subset_n1500_seed0",
     )
     p.add_argument("--n", type=int, default=1500)
     p.add_argument("--seed", type=int, default=0)

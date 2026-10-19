@@ -1,5 +1,5 @@
 #!/bin/bash
-# Final paper runs on WOMD validation shards 00000-00009 -> /zfsauton/scratch/sbellad/final_runs
+# Final paper runs on WOMD validation shards 00000-00009 -> /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/final_runs
 #
 # Without IDM (log replay):
 #   Diffusion only
@@ -17,7 +17,7 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 
-SCRATCH=/zfsauton/scratch/sbellad
+SCRATCH=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad
 EXP_ROOT=${SCRATCH}/final_runs
 DISC_CKPT=${SCRATCH}/es_discriminator/safety_progress/safety_progress_full_gaussian_wm_20261013_090539_81674/best.pt
 DRY_RUN=0

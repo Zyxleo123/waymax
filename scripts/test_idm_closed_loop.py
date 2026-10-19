@@ -61,7 +61,7 @@ class LogEgoPlanner:
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--tfrecord", default=sorted(glob(
-        "/zfsauton/datasets/womd/tf_example/validation/validation_tfexample.tfrecord-00000-of-00150"))[0])
+        "/data/user_data/yixiz/autonlab/zfsauton/datasets/womd/tf_example/validation/validation_tfexample.tfrecord-00000-of-00150"))[0])
     p.add_argument("--n", type=int, default=5)
     p.add_argument("--start", type=int, default=0)
     a = p.parse_args()

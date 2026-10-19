@@ -1,16 +1,16 @@
 #!/bin/bash
 #SBATCH --job-name=run_es
-#SBATCH --partition=general
-#SBATCH --qos=qos_general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:A6000:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --time=2-00:00:00
-#SBATCH --chdir=/zfsauton2/home/sbellad/baseline/waymax_rs
-#SBATCH --output=/zfsauton/scratch/sbellad/immediate_exp/logs/run_es_%j.out
-#SBATCH --error=/zfsauton/scratch/sbellad/immediate_exp/logs/run_es_%j.err
+#SBATCH --chdir=/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs
+#SBATCH --output=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/logs/run_es_%j.out
+#SBATCH --error=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/logs/run_es_%j.err
 
 # One closed-loop ES simulation job (Diffusion-ES or FM-ES) on one subset.
 # Normally submitted by slurm/sim/{trainval,fail1500,probe250}.sh; see README.md.
@@ -22,18 +22,18 @@
 # (legacy/sim/), so old results, resume and comparison scripts keep working.
 set -euo pipefail
 
-ROOT="${WAYMAX_RS_ROOT:-/zfsauton2/home/sbellad/baseline/waymax_rs}"
-SCRATCH="/zfsauton/scratch/sbellad"
+ROOT="${WAYMAX_RS_ROOT:-/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs}"
+SCRATCH="/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad"
 IMMEDIATE_ROOT="${SCRATCH}/immediate_exp"
 WM_SIM_ROOT="${SCRATCH}/world_model_sim"
 FM_SIM_ROOT="${SCRATCH}/Flow_matching_sim"
 DIFF_ES_SIM_ROOT="${SCRATCH}/Diffusion_ES_sim"
-WOMD_TF_ROOT="/zfsauton/datasets/womd/tf_example"
-LANE_GRAPH_DIR="/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
+WOMD_TF_ROOT="/data/user_data/yixiz/autonlab/zfsauton/datasets/womd/tf_example"
+LANE_GRAPH_DIR="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
 FAIL1500_SUBSET_DIR="${DIFF_ES_SIM_ROOT}/es_failure_subset_n1500_seed0"
 VAL10_TFRECORD_DIR="${SCRATCH}/womd_val_shards00_09"
 DIFFUSION_CKPT="${SCRATCH}/train_diffusion/diffusion_baseline_baseline_20260810_144559/epoch_0500"
-FM_CKPT="/zfsauton/scratch/mineuih/waymax_rs/checkpoints/pretrain_flow_matching/pretrain_fm_policy_20260828_011255/epoch_0500"
+FM_CKPT="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/checkpoints/pretrain_flow_matching/pretrain_fm_policy_20260828_011255/epoch_0500"
 DET_WM_CKPT="${SCRATCH}/world_model/ckpts/world_model_20260912_170741/epoch_0500.pt"
 MF_WM_CKPT="${SCRATCH}/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20260916_200620/epoch_0450.pt"
 GAU_WM_CKPT="${SCRATCH}/world_model/ckpts_gaussian/gaussian_world_model_20260916_194054/epoch_0370.pt"

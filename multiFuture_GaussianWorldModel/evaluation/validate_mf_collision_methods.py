@@ -36,8 +36,8 @@ from simulation.run_simulation import _load_isolated_wm_forecaster  # noqa: E402
 from waymax import config as waymax_config  # noqa: E402
 
 PKG = ROOT / "multiFuture_GaussianWorldModel"
-CKPT = "/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20260916_200620/epoch_0450.pt"
-SUBSET = Path("/zfsauton/scratch/sbellad/immediate_exp/es_failure_subset_n1500_seed0")
+CKPT = "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20260916_200620/epoch_0450.pt"
+SUBSET = Path("/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/es_failure_subset_n1500_seed0")
 H, DT = 50, 0.1
 
 

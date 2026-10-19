@@ -1,16 +1,16 @@
 #!/bin/bash
 #SBATCH --job-name=viz_es_gt_fail
-#SBATCH --partition=general
-#SBATCH --qos=qos_general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:a6000:1
+#SBATCH --gres=gpu:A6000:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=08:00:00
-#SBATCH --chdir=/zfsauton2/home/sbellad/baseline/waymax_rs
-#SBATCH --output=/zfsauton/scratch/sbellad/Diffusion_ES_sim/logs/viz_es_gt_failures_%j.out
-#SBATCH --error=/zfsauton/scratch/sbellad/Diffusion_ES_sim/logs/viz_es_gt_failures_%j.err
+#SBATCH --chdir=/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs
+#SBATCH --output=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Diffusion_ES_sim/logs/viz_es_gt_failures_%j.out
+#SBATCH --error=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Diffusion_ES_sim/logs/viz_es_gt_failures_%j.err
 
 # Re-simulate the Diffusion-ES (GT forecast) train/val failures with ES recording, then render.
 #
@@ -19,8 +19,8 @@
 #   python scripts/viz_es_gt_failures.py --phase render --out_dir /path    # re-render on CPU
 set -euo pipefail
 
-ROOT=/zfsauton2/home/sbellad/baseline/waymax_rs
-SCRATCH=/zfsauton/scratch/sbellad
+ROOT=/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs
+SCRATCH=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad
 OUT_DIR=${OUT_DIR:-${SCRATCH}/Diffusion_ES_sim/viz_es_gt_failures_$(date +%Y%m%d_%H%M%S)}
 EXTRA=${EXTRA:-}
 

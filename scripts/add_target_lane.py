@@ -83,7 +83,7 @@ def _parse_args() -> argparse.Namespace:
 	parser.add_argument(
 		"--annotation_dir",
 		type=str,
-		default="/zfsauton/scratch/mineuih/waymax_rs/annotations/",
+		default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/annotations/",
 		help="Directory containing annotation JSONL files produced by annotation.py.",
 	)
 	parser.add_argument(

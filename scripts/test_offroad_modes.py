@@ -25,7 +25,7 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
-PREPORT = Path("/zfsauton2/home/yixiz/waymax_rs_es_disc/scores/scorer_lane_graph.py")
+PREPORT = Path("/home/yixiz/waymax_rs_es_disc/scores/scorer_lane_graph.py")
 
 
 def _load_preport():
@@ -64,7 +64,7 @@ def main() -> int:
     from scores.scorer_lane_graph import OFFROAD_TIEBREAK_EPS, Scorer
 
     old_mod = _load_preport()
-    tf = "/zfsauton/datasets/womd/tf_example/validation/validation_tfexample.tfrecord-00000-of-00150"
+    tf = "/data/user_data/yixiz/autonlab/zfsauton/datasets/womd/tf_example/validation/validation_tfexample.tfrecord-00000-of-00150"
     ds_cfg = dataclasses.replace(waymax_config.WOD_1_3_1_TRAINING, path=tf, max_num_objects=128)
     out = load_scenario_state_batch_fast(ds_cfg, list(range(5)))
     state = out[0] if isinstance(out, tuple) else out

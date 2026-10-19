@@ -59,19 +59,19 @@ from simulation.planning_utils import apply_ego_replacements_to_expanded_state  
 from waymax import config as waymax_config  # noqa: E402
 
 DEFAULT_COMPARE_DIR = (
-    "/zfsauton/scratch/sbellad/immediate_exp/cv_wm_gt_compare_20260915_175107"
+    "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/cv_wm_gt_compare_20260915_175107"
 )
 DEFAULT_TFRECORD_DIR = (
-    "/zfsauton/scratch/sbellad/immediate_exp/es_failure_subset_n1500_seed0/tfrecords/training"
+    "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp/es_failure_subset_n1500_seed0/tfrecords/training"
 )
-DEFAULT_LANE_GRAPH_DIR = "/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
+DEFAULT_LANE_GRAPH_DIR = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
 DEFAULT_DIFFUSION_CKPT = (
-    "/zfsauton/scratch/sbellad/diffusion/diffusion_baseline_baseline_20260810_144559/epoch_0500"
+    "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/diffusion/diffusion_baseline_baseline_20260810_144559/epoch_0500"
 )
 DEFAULT_WM_CKPT = (
-    "/zfsauton/scratch/sbellad/world_model/ckpts/world_model_20260912_170741/epoch_0500.pt"
+    "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/ckpts/world_model_20260912_170741/epoch_0500.pt"
 )
-DEFAULT_OUT_ROOT = "/zfsauton/scratch/sbellad/immediate_exp"
+DEFAULT_OUT_ROOT = "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/immediate_exp"
 
 MARGINS_M = (0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.50)
 

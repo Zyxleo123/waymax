@@ -21,8 +21,8 @@ from pathlib import Path
 
 import numpy as np
 
-WOMD_TF_ROOT = "/zfsauton/datasets/womd/tf_example"
-SPLIT_JSON = "/zfsauton/scratch/sbellad/es_discriminator/splits/fail1500_scenario_split_seed0.json"
+WOMD_TF_ROOT = "/data/user_data/yixiz/autonlab/zfsauton/datasets/womd/tf_example"
+SPLIT_JSON = "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/es_discriminator/splits/fail1500_scenario_split_seed0.json"
 START_T = 10
 SCENE_RE = re.compile(r"^(?P<tf>.+)\.scenario_(?P<idx>\d+)\.json$")
 METRICS = ("success", "collision", "offroad", "goal_reached", "progress_m", "final_goal_dist_m",

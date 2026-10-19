@@ -27,7 +27,7 @@ import numpy as np
 
 from .analyze_es_decisions import START_T, batch_files
 
-SCRATCH = "/zfsauton/scratch/sbellad/es_discriminator"
+SCRATCH = "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/es_discriminator"
 FAIL1500 = "fail1500_es_diffusion_wm_mf_epoch0450_expected_independent_seed0"
 WOMD_TRAIN = "womd_train_s02_11_es_diffusion_wm_mf_epoch0450_expected_independent_seed0"
 TRAINVAL_TFRECORDS = ("training_tfexample.tfrecord-00000-of-01000", "training_tfexample.tfrecord-00001-of-01000")

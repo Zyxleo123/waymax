@@ -8,7 +8,7 @@ from data.types import PreprocessConfig
 
 @dataclass
 class DiffusionTorchPretrainConfig:
-    cache_dir: str = "/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/"
+    cache_dir: str = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/"
     file_indices: list[int] | None = None
     cache_batch_size: int = 64
     shuffle_seed: int = 0
@@ -22,7 +22,7 @@ class DiffusionTorchPretrainConfig:
     log_every: int = 50
     seed: int = 0
 
-    save_dir: str = "/zfsauton/scratch/mineuih/waymax_rs/checkpoints/train_diffusion_torch"
+    save_dir: str = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/checkpoints/train_diffusion_torch"
     resume_path: str | None = None
 
     lr: float = 1e-4

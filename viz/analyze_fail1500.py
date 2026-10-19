@@ -19,14 +19,14 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 import numpy as np
 import pandas as pd
 
-SRC_EXP = Path("/zfsauton/scratch/mineuih/waymax_rs/exp/simulation_fm_training_collect_failure_20260903_030456")
-SRC_CACHE = Path("/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz")
-MANIFEST = Path("/zfsauton/scratch/sbellad/Diffusion_ES_sim/es_failure_subset_n1500_seed0/subset_manifest.json")
+SRC_EXP = Path("/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/exp/simulation_fm_training_collect_failure_20260903_030456")
+SRC_CACHE = Path("/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz")
+MANIFEST = Path("/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Diffusion_ES_sim/es_failure_subset_n1500_seed0/subset_manifest.json")
 RUNS = {
-    "diff": "/zfsauton/scratch/sbellad/diffusion_sim/diffusion_only_fail1500_seed0",
-    "diffidm": "/zfsauton/scratch/sbellad/diffusion_sim/diffusion_only_IDM_fail1500_seed0",
+    "diff": "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/diffusion_sim/diffusion_only_fail1500_seed0",
+    "diffidm": "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/diffusion_sim/diffusion_only_IDM_fail1500_seed0",
 }
-OUT = Path("/zfsauton/scratch/sbellad/diffusion_sim/analysis")
+OUT = Path("/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/diffusion_sim/analysis")
 START_T = 10
 DT = 0.1
 CONTROL_PER_TFRECORD = 12

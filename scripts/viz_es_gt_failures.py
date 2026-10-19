@@ -42,15 +42,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-SCRATCH = "/zfsauton/scratch/sbellad"
+SCRATCH = "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad"
 ES_GT_DIR = f"{SCRATCH}/Diffusion_ES_sim/es_diffusion_gt"
 DEFAULT_RESULT_DIRS = {
     "training": f"{ES_GT_DIR}/simulation_es_training_es_diffusion_gt_TRAIN_tfrecord00_01_20260907_102456",
     "validation": f"{ES_GT_DIR}/simulation_es_validation_es_diffusion_gt_VAL_tfrecord00_01_20260907_203053",
 }
 DEFAULT_GT_EVAL_DIR = f"{SCRATCH}/Diffusion_ES_sim/gt_filtered_es_metrics_20260908_114522/gt_filter"
-DEFAULT_WOMD_ROOT = "/zfsauton/datasets/womd/tf_example"
-DEFAULT_LANE_GRAPH_DIR = "/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
+DEFAULT_WOMD_ROOT = "/data/user_data/yixiz/autonlab/zfsauton/datasets/womd/tf_example"
+DEFAULT_LANE_GRAPH_DIR = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
 DEFAULT_DIFFUSION_CKPT = (
     f"{SCRATCH}/train_diffusion/diffusion_baseline_baseline_20260810_144559/epoch_0500"
 )

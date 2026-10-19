@@ -36,7 +36,7 @@ def _parse_args() -> argparse.Namespace:
 	parser.add_argument(
 		"--exp_dir",
 		type=str,
-		default="/zfsauton/scratch/mineuih/waymax_rs/exp",
+		default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/exp",
 		help="Experiment directory containing per-scenario JSON files and a sim_state_cache subdirectory.",
 	)
 	parser.add_argument(

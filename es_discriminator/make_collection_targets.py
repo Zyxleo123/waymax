@@ -5,7 +5,7 @@ Lists every record of the requested shards except scenes already collected (any
 has the runner's `--target_scenario_path` format: {tfrecord basename: [record indices]}.
 
     python -m es_discriminator.make_collection_targets --first 2 --last 11 \
-        --exclude /zfsauton/scratch/sbellad/Diffusion_ES_sim/es_failure_subset_n1500_seed0/target_scenarios.json \
+        --exclude /data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/Diffusion_ES_sim/es_failure_subset_n1500_seed0/target_scenarios.json \
         --out .../target_scenarios.json
 """
 
@@ -16,7 +16,7 @@ import json
 import os
 import zipfile
 
-LANE_GRAPH_DIR = "/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
+LANE_GRAPH_DIR = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
 
 
 def shard_name(i: int) -> str:

@@ -26,8 +26,8 @@ sys.path.insert(0, str(REPO_ROOT))
 
 import data.preprocess as repo_pp  # noqa: E402  -- imported FIRST, as the planner does
 
-MF = "/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20260916_200620/"
-ISHAN = ("/zfsauton/scratch/ishanj/world_model/ckpts_multifuture_gaussian/"
+MF = "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20260916_200620/"
+ISHAN = ("/data/user_data/yixiz/autonlab/zfsauton/scratch/ishanj/world_model/ckpts_multifuture_gaussian/"
          "multiFuture_GaussianWorldModel_20261005_092950/epoch_0450.pt")
 
 
@@ -53,7 +53,7 @@ def main() -> int:
     print(f"[wm] repo data.preprocess restored: {sys.modules.get('data.preprocess') is repo_pp}; "
           f"second load map builder {src2.name} in {src2.parent.parent.name}", flush=True)
 
-    tf = "/zfsauton/datasets/womd/tf_example/validation/validation_tfexample.tfrecord-00000-of-00150"
+    tf = "/data/user_data/yixiz/autonlab/zfsauton/datasets/womd/tf_example/validation/validation_tfexample.tfrecord-00000-of-00150"
     ds_cfg = dataclasses.replace(waymax_config.WOD_1_3_1_TRAINING, path=tf, max_num_objects=128)
     out = load_scenario_state_batch_fast(ds_cfg, list(range(3)))
     state = out[0] if isinstance(out, tuple) else out

@@ -21,7 +21,7 @@ class DiffusionTrainConfig:
 	use_ema: bool = True
 	goal_mask_prob: float = 0.5
 
-	save_dir: str = "/zfsauton/scratch/mineuih/waymax_rs/vla/train_diffusion"
+	save_dir: str = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/train_diffusion"
 	epochs: int = 20
 	steps_per_epoch: int = 1000
 	save_every: int = 5
@@ -50,7 +50,7 @@ class DiffusionTrainConfig:
 def parse_args() -> DiffusionTrainConfig:
 	parser = argparse.ArgumentParser()
 
-	parser.add_argument("--cache_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/")
+	parser.add_argument("--cache_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/sim_state_cache_npz/")
 	parser.add_argument("--file_indices", type=int, nargs="*", default=None)
 	parser.add_argument("--cache_batch_size", type=int, default=64)
 	parser.add_argument("--shuffle_seed", type=int, default=0)
@@ -63,7 +63,7 @@ def parse_args() -> DiffusionTrainConfig:
 	parser.add_argument("--use_ema", action="store_true", default=True)
 	parser.add_argument("--no_use_ema", action="store_false", dest="use_ema")
 
-	parser.add_argument("--save_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/checkpoints/train_diffusion")
+	parser.add_argument("--save_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/checkpoints/train_diffusion")
 	parser.add_argument("--epochs", type=int, default=500)
 	parser.add_argument("--steps_per_epoch", type=int, default=1000)
 	parser.add_argument("--save_every", type=int, default=10)
@@ -77,7 +77,7 @@ def parse_args() -> DiffusionTrainConfig:
 	parser.add_argument("--grad_clip_norm", type=float, default=1.0)
 	parser.add_argument("--ema_decay", type=float, default=0.999)
 
-	parser.add_argument("--jax_compilation_cache_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/vla/.jax_compilation_cache")
+	parser.add_argument("--jax_compilation_cache_dir", type=str, default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/vla/.jax_compilation_cache")
 
 	parser.add_argument("--wandb_project", type=str, default="train_diffusion")
 	parser.add_argument("--wandb_name", type=str, default="train_diffusion")

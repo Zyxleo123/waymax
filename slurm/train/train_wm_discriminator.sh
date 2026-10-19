@@ -1,16 +1,16 @@
 #!/bin/bash
 #SBATCH --job-name=wm_disc
-#SBATCH --partition=general
-#SBATCH --qos=qos_general
+#SBATCH --partition=preempt
+#SBATCH --qos=preempt_qos
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:A6000:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=96G
 #SBATCH --time=1-12:00:00
-#SBATCH --chdir=/zfsauton2/home/sbellad/baseline/waymax_rs
-#SBATCH --output=/zfsauton/scratch/sbellad/es_discriminator/logs/wm_disc_%j.out
-#SBATCH --error=/zfsauton/scratch/sbellad/es_discriminator/logs/wm_disc_%j.err
+#SBATCH --chdir=/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs
+#SBATCH --output=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/es_discriminator/logs/wm_disc_%j.out
+#SBATCH --error=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/es_discriminator/logs/wm_disc_%j.err
 
 # Safety + progress discriminator with the full Gaussian world model (real_es/wm_model.py) on
 # the recorded fail1500 Diffusion-ES candidates: Waymax safety + progress pairs 80/20,
@@ -34,8 +34,8 @@
 # Output: ${SCRATCH}/es_discriminator/safety_progress/<run_name>_<timestamp>_<jobid>/
 set -euo pipefail
 
-ROOT=/zfsauton2/home/sbellad/baseline/waymax_rs
-SCRATCH=/zfsauton/scratch/sbellad
+ROOT=/data/user_data/yixiz/autonlab/zfsauton2/home/sbellad/baseline/waymax_rs
+SCRATCH=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad
 RUN=fail1500_es_diffusion_wm_mf_epoch0450_expected_independent_seed0
 DATA=${SCRATCH}/es_discriminator/es_candidate_data/${RUN}/es_candidates
 TFRECORDS=${SCRATCH}/Diffusion_ES_sim/es_failure_subset_n1500_seed0/tfrecords/training
@@ -64,7 +64,7 @@ if [[ -n "${DATA_NAME}" ]]; then
   SET=${SCRATCH}/es_discriminator/training_sets/${DATA_NAME}
   [[ -d "${SET}/es_candidates" ]] || { echo "ERROR: ${SET} missing; run es_discriminator.build_training_set" >&2; exit 1; }
   DATA=${SET}/es_candidates WM_DIR=${SET}/wm_predictions EDGE_DIR=${SET}/road_edges
-  TFRECORDS=/zfsauton/datasets/womd/tf_example/training
+  TFRECORDS=/data/user_data/yixiz/autonlab/zfsauton/datasets/womd/tf_example/training
   SET_ARGS=(--split "${SET}/scenario_split_seed0.json" --invalid-at-start "${SET}/invalid_at_start.json")
 fi
 ARGS=(--data-dir "${DATA}" --wm-dir "${WM_DIR}" --edge-dir "${EDGE_DIR}" "${SET_ARGS[@]}" --train-cands 64 --eval-chunk 64)

@@ -42,7 +42,7 @@ sys.path = [p for p in sys.path if Path(p or ".").resolve() != _SCRIPT_DIR]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-SCRATCH = "/zfsauton/scratch/sbellad"
+SCRATCH = "/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad"
 ES_ROOT = f"{SCRATCH}/Diffusion_ES_sim"
 DEFAULT_VAL_RESULT_DIRS = {
     "gt": f"{ES_ROOT}/es_diffusion_gt/simulation_es_validation_es_diffusion_gt_VAL_tfrecord00_01_20260907_203053",
@@ -50,8 +50,8 @@ DEFAULT_VAL_RESULT_DIRS = {
     "wm": f"{ES_ROOT}/es_diffusion_wm10/simulation_es_validation_es_diffusion_wm10_VAL_tfrecord00_01_20260916_164314",
 }
 DEFAULT_GT_EVAL = f"{ES_ROOT}/gt_filtered_es_metrics_20260908_114522/gt_filter/validation_gt_eval_all.json"
-DEFAULT_WOMD_ROOT = "/zfsauton/datasets/womd/tf_example"
-DEFAULT_LANE_GRAPH_DIR = "/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
+DEFAULT_WOMD_ROOT = "/data/user_data/yixiz/autonlab/zfsauton/datasets/womd/tf_example"
+DEFAULT_LANE_GRAPH_DIR = "/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
 DEFAULT_DIFFUSION_CKPT = f"{SCRATCH}/train_diffusion/diffusion_baseline_baseline_20260810_144559/epoch_0500"
 DEFAULT_WM_CKPT = f"{SCRATCH}/world_model/ckpts/world_model_20260912_170741/epoch_0500.pt"
 DEFAULT_OUT_ROOT = f"{SCRATCH}/viz"
