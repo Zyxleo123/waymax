@@ -237,19 +237,31 @@ above before it becomes `~/.claude/CLAUDE.md`.
 
 ## If the target is Babel (CMU LTI)
 
-From `sinfo` on login3, 2026-10-18. On that date jobs there were queueing indefinitely.
+**Done on Babel 2026-10-19** (node babel-t9-32, RTX A6000). What turned out to be true there,
+which corrects the notes written from `sinfo` on 10-18:
 
 - Layout: `CODE_HOME=/home/yixiz` (100 GB) and `NEWROOT=/data/user_data/yixiz/autonlab` (500 GB).
-  Storage is AutoFS, so always use full paths.
-- **`general`** has GPU nodes only: 6000Ada, A100_80GB, A6000, L40 and L40S. All are ≥48 GB and
-  Ampere or Ada, so `gpu:1` is safe there.
-- **`preempt` is the default partition.** Always pass `-p` explicitly. `preempt` adds A100_40GB,
-  H100, H200, RTX_PRO_6000 (Blackwell, untested) and GPU-less nodes, so pin a type there
-  (`gpu:A6000:1`).
-- There is no `cpu`, `long` or `debug` partition. CPU jobs go to `general` without `--gres`;
-  confirm `MaxTime` with `scontrol show partition general`.
-- Relocation values:
-  `CODE_HOME=/home/yixiz GPU_PARTITION=general CPU_PARTITION=general DROP_QOS=1 DROP_NODE_PINS=1 GPU_GRES=gpu:1`.
+  `/data/user_data/yixiz` is mounted only on compute nodes with an active job (not on login), and
+  AutoFS needs the full path.
+- **yixiz may only use `preempt`**, and it requires a QOS: GPU jobs
+  `-p preempt --qos=preempt_qos --gres=gpu:1` (pin `gpu:A6000:1`: preempt also has Blackwell
+  RTX_PRO_6000, untested), CPU jobs `-p preempt --qos=preempt_cpu_qos` with no `--gres`.
+  `general` rejects GPU-less jobs, and it is not ours to use. `preempt` requeues on preemption.
+- Queue waits are long, so work runs directly on a compute node yixiz already holds (the IDE's
+  node-hold job) where it fits. The download, env build and every check below ran that way.
+- conda: Miniforge at `/data/user_data/yixiz/miniforge3`. The env was built from
+  `env/conda_env.yml` with the `defaults` channel removed (37 min).
+- `sacct` works on Babel.
+- Relocation values used:
+  `CODE_HOME=/home/yixiz GPU_PARTITION=preempt CPU_PARTITION=preempt DROP_QOS=1 GPU_QOS=preempt_qos CPU_QOS=preempt_cpu_qos DROP_NODE_PINS=1 GPU_GRES=gpu:A6000:1`.
+  After that, by hand: the `DFT_PARTITION`/`GPU_PARTITION`/`PARTITION` defaults in 4 submitters
+  went to `preempt`, `--qos=qos_preempt` in `submit_es_disc.sh` became `preempt_qos`, and
+  `V-Max/slurm/sdc_probe/probe_sdc_index.sbatch` got a preempt/`preempt_cpu_qos` header.
+- Results: section 1 reported 0 differences on 439 files and both archive checksums OK; jax sees the A6000;
+  `verify_womd` PASS (10/10); the compact set PASS (150/150 shards, 1568 scenes); after the
+  relocation no `/zfsauton` path is left, and a second run changes nothing. The val10 run's env
+  files resolve. Broken symlinks (~6.5k) all point at things that were not copied (training
+  shards, wandb debug logs, V-Max-era SAC checkpoints).
 
 ## Deliberately not copied
 
