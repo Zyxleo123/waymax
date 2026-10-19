@@ -1,37 +1,37 @@
 {
- "generated": "2026-10-19 07:00",
+ "generated": "2026-10-19 08:00",
  "run_dir": "/zfsauton/scratch/ishanj/anchor_wm/closed_loop_val/val0-9_es_anchorwm_ft_rule_hdg_20261019_014026_best_reward_scorer_offmargin_tiebreak",
- "scenes_done": 2250,
+ "scenes_done": 2876,
  "expected": 1500,
  "complete": false,
  "splits": {
   "all": {
-   "n": 2250,
+   "n": 2876,
    "metrics": {
     "ft_rule_hdg scorer": {
-     "success": 0.9875555555555555,
-     "overlap": 0.0026666666666666666,
-     "offroad": 0.009333333333333334,
-     "goal_reached": 0.9995555555555555,
-     "goal_dist_median_m": 0.13141677528619766
+     "success": 0.9860917941585535,
+     "overlap": 0.0034770514603616135,
+     "offroad": 0.010083449235048678,
+     "goal_reached": 0.9996522948539638,
+     "goal_dist_median_m": 0.13499002158641815
     },
     "MF+rule": {
-     "success": 0.9871111111111112,
-     "overlap": 0.0022222222222222222,
-     "offroad": 0.008,
-     "goal_reached": 0.9968888888888889,
-     "goal_dist_median_m": 0.12163732945919037
+     "success": 0.9853963838664812,
+     "overlap": 0.003129346314325452,
+     "offroad": 0.009040333796940195,
+     "goal_reached": 0.9968706536856745,
+     "goal_dist_median_m": 0.12372908368706703
     }
    },
    "ft_rule_hdg scorer minus": {
     "MF+rule": {
-     "delta_pts": 0.044444444444444446,
+     "delta_pts": 0.06954102920723226,
      "ci95": [
-      -0.2222222222222222,
-      0.35555555555555557
+      -0.2086230876216968,
+      0.34770514603616137
      ],
-     "fixed": 6,
-     "broken": 5
+     "fixed": 10,
+     "broken": 8
     }
    }
   },
@@ -216,121 +216,121 @@
    }
   },
   "shard 00006": {
-   "n": 190,
+   "n": 285,
    "metrics": {
     "ft_rule_hdg scorer": {
-     "success": 0.9789473684210527,
-     "overlap": 0.0,
-     "offroad": 0.021052631578947368,
+     "success": 0.9719298245614035,
+     "overlap": 0.0035087719298245615,
+     "offroad": 0.02456140350877193,
      "goal_reached": 1.0,
-     "goal_dist_median_m": 0.16049981862306595
+     "goal_dist_median_m": 0.17425620555877686
     },
     "MF+rule": {
-     "success": 0.9789473684210527,
+     "success": 0.9754385964912281,
      "overlap": 0.0,
-     "offroad": 0.015789473684210527,
-     "goal_reached": 0.9947368421052631,
-     "goal_dist_median_m": 0.1403931975364685
+     "offroad": 0.021052631578947368,
+     "goal_reached": 0.9964912280701754,
+     "goal_dist_median_m": 0.13827931880950928
     }
    },
    "ft_rule_hdg scorer minus": {
     "MF+rule": {
-     "delta_pts": 0.0,
+     "delta_pts": -0.3508771929824561,
      "ci95": [
-      -1.5789473684210527,
-      1.5789473684210527
+      -1.7543859649122806,
+      0.7017543859649122
      ],
      "fixed": 1,
-     "broken": 1
+     "broken": 2
     }
    }
   },
   "shard 00007": {
-   "n": 145,
+   "n": 297,
    "metrics": {
     "ft_rule_hdg scorer": {
-     "success": 0.993103448275862,
+     "success": 0.9932659932659933,
      "overlap": 0.0,
-     "offroad": 0.006896551724137931,
+     "offroad": 0.006734006734006734,
      "goal_reached": 1.0,
-     "goal_dist_median_m": 0.15042851865291595
+     "goal_dist_median_m": 0.14337852597236633
     },
     "MF+rule": {
-     "success": 1.0,
-     "overlap": 0.0,
+     "success": 0.9966329966329966,
+     "overlap": 0.003367003367003367,
      "offroad": 0.0,
      "goal_reached": 1.0,
-     "goal_dist_median_m": 0.12010626494884491
+     "goal_dist_median_m": 0.12382248789072037
     }
    },
    "ft_rule_hdg scorer minus": {
     "MF+rule": {
-     "delta_pts": -0.6896551724137931,
+     "delta_pts": -0.33670033670033667,
      "ci95": [
-      -2.0689655172413794,
-      0.0
+      -1.3468013468013467,
+      0.6734006734006733
      ],
-     "fixed": 0,
-     "broken": 1
+     "fixed": 1,
+     "broken": 2
     }
    }
   },
   "shard 00008": {
-   "n": 125,
+   "n": 284,
    "metrics": {
     "ft_rule_hdg scorer": {
-     "success": 0.984,
-     "overlap": 0.008,
-     "offroad": 0.008,
+     "success": 0.9823943661971831,
+     "overlap": 0.01056338028169014,
+     "offroad": 0.007042253521126761,
      "goal_reached": 1.0,
-     "goal_dist_median_m": 0.10165664553642273
+     "goal_dist_median_m": 0.12142909318208694
     },
     "MF+rule": {
-     "success": 0.984,
-     "overlap": 0.0,
-     "offroad": 0.008,
-     "goal_reached": 0.992,
-     "goal_dist_median_m": 0.11752068251371384
+     "success": 0.9788732394366197,
+     "overlap": 0.007042253521126761,
+     "offroad": 0.007042253521126761,
+     "goal_reached": 0.9929577464788732,
+     "goal_dist_median_m": 0.12043901532888412
     }
    },
    "ft_rule_hdg scorer minus": {
     "MF+rule": {
-     "delta_pts": 0.0,
+     "delta_pts": 0.35211267605633806,
      "ci95": [
-      -2.4,
-      2.4
+      -1.056338028169014,
+      1.7605633802816902
      ],
-     "fixed": 1,
-     "broken": 1
+     "fixed": 3,
+     "broken": 2
     }
    }
   },
   "shard 00009": {
-   "n": 35,
+   "n": 255,
    "metrics": {
     "ft_rule_hdg scorer": {
-     "success": 1.0,
-     "overlap": 0.0,
-     "offroad": 0.0,
+     "success": 0.984313725490196,
+     "overlap": 0.00392156862745098,
+     "offroad": 0.011764705882352941,
      "goal_reached": 1.0,
-     "goal_dist_median_m": 0.13076095283031464
+     "goal_dist_median_m": 0.13537371158599854
     },
     "MF+rule": {
-     "success": 1.0,
-     "overlap": 0.0,
-     "offroad": 0.0,
-     "goal_reached": 1.0,
-     "goal_dist_median_m": 0.18147553503513336
+     "success": 0.9803921568627451,
+     "overlap": 0.00392156862745098,
+     "offroad": 0.01568627450980392,
+     "goal_reached": 0.996078431372549,
+     "goal_dist_median_m": 0.13348956406116486
     }
    },
    "ft_rule_hdg scorer minus": {
     "MF+rule": {
-     "delta_pts": 0.0,
+     "delta_pts": 0.39215686274509803,
      "ci95": [
       0.0,
-      0.0
+      1.1764705882352942
      ],
-     "fixed": 0,
+     "fixed": 1,
      "broken": 0
     }
    }
