@@ -10,6 +10,7 @@ Extra keys (all in the ego frame at the anchor step, metres / radians):
   current_yaw_local [S,N]     agent yaw relative to the ego
   ego_idx [S], ego_lw [S,2], ego_vel [S,2]
   goal_xy [S,2]               last valid logged ego position of the episode (as es_discriminator)
+  plan_horizon [S]            plan steps (0.2 s) before the episode's last step, at most future_steps
   fut_xy [S,N,T,2], fut_yaw [S,N,T], fut_lw [S,N,T,2], fut_valid [S,N,T]
                               logged boxes of every non-ego object (log replay, any type)
   ego_future_xy [S,T,2], ego_future_yaw [S,T], ego_future_valid [S,T]
@@ -396,6 +397,9 @@ def build_arrays(payload: Mapping[str, np.ndarray], *, anchor_step: int, cfg: An
         "ego_vel": rotate_xy_np(np.stack([vx[ar, ego_idx, anchor], vy[ar, ego_idx, anchor]], -1),
                                 ego_yaw).astype(np.float32),
         "goal_xy": rotate_xy_np(goal_world - origin_xy, ego_yaw).astype(np.float32),
+        # Plan steps (future_stride apart) before the episode's last step: the scorer's time remaining.
+        "plan_horizon": np.full((s,), min(int(cfg.future_steps), (num_steps - 1 - anchor) // int(cfg.future_stride)),
+                                np.int64),
         "origin_xy": origin_xy.astype(np.float64),
         "origin_yaw": ego_yaw.astype(np.float64),
     }

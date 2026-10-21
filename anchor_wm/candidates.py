@@ -15,6 +15,9 @@ Labels (Waymax semantics, other agents follow the log; 0.2 s steps over the vali
   progress     arc length of the end point projected on the logged ego path (m)
   goal_gain    |goal| - |goal - end| (m)
   comfort      exceedance of lateral 4.5 / longitudinal 7 m/s^2 (m/s^2, < 0 = within limits)
+  first_overlap / first_offroad   plan step (1..T, fractional on midpoints) of the first violation, T + 1 = none
+  goal_dist    |goal - end| (m), end = the last step within the horizon
+  horizon      plan steps labelled
 """
 
 from __future__ import annotations
@@ -37,8 +40,9 @@ def _smoothstep(x: torch.Tensor) -> torch.Tensor:
 
 
 def perturb_gt(gt_xy: torch.Tensor, ego_speed: torch.Tensor, nudge_sign: torch.Tensor, dt: float,
-               generator: torch.Generator | None = None) -> torch.Tensor:
-    """gt_xy [B,T,2] -> [B,P,T,2] perturbations that follow the logged path's geometry."""
+               generator: torch.Generator | None = None, return_tangent_yaw: bool = False):
+    """gt_xy [B,T,2] -> [B,P,T,2] perturbations that follow the logged path's geometry (and, with
+    `return_tangent_yaw`, the path's tangent heading [B,P,T] at each point)."""
     b, t, _ = gt_xy.shape
     dev, dtype = gt_xy.device, gt_xy.dtype
     path = torch.cat([torch.zeros_like(gt_xy[:, :1]), gt_xy], 1)                         # origin + T
@@ -77,7 +81,10 @@ def perturb_gt(gt_xy: torch.Tensor, ego_speed: torch.Tensor, nudge_sign: torch.T
     s = torch.where(decel > 0, s_stop, s)
     pos, tangent = interp_path(ext, cum, s)                                                # [B,P,T,2]
     normal = torch.stack([-tangent[..., 1], tangent[..., 0]], -1)
-    return pos + (d * _smoothstep(time / r))[..., None] * normal
+    out = pos + (d * _smoothstep(time / r))[..., None] * normal
+    if return_tangent_yaw:
+        return out, torch.atan2(tangent[..., 1], tangent[..., 0])
+    return out
 
 
 def nearest_agent_side(f: dict) -> torch.Tensor:
@@ -91,25 +98,42 @@ def nearest_agent_side(f: dict) -> torch.Tensor:
 
 
 def build_candidates(f: dict, dec: dict, max_range: float, dt: float,
-                     generator: torch.Generator | None = None) -> dict:
-    """Ego candidates [B,C,T,2] (m, ego frame), heading fallbacks, kinds [C] and validity [B,C]."""
+                     generator: torch.Generator | None = None, horizon: torch.Tensor | None = None) -> dict:
+    """Ego candidates [B,C,T,2] (m, ego frame), heading fallbacks, constructed headings `yaw` [B,C,T]
+    (decoded anchor yaw, logged yaw, travel direction of the perturbation with its path tangent while
+    still), kinds [C] and validity [B,C].
+
+    `horizon` [B] (plan steps before the episode ends): the logged future only has to be valid within
+    it, and is held at its last valid pose after it (those steps are outside the labels / scoring)."""
     b = f["ego_idx"].shape[0]
     ar = torch.arange(b, device=f["ego_idx"].device)
     ego_xy = dec["pred_xy_k"][ar, f["ego_idx"]].detach().float() * max_range               # [B,K,T,2]
     ego_yaw = torch.atan2(dec["yaw_vec_k"][ar, f["ego_idx"], ..., 0],
                           dec["yaw_vec_k"][ar, f["ego_idx"], ..., 1]).detach().float()     # [B,K,T]
     gt = f["ego_future_xy"].float()
-    gt_ok = f["ego_future_valid"].bool().all(-1)                                           # [B]
+    gt_yaw = f["ego_future_yaw"].float()
+    gt_valid = f["ego_future_valid"].bool()
+    t = gt.shape[1]
+    if horizon is None:
+        gt_ok = gt_valid.all(-1)                                                           # [B]
+    else:
+        in_h = torch.arange(t, device=gt.device)[None] < horizon[:, None]
+        gt_ok = (gt_valid | ~in_h).all(-1) & gt_valid[:, 0]
+        last = (horizon.clamp(1, t) - 1)[:, None]
+        hold = lambda x: torch.where(in_h.view(*in_h.shape, *([1] * (x.dim() - 2))), x,  # noqa: E731
+                                     x.gather(1, last.view(-1, 1, *([1] * (x.dim() - 2))).expand(-1, 1, *x.shape[2:])))
+        gt, gt_yaw = hold(gt), hold(gt_yaw)
     gt_safe = torch.where(gt_ok[:, None, None], gt, torch.zeros_like(gt))
-    pert = perturb_gt(gt_safe, f["ego_vel"].float().norm(dim=-1), nearest_agent_side(f), dt, generator)
+    pert, pert_tan = perturb_gt(gt_safe, f["ego_vel"].float().norm(dim=-1), nearest_agent_side(f), dt, generator,
+                                return_tangent_yaw=True)
     k, p = ego_xy.shape[1], pert.shape[1]
     xy = torch.cat([ego_xy, gt_safe[:, None], pert], 1)
-    yaw_fb = torch.cat([ego_yaw, f["ego_future_yaw"].float()[:, None],
-                        torch.zeros_like(pert[..., 0])], 1)
+    yaw_fb = torch.cat([ego_yaw, gt_yaw[:, None], torch.zeros_like(pert[..., 0])], 1)
+    yaw = torch.cat([ego_yaw, gt_yaw[:, None], path_yaw(pert, pert_tan)], 1)
     kinds = torch.tensor([KIND_ANCHOR] * k + [KIND_GT] + [KIND_PERTURB] * p, device=xy.device)
     valid = torch.cat([torch.ones((b, k), dtype=torch.bool, device=xy.device),
                        gt_ok[:, None].expand(b, 1 + p)], 1)
-    return {"xy": xy, "yaw_fallback": yaw_fb, "kinds": kinds, "valid": valid}
+    return {"xy": xy, "yaw_fallback": yaw_fb, "yaw": yaw, "kinds": kinds, "valid": valid}
 
 
 def _with_midpoints(x: torch.Tensor, angle: bool = False) -> torch.Tensor:
@@ -157,6 +181,10 @@ def label_candidates(f: dict, cand_xy: torch.Tensor, cand_yaw: torch.Tensor, dt:
         gap = sat_gap(ego_c[:, :, None], g_yaw[:, :, None], oc[:, None], o_yaw[:, None, sl])  # [B,C,n,Tg]
         gap = gap.masked_fill(~o_valid[:, None, sl], float("inf"))
         gap_min = torch.minimum(gap_min, gap.amin(2))
+    grid_t = (torch.arange(tg, device=dev, dtype=torch.float32) + 2.0) / 2.0 if (midpoints and t > 1) else (
+        torch.arange(tg, device=dev, dtype=torch.float32) + 1.0)                          # plan step of each grid point
+    none = torch.full_like(grid_t, t + 1.0)
+    first_overlap = torch.where((gap_min <= 0.0) & g_ok[:, None], grid_t, none).amin(-1)
     clearance = gap_min.masked_fill(~g_ok[:, None], float("inf")).amin(-1)                # [B,C]
     clearance = torch.where(torch.isfinite(clearance), clearance, torch.full_like(clearance, 50.0))
 
@@ -166,6 +194,7 @@ def label_candidates(f: dict, cand_xy: torch.Tensor, cand_yaw: torch.Tensor, dt:
     sd = edge_signed_distance(ego_c.reshape(b, -1, 2), edges).reshape(b, c, tg, 4).amax(-1)
     sd = sd.masked_fill(~g_ok[:, None], -100.0)
     offroad_sd = sd.amax(-1)
+    first_offroad = torch.where(sd > 0.0, grid_t, none).amin(-1)
 
     # Progress along the logged ego path, goal gain, comfort.
     gt = f["ego_future_xy"].float()
@@ -184,7 +213,9 @@ def label_candidates(f: dict, cand_xy: torch.Tensor, cand_yaw: torch.Tensor, dt:
 
     return {"overlap": clearance <= 0.0, "clearance": clearance, "offroad": offroad_sd > 0.0,
             "offroad_sd": offroad_sd, "progress": progress, "goal_gain": goal_gain,
-            "gt_progress": gt_progress, "comfort": comfort}
+            "gt_progress": gt_progress, "comfort": comfort, "first_overlap": first_overlap,
+            "first_offroad": first_offroad, "goal_dist": (goal[:, None] - end).norm(dim=-1),
+            "horizon": steps_ok.sum(1)}
 
 
 def candidate_headings(cand_xy: torch.Tensor, yaw_fallback: torch.Tensor) -> torch.Tensor:

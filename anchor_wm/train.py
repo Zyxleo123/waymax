@@ -12,6 +12,15 @@ Arms of the 1-day test (same data, steps and warm start):
 
 `--profile_steps N` runs N steps, prints seconds/step (data wait vs compute) and peak GPU memory,
 and exits without saving.
+
+v2 recipe (every flag defaults to the A1 / A2 setting):
+  scorer inputs   --goal_features --route_features --rule_features --input_heading --aux_heads
+                  --scorer_agents 32 --scorer_modes 6 --scorer_near_agents 8 --scorer_near_modes 12
+  time remaining  --time_remaining --anchor_steps 20 30 40 50 60 70 80   (late anchors: the episode ends
+                  inside the plan, so the scorer sees short horizons)
+  forecasting     --interaction_weight kernel --sigma_eps 0.002   (0.1 m floor)
+  optimizer       --no_decay_norm_bias
+  scorer loss     --scorer_loss current | simple
 """
 
 from __future__ import annotations
@@ -30,7 +39,7 @@ import torch
 from anchor_wm.candidates import KIND_GT, build_candidates, candidate_headings, label_candidates
 from anchor_wm.config import AnchorWMConfig
 from anchor_wm.data import make_loader, resolve_cache_paths, split_cache_paths
-from anchor_wm.losses import score_loss, wm_loss
+from anchor_wm.losses import score_loss, simple_score_loss, wm_loss
 from anchor_wm.model import ENCODER_PREFIXES, AnchorWorldModel, warm_start_encoder
 
 
@@ -69,15 +78,44 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--w_list", type=float, default=0.5)
     p.add_argument("--progress_key", default="goal_gain", choices=("goal_gain", "progress"))
     p.add_argument("--progress_margin", type=float, default=2.0)
+    p.add_argument("--scorer_loss", default="current", choices=("current", "simple"),
+                   help="current: sub-score BCE + pairwise + listwise (A1 / A2); simple: one utility, listwise "
+                        "ranking + time-weighted overlap / offroad BCE (losses.simple_score_loss)")
+    p.add_argument("--simple_w_safe", type=float, default=1.0)
+    p.add_argument("--simple_temp", type=float, default=1.0)
+    p.add_argument("--w_aux", type=float, default=0.5, help="aux heads (time to violation, goal distance)")
     # model
     p.add_argument("--num_anchors", type=int, default=64)
     p.add_argument("--cls_soft_temp_m", type=float, default=1.0)
     p.add_argument("--scorer_hidden", type=int, default=128)
+    p.add_argument("--sigma_eps", type=float, default=1e-3, help="sigma floor, normalized by max_range (50 m)")
+    p.add_argument("--interaction_weight", default="radius", choices=("radius", "kernel"))
+    p.add_argument("--interaction_tau_m", type=float, default=5.0)
+    p.add_argument("--scorer_agents", type=int, default=16)
+    p.add_argument("--scorer_modes", type=int, default=8)
+    p.add_argument("--scorer_near_agents", type=int, default=0)
+    p.add_argument("--scorer_near_modes", type=int, default=12)
+    p.add_argument("--goal_features", action="store_true")
+    p.add_argument("--route_features", action="store_true")
+    p.add_argument("--rule_features", action="store_true")
+    p.add_argument("--input_heading", action="store_true", help="score / label candidates with constructed headings")
+    p.add_argument("--aux_heads", action="store_true")
+    p.add_argument("--time_remaining", action="store_true")
+    p.add_argument("--no_decay_norm_bias", action="store_true",
+                   help="no weight decay on biases, norms and other 1-D parameters")
     # bookkeeping
     p.add_argument("--log_every", type=int, default=50)
     p.add_argument("--val_every", type=int, default=2500)
     p.add_argument("--val_batches", type=int, default=150)
     p.add_argument("--save_every", type=int, default=5000)
+    p.add_argument("--keep_every", type=int, default=0,
+                   help="also keep a step_<N>.pt checkpoint every this many steps (latest.pt is overwritten); 0 = off")
+    p.add_argument("--nan_max_consecutive", type=int, default=50,
+                   help="a step with a non-finite loss or gradient is skipped (no optimizer update); stop after this "
+                        "many in a row")
+    p.add_argument("--nan_dumps", type=int, default=3,
+                   help="save the first N non-finite steps (pre-update weights, batch, RNG state) as "
+                        "nonfinite_step<N>.pt for anchor_wm.replay_nonfinite")
     p.add_argument("--profile_steps", type=int, default=0)
     p.add_argument("--wandb_project", default="anchor_wm")
     p.add_argument("--wandb_entity", default="")
@@ -108,19 +146,30 @@ def take(x: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
 
 def scorer_step(model: AnchorWorldModel, enc: dict, dec: dict, f: dict, args, cfg: AnchorWMConfig,
                 scale: float, generator: torch.Generator) -> tuple[torch.Tensor, dict]:
-    cands = build_candidates(f, dec, cfg.max_range, cfg.future_dt)
+    # With time remaining, the logged future only needs to be valid (and is labelled / scored) up to the
+    # episode's end; otherwise the whole plan horizon (A1 / A2).
+    hz = f["plan_horizon"].long() if cfg.scorer_time_remaining else None
+    cands = build_candidates(f, dec, cfg.max_range, cfg.future_dt, horizon=hz)
     idx = subsample_candidates(cands, args.train_cands, generator)
     xy, yaw_fb, valid = take(cands["xy"], idx), take(cands["yaw_fallback"], idx), take(cands["valid"], idx)
-    labels = label_candidates(f, xy, candidate_headings(xy, yaw_fb), cfg.future_dt)
+    yaw = take(cands["yaw"], idx) if cfg.scorer_input_heading else candidate_headings(xy, yaw_fb)
+    labels = label_candidates(f, xy, yaw, cfg.future_dt, horizon=hz)
     # Drop scenes whose logged future is incomplete or itself labelled unsafe (label noise),
-    # as es_discriminator's expert filter does.
-    gt_ok = f["ego_future_valid"].bool().all(-1) & ~(labels["overlap"][:, 0] | labels["offroad"][:, 0])
+    # as es_discriminator's expert filter does. Column 0 is the logged future (subsample_candidates).
+    gt_ok = valid[:, 0] & ~(labels["overlap"][:, 0] | labels["offroad"][:, 0])
     valid = valid & gt_ok[:, None]
     ctx = model.scorer.context(enc, dec, f, scale)
-    total, sub = model.scorer(ctx, xy, yaw_fb, chunk=args.score_chunk)
-    loss, metrics = score_loss(total, sub, labels, valid, progress_key=args.progress_key,
-                               progress_margin=args.progress_margin,
-                               w_sub=args.w_sub, w_pair=args.w_pair, w_list=args.w_list)
+    total, sub = model.scorer(ctx, xy, yaw_fb, chunk=args.score_chunk, heading=yaw)
+    aux = dict(model.scorer.last_aux)
+    if getattr(args, "scorer_loss", "current") == "simple":
+        loss, metrics = simple_score_loss(total, sub, labels, valid, w_safe=getattr(args, "simple_w_safe", 1.0),
+                                          temp=getattr(args, "simple_temp", 1.0), progress_margin=args.progress_margin,
+                                          aux=aux, w_aux=getattr(args, "w_aux", 0.5))
+    else:
+        loss, metrics = score_loss(total, sub, labels, valid, progress_key=args.progress_key,
+                                   progress_margin=args.progress_margin,
+                                   w_sub=args.w_sub, w_pair=args.w_pair, w_list=args.w_list,
+                                   aux=aux, w_aux=getattr(args, "w_aux", 0.5))
     metrics["scene_kept"] = float(gt_ok.float().mean())
     kinds = take(cands["kinds"][None].expand(idx.shape[0], -1), idx)
     unsafe = (labels["overlap"] | labels["offroad"]).float()
@@ -128,6 +177,22 @@ def scorer_step(model: AnchorWorldModel, enc: dict, dec: dict, f: dict, args, cf
         m = (kinds == kd) & valid
         metrics[f"unsafe_rate_{name}"] = float((unsafe * m).sum() / m.sum().clamp_min(1))
     return loss, metrics
+
+
+@torch.no_grad()
+def module_grad_norms(model: AnchorWorldModel) -> dict:
+    """Gradient norms (before clipping) of the encoder, decoder and scorer. All three share one global
+    clip, so a large forecasting gradient (e.g. sigma at its floor) also shrinks the scorer's update."""
+    parts = ("encoder", "decoder", "scorer")
+    sq = {k: [] for k in parts}
+    for name, p in model.named_parameters():
+        if p.grad is None:
+            continue
+        part = "encoder" if name.startswith(ENCODER_PREFIXES) else "scorer" if name.startswith("scorer.") else "decoder"
+        sq[part].append(p.grad.float().square().sum())
+    zero = next(model.parameters()).new_zeros((), dtype=torch.float32)
+    norms = torch.stack([torch.stack(sq[k]).sum() if sq[k] else zero for k in parts]).sqrt().tolist()   # one sync
+    return {f"grad_norm_{k}": v for k, v in zip(parts, norms)}
 
 
 def move(batch: dict, device: torch.device) -> dict:
@@ -174,14 +239,30 @@ def main() -> None:
 
     anchors = torch.from_numpy(np.load(args.anchors)["anchors"])
     cfg = AnchorWMConfig(num_anchors=int(anchors.shape[1]), cls_soft_temp_m=args.cls_soft_temp_m,
-                         scorer_hidden=args.scorer_hidden)
+                         scorer_hidden=args.scorer_hidden, sigma_eps=args.sigma_eps,
+                         interaction_weight=args.interaction_weight, interaction_tau_m=args.interaction_tau_m,
+                         scorer_agents=args.scorer_agents, scorer_modes=args.scorer_modes,
+                         scorer_near_agents=args.scorer_near_agents, scorer_near_modes=args.scorer_near_modes,
+                         scorer_goal_features=args.goal_features, scorer_route_features=args.route_features,
+                         scorer_rule_features=args.rule_features, scorer_input_heading=args.input_heading,
+                         scorer_aux_heads=args.aux_heads, scorer_time_remaining=args.time_remaining)
     model = AnchorWorldModel(cfg, anchors).to(device)
     warm = warm_start_encoder(model, args.init_ckpt) if args.init_ckpt else None
-    enc_params = [p for n, p in model.named_parameters() if n.startswith(ENCODER_PREFIXES)]
-    other = [p for n, p in model.named_parameters() if not n.startswith(ENCODER_PREFIXES)]
-    opt = torch.optim.AdamW([{"params": enc_params, "lr": args.encoder_lr}, {"params": other, "lr": args.lr}],
-                            weight_decay=args.weight_decay)
-    base_lrs = [args.encoder_lr, args.lr]
+    enc_params = [(n, p) for n, p in model.named_parameters() if n.startswith(ENCODER_PREFIXES)]
+    other = [(n, p) for n, p in model.named_parameters() if not n.startswith(ENCODER_PREFIXES)]
+    groups, base_lrs = [], []
+    for params, lr in ((enc_params, args.encoder_lr), (other, args.lr)):
+        if args.no_decay_norm_bias:
+            # Standard AdamW practice: decay weight matrices only, not biases / norm gains / type tokens.
+            skip = lambda n, p: p.dim() < 2 or n.endswith("_token")  # noqa: E731
+            decay = [p for n, p in params if not skip(n, p)]
+            no_decay = [p for n, p in params if skip(n, p)]
+            groups += [{"params": decay, "lr": lr}, {"params": no_decay, "lr": lr, "weight_decay": 0.0}]
+            base_lrs += [lr, lr]
+        else:
+            groups.append({"params": [p for _, p in params], "lr": lr})
+            base_lrs.append(lr)
+    opt = torch.optim.AdamW(groups, weight_decay=args.weight_decay)
     step = 0
     if args.resume:
         ck = torch.load(args.resume, map_location="cpu", weights_only=False)
@@ -222,7 +303,15 @@ def main() -> None:
               "anchors": args.anchors, "args": vars(args), "step": step}
         torch.save(ck, run_dir / f"{tag}.pt")
 
+    def dump_nonfinite(f: dict, rng: dict, metrics: dict, loss: torch.Tensor, gnorm: torch.Tensor) -> Path:
+        path = run_dir / f"nonfinite_step{step}.pt"
+        torch.save({"model": model.state_dict(), "config": cfg.to_dict(), "args": vars(args), "step": step,
+                    "scale": scale, "batch": {k: v.detach().cpu() for k, v in f.items()}, "rng": rng,
+                    "metrics": metrics, "loss": float(loss), "grad_norm": float(gnorm)}, path)
+        return path
+
     gen = torch.Generator().manual_seed(args.seed)
+    n_nonfinite = n_consecutive = 0
     t_start = time.time()
     running, n_run = {}, 0
     t_data = t_comp = 0.0
@@ -238,6 +327,10 @@ def main() -> None:
         for grp, base in zip(opt.param_groups, base_lrs):
             grp["lr"] = base * lr_mult
         scale = joint_scale(args, step)
+        # Everything a replay of this step needs (dropout / perturbations use the CUDA RNG, the candidate
+        # subsampling `gen`).
+        rng = {"cpu": torch.get_rng_state(), "gen": gen.get_state(),
+               "cuda": torch.cuda.get_rng_state() if device.type == "cuda" else None}
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
             enc, dec = model(f)
             dec = {k: v.float() for k, v in dec.items()}
@@ -248,15 +341,34 @@ def main() -> None:
                 metrics.update(m_s)
         opt.zero_grad(set_to_none=True)
         loss.backward()
+        metrics.update(module_grad_norms(model))
         gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-        opt.step()
+        if bool(torch.isfinite(loss)) and bool(torch.isfinite(gnorm)):
+            opt.step()
+            n_consecutive = 0
+        else:
+            # One non-finite step would otherwise write NaN into every weight (bf16 autocast has no GradScaler
+            # to skip it). The weights are still the pre-step ones here.
+            n_nonfinite += 1
+            n_consecutive += 1
+            bad = sorted(k for k, v in metrics.items() if not math.isfinite(v))
+            info = {"step": step, "nonfinite": n_nonfinite, "loss": float(loss), "grad_norm": float(gnorm),
+                    "nonfinite_metrics": bad}
+            if n_nonfinite <= args.nan_dumps and not args.profile_steps:
+                info["dump"] = str(dump_nonfinite(f, rng, metrics, loss, gnorm))
+            print("NONFINITE " + json.dumps(info), flush=True)
+            opt.zero_grad(set_to_none=True)
+            if n_consecutive >= args.nan_max_consecutive:
+                print(f"stopping: {n_consecutive} non-finite steps in a row at step {step}", flush=True)
+                break
+        metrics["nonfinite_steps"] = float(n_nonfinite)
         if device.type == "cuda":
             torch.cuda.synchronize()
         t2 = time.time()
         step += 1
         t_data += t1 - t0
         t_comp += t2 - t1
-        metrics.update(grad_norm=float(gnorm), joint_scale=scale, lr=opt.param_groups[1]["lr"])
+        metrics.update(grad_norm=float(gnorm), joint_scale=scale, lr=opt.param_groups[-1]["lr"])
         for k, v in metrics.items():
             if math.isfinite(v):
                 running[k] = running.get(k, 0.0) + v
@@ -291,6 +403,8 @@ def main() -> None:
                 wb.log({f"val/{k}": v for k, v in vm.items()}, step=step)
         if step % args.save_every == 0:
             save("latest")
+        if args.keep_every and step % args.keep_every == 0:
+            save(f"step_{step:06d}")
         if args.max_hours and (time.time() - t_start) / 3600 >= args.max_hours:
             print(f"max_hours reached at step {step}", flush=True)
             vm = validate(model, val_batches, args, cfg, device, amp, scale)

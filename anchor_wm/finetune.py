@@ -33,12 +33,13 @@ import torch
 from anchor_wm.bank_data import build_index, make_bank_loader
 from anchor_wm.config import AnchorWMConfig
 from anchor_wm.data import make_loader, resolve_cache_paths, split_cache_paths
-from anchor_wm.losses import bank_eval_metrics, bank_score_loss, bank_targets
+from anchor_wm.losses import bank_eval_metrics, bank_score_loss, bank_simple_loss, bank_targets
 from anchor_wm.model import ENCODER_PREFIXES, AnchorWorldModel
 from anchor_wm.train import move, scorer_step
 
 NEW_SCORER_PREFIXES = ("scorer.goal_step.", "scorer.goal_end.", "scorer.route_step.", "scorer.ttv_head.",
-                       "scorer.goaldist_head.", "scorer.rule_step.", "scorer.rule_end.")
+                       "scorer.goaldist_head.", "scorer.rule_step.", "scorer.rule_end.", "scorer.time_step.",
+                       "scorer.time_end.")
 DECODER_PREFIXES = ("anchor_embed.", "goal_embed.", "query_fuse.", "traj_head.", "traj_embed.", "mode_cls.")
 
 
@@ -77,8 +78,16 @@ def parse_args() -> argparse.Namespace:
                    help="score bank candidates with their recorded headings (not the travel direction from xy)")
     p.add_argument("--scorer_agents", type=int, default=32)
     p.add_argument("--scorer_modes", type=int, default=6)
+    p.add_argument("--scorer_near_agents", type=int, default=None, help="default: the checkpoint's")
+    p.add_argument("--scorer_near_modes", type=int, default=None, help="default: the checkpoint's")
+    p.add_argument("--time_remaining", action="store_true",
+                   help="plan-horizon input and masking (on anyway if the checkpoint has it)")
     p.add_argument("--unfreeze_decoder", action="store_true")
     # loss
+    p.add_argument("--scorer_loss", default="current", choices=("current", "simple"),
+                   help="current: losses.bank_score_loss; simple: one utility, listwise + time-weighted safety BCE")
+    p.add_argument("--simple_w_safe", type=float, default=1.0)
+    p.add_argument("--simple_temp", type=float, default=1.0)
     p.add_argument("--w_safety", type=float, default=1.0)
     p.add_argument("--w_progress", type=float, default=1.0)
     p.add_argument("--w_goal_pairs", type=float, default=0.5)
@@ -113,6 +122,12 @@ def build_model(args, device: torch.device) -> tuple[AnchorWorldModel, dict]:
     cfg.scorer_rule_features = bool(args.rule_features)
     cfg.scorer_input_heading = bool(getattr(args, "input_heading", False))
     cfg.scorer_agents, cfg.scorer_modes = int(args.scorer_agents), int(args.scorer_modes)
+    if getattr(args, "scorer_near_agents", None) is not None:
+        cfg.scorer_near_agents = int(args.scorer_near_agents)
+    if getattr(args, "scorer_near_modes", None) is not None:
+        cfg.scorer_near_modes = int(args.scorer_near_modes)
+    cfg.scorer_time_remaining = bool(cfg.scorer_time_remaining or getattr(args, "time_remaining", False))
+    cfg = AnchorWMConfig.from_dict(cfg.to_dict())                                     # re-validate
     model = AnchorWorldModel(cfg, ck["model"]["anchors"] * float(cfg.max_range))
     missing, unexpected = model.load_state_dict(ck["model"], strict=False)
     bad = [k for k in missing if not k.startswith(NEW_SCORER_PREFIXES)]
@@ -208,11 +223,13 @@ def main() -> None:
     targs = None
     if args.self_cache_dir and args.self_frac > 0:
         paths, _ = split_cache_paths(resolve_cache_paths(args.self_cache_dir), 0.1)
-        self_batches = cycle(lambda epoch: make_loader(paths, cfg, batch_size=args.batch_groups, anchor_steps=(20, 30, 40),
+        self_steps = (20, 30, 40, 50, 60, 70, 80) if cfg.scorer_time_remaining else (20, 30, 40)
+        self_batches = cycle(lambda epoch: make_loader(paths, cfg, batch_size=args.batch_groups, anchor_steps=self_steps,
                                                        shuffle=True, seed=args.seed + 100 + epoch,
                                                        num_workers=max(1, args.num_workers // 2)))
         targs = SimpleNamespace(train_cands=48, score_chunk=0, progress_key="goal_gain", progress_margin=2.0,
-                                w_sub=1.0, w_pair=1.0, w_list=0.5)
+                                w_sub=1.0, w_pair=1.0, w_list=0.5, w_aux=args.w_aux, scorer_loss=args.scorer_loss,
+                                simple_w_safe=args.simple_w_safe, simple_temp=args.simple_temp)
 
     run_dir = Path(args.save_dir) / f"{args.run_name}_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -265,9 +282,13 @@ def main() -> None:
                 f = move(next(bank_batches), device)
                 total, sub, aux, _, _ = score_bank(model, f, scale, args.unfreeze_decoder)
                 tg = bank_targets(f)
-                loss, m = bank_score_loss(total, sub, aux, tg, f, w_pairs=w_pairs, w_sub=args.w_sub, w_list=args.w_list,
-                                          w_aux=args.w_aux, w_distill=args.w_distill,
-                                          reward_weights=tuple(args.reward_weights))
+                if args.scorer_loss == "simple":
+                    loss, m = bank_simple_loss(total, sub, aux, tg, f, w_safe=args.simple_w_safe,
+                                               temp=args.simple_temp, w_aux=args.w_aux)
+                else:
+                    loss, m = bank_score_loss(total, sub, aux, tg, f, w_pairs=w_pairs, w_sub=args.w_sub,
+                                              w_list=args.w_list, w_aux=args.w_aux, w_distill=args.w_distill,
+                                              reward_weights=tuple(args.reward_weights))
                 m = {f"bank/{k}": v for k, v in m.items()}
         opt.zero_grad(set_to_none=True)
         loss.backward()

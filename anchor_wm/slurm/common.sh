@@ -9,7 +9,7 @@ BANK_DIR="${BANK_DIR:-/zfsauton/scratch/ishanj/es_discriminator/es_candidate_dat
 TFRECORDS="${TFRECORDS:-/zfsauton/scratch/sbellad/Diffusion_ES_sim/es_failure_subset_n1500_seed0/tfrecords/training}"
 ANCHORS="${ANCHORS:-${OUT_ROOT}/anchors/anchors_k64.npz}"
 WANDB_PROJECT="${WANDB_PROJECT:-anchor_wm}"
-WANDB_ENTITY="${WANDB_ENTITY:-scbellad2025-carnegie-mellon-university}"
+WANDB_ENTITY="${WANDB_ENTITY-scbellad2025-carnegie-mellon-university}"   # set empty for your default entity
 WANDB_MODE="${WANDB_MODE:-online}"
 
 CONDA_ROOT="${CONDA_ROOT:-/zfsauton/scratch/ishanj/miniconda3}"

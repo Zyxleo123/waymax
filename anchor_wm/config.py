@@ -49,6 +49,11 @@ class AnchorWMConfig:
     cls_soft_temp_m: float = 1.0     # soft anchor-classification target exp(-ade / temp); 0 = one-hot
     collision_focus_radius_m: float = 20.0
     collision_focus_weight: float = 2.0
+    # Per-agent forecasting weight: "radius" = 1 + w * [|x_now| <= radius] (A1 / A2); "kernel" =
+    # 1 + w * exp(-d / tau), d = closest time-aligned approach of the logged future to the logged ego
+    # future or a constant-velocity ego rollout (0 / 0.5 / 1 / 1.5 x speed), i.e. likely interactions.
+    interaction_weight: str = "radius"
+    interaction_tau_m: float = 5.0
     ego_loss_weight: float = 1.0     # the SDC is decoded too (its anchors are plan proposals)
 
     # ---- label geometry (online, log replay) ----
@@ -73,6 +78,13 @@ class AnchorWMConfig:
     # Use the candidates' own headings when the caller has them (recorded ES candidates, closed-loop
     # populations) instead of the travel direction from xy, which is noise for slow / stopping plans.
     scorer_input_heading: bool = False
+    # The `scorer_near_agents` nearest selected agents get `scorer_near_modes` modes, the rest
+    # `scorer_modes` (0 = every agent gets `scorer_modes`).
+    scorer_near_agents: int = 0
+    scorer_near_modes: int = 12
+    # Steps of the plan left before the episode ends (`plan_horizon`): an input, and every pooled /
+    # summary / endpoint quantity of the scorer is taken over the steps within it.
+    scorer_time_remaining: bool = False
 
     def __post_init__(self) -> None:
         self.edge_box = tuple(float(v) for v in self.edge_box)
@@ -81,6 +93,14 @@ class AnchorWMConfig:
             raise ValueError("scorer_hidden must be divisible by scorer_heads")
         if self.num_out_modes > self.num_anchors or self.scorer_modes > self.num_anchors:
             raise ValueError("num_out_modes and scorer_modes must be <= num_anchors")
+        if self.scorer_near_agents > 0 and not self.scorer_modes <= self.scorer_near_modes <= self.num_anchors:
+            raise ValueError("scorer_near_modes must be in [scorer_modes, num_anchors]")
+        if self.interaction_weight not in ("radius", "kernel"):
+            raise ValueError(f"interaction_weight must be radius|kernel, got {self.interaction_weight!r}")
+
+    @property
+    def scorer_modes_max(self) -> int:
+        return max(int(self.scorer_modes), int(self.scorer_near_modes) if self.scorer_near_agents > 0 else 0)
 
     @property
     def agent_feature_dim(self) -> int:

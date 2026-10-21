@@ -34,6 +34,29 @@ def ade_fde(pred_xy_k: torch.Tensor, target_xy: torch.Tensor, valid: torch.Tenso
     return ade, fde, last >= 0
 
 
+@torch.no_grad()
+def interaction_distance(f: dict, cfg: AnchorWMConfig, speed_ratios: tuple = (0.0, 0.5, 1.0, 1.5)) -> torch.Tensor:
+    """[B,N] closest time-aligned approach (m) of each agent (now and its valid logged future) to the
+    ego: the ego's logged future or a constant-velocity rollout along the ego heading at `speed_ratios`
+    x the ego speed (the rollouts the scorer selects agents with). inf for agents never valid."""
+    rng = float(cfg.max_range)
+    cur = f["current_local_xy"].float()                                                     # [B,N,2]
+    pos = torch.cat([cur[:, :, None], cur[:, :, None] + f["target_delta_xy"].float() * rng], 2)   # [B,N,T+1,2]
+    ok = torch.cat([f["agent_valid"].bool()[:, :, None], f["target_valid_all"].bool()], 2)
+    t = pos.shape[2] - 1
+    time = torch.arange(t + 1, device=cur.device, dtype=cur.dtype) * cfg.future_dt
+    speed = f["ego_vel"].float().norm(dim=-1)
+    ratios = torch.tensor(speed_ratios, device=cur.device, dtype=cur.dtype)
+    cv_x = speed[:, None, None] * ratios[None, :, None] * time[None, None, :]                # [B,R,T+1]
+    refs = torch.stack([cv_x, torch.zeros_like(cv_x)], -1)                                  # [B,R,T+1,2]
+    ego = torch.cat([torch.zeros_like(cur[:, 0, None]), f["ego_future_xy"].float()], 1)       # [B,T+1,2]
+    ego_ok = torch.cat([torch.ones_like(f["ego_future_valid"][:, :1]), f["ego_future_valid"]], 1).bool()
+    d_cv = (pos[:, :, None] - refs[:, None]).norm(dim=-1).amin(2)                            # [B,N,T+1]
+    d_log = (pos - ego[:, None]).norm(dim=-1).masked_fill(~ego_ok[:, None], float("inf"))
+    d = torch.minimum(d_cv, d_log).masked_fill(~ok, float("inf"))
+    return d.amin(-1)
+
+
 def wm_loss(dec: dict, f: dict, cfg: AnchorWMConfig) -> tuple[torch.Tensor, dict]:
     rng = float(cfg.max_range)
     valid = f["target_valid_all"].bool()                                                    # [B,N,T]
@@ -49,8 +72,11 @@ def wm_loss(dec: dict, f: dict, cfg: AnchorWMConfig) -> tuple[torch.Tensor, dict
     sigma = pick(dec["sigma_k"])
     yaw = pick(dec["yaw_vec_k"])
 
-    near = (f["current_local_xy"].float().norm(dim=-1) <= cfg.collision_focus_radius_m).float()
-    agent_w = 1.0 + cfg.collision_focus_weight * near
+    if cfg.interaction_weight == "kernel":
+        agent_w = 1.0 + cfg.collision_focus_weight * torch.exp(-interaction_distance(f, cfg) / cfg.interaction_tau_m)
+    else:
+        near = (f["current_local_xy"].float().norm(dim=-1) <= cfg.collision_focus_radius_m).float()
+        agent_w = 1.0 + cfg.collision_focus_weight * near
     agent_w = torch.where(f["is_sdc"].bool(), torch.full_like(agent_w, cfg.ego_loss_weight), agent_w)
     time_w = valid.float() * agent_w[..., None]
     denom = time_w.sum().clamp_min(1.0)
@@ -89,6 +115,11 @@ def wm_loss(dec: dict, f: dict, cfg: AnchorWMConfig) -> tuple[torch.Tensor, dict
             "mode_entropy": float(_masked_mean(ent, hf)),
             "anchor_usage_entropy": float(-(usage * usage.clamp_min(1e-12).log()).sum()),
             "ego_min_ade_all": float(_masked_mean(ade_k.amin(-1), ego.float())),
+            # Sigma of the assigned anchor (m) and the share of steps at the floor: a collapsed sigma
+            # makes the NLL gradient ~ error / sigma^2 and lets those agents dominate the clipped gradient.
+            "sigma_median_m": float(sigma[valid].median() * rng) if valid.any() else float("nan"),
+            "sigma_at_floor": float(_masked_mean((sigma < 1.5 * cfg.sigma_eps).float().amax(-1), valid.float())),
+            "agent_weight_mean": float(_masked_mean(agent_w, has.float())),
         }
     return loss, metrics
 
@@ -97,12 +128,19 @@ def _bce_soft(logit: torch.Tensor, target: torch.Tensor, w: torch.Tensor) -> tor
     return _masked_mean(F.binary_cross_entropy_with_logits(logit.float(), target, reduction="none"), w)
 
 
+def _aux_loss(aux: dict, ttv: torch.Tensor, gd_norm: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+    """Time-to-first-violation / horizon and normalized final goal distance heads (SmoothL1)."""
+    return (_masked_mean(F.smooth_l1_loss(aux["ttv"].float(), ttv, reduction="none", beta=0.1), w)
+            + _masked_mean(F.smooth_l1_loss(aux["goaldist"].float(), gd_norm, reduction="none", beta=0.1), w))
+
+
 def score_loss(total: torch.Tensor, sub: torch.Tensor, labels: dict, valid: torch.Tensor, *,
                progress_key: str = "goal_gain", progress_margin: float = 2.0,
                w_sub: float = 1.0, w_pair: float = 1.0, w_list: float = 0.5,
                tau_overlap: float = 0.5, tau_offroad: float = 0.5, tau_comfort: float = 0.5,
-               list_temp: float = 1.0) -> tuple[torch.Tensor, dict]:
-    """total [B,C], sub [B,C,4] (overlap, offroad, progress, comfort logits), valid [B,C]."""
+               list_temp: float = 1.0, aux: dict | None = None, w_aux: float = 0.5) -> tuple[torch.Tensor, dict]:
+    """total [B,C], sub [B,C,4] (overlap, offroad, progress, comfort logits), valid [B,C].
+    `aux` (scorer aux heads, may be empty) adds w_aux * the time-to-violation / goal-distance loss."""
     w = valid.float()
     unsafe = labels["overlap"] | labels["offroad"]
     gt_prog = labels["gt_progress"].clamp_min(1.0)[:, None]
@@ -138,6 +176,12 @@ def score_loss(total: torch.Tensor, sub: torch.Tensor, labels: dict, valid: torc
     l_list = -(target * logp.masked_fill(~valid, 0.0)).sum(-1).mean()
 
     loss = w_sub * l_sub + w_pair * l_pair + w_list * l_list
+    l_aux = None
+    if aux:
+        first = torch.minimum(labels["first_overlap"], labels["first_offroad"])
+        h = labels["horizon"].float().clamp_min(1.0)[:, None]
+        l_aux = _aux_loss(aux, (first / h).clamp(max=1.0), (labels["goal_dist"] / 10.0).clamp(0.0, 2.0), w)
+        loss = loss + w_aux * l_aux
     with torch.no_grad():
         acc_pairs = safety_pairs | prog_pairs
         pair_acc = _masked_mean((diff > 0).float() + 0.5 * (diff == 0).float(), acc_pairs.float())
@@ -148,6 +192,75 @@ def score_loss(total: torch.Tensor, sub: torch.Tensor, labels: dict, valid: torc
                    "picked_unsafe": float(unsafe[ar, pick].float().mean()),
                    "cand_unsafe_rate": float(_masked_mean(unsafe.float(), w)),
                    "picked_progress": float(p[ar, pick].mean())}
+        if l_aux is not None:
+            metrics["score_aux"] = float(l_aux)
+    return loss, metrics
+
+
+# ---- simplified scorer loss: one utility, one listwise ranking loss + a time-weighted safety BCE --------
+
+def simple_utility(unsafe: torch.Tensor, ttv: torch.Tensor, severity: torch.Tensor, goal_gain: torch.Tensor,
+                   goal_dist: torch.Tensor, valid: torch.Tensor, *, a_unsafe: float = 5.0, late: float = 0.5,
+                   b_severity: float = 1.0, c_gain: float = 2.0, d_dist: float = 1.0) -> torch.Tensor:
+    """U [B,C] encoding the preference tiers in one scalar (a_unsafe >> the other terms, so safe beats unsafe):
+      -a * unsafe * (1 - late * ttv)    a violation counts less the later it starts (ttv = first / horizon)
+      -b * unsafe * min(severity, 2)    and the milder it is (overlap depth + offroad depth, m)
+      +c * goal gain / group max gain   progress toward the goal
+      -d * log(1 + goal dist / 0.5 m)   precision near the goal (resolves the last metres, unlike a linear term)"""
+    gmax = goal_gain.masked_fill(~valid, float("-inf")).amax(-1, keepdim=True).clamp_min(1.0)
+    return (-a_unsafe * unsafe.float() * (1.0 - late * ttv.clamp(0.0, 1.0))
+            - b_severity * unsafe.float() * severity.clamp(0.0, 2.0)
+            + c_gain * goal_gain / gmax - d_dist * torch.log1p(goal_dist.clamp_min(0.0) / 0.5))
+
+
+def simple_rank_loss(total: torch.Tensor, sub: torch.Tensor, valid: torch.Tensor, utility: torch.Tensor,
+                     y_overlap: torch.Tensor, y_offroad: torch.Tensor, *, w_safe: float = 1.0,
+                     temp: float = 1.0) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Listwise cross-entropy of softmax(S) toward softmax(U / temp) over each group's valid candidates, plus
+    BCE of the overlap / offroad sub-logits toward time-weighted violation targets. Returns (loss, l_list, l_safe)."""
+    neg = torch.finfo(torch.float32).min
+    target = torch.softmax(utility.float().masked_fill(~valid, neg) / temp, -1)
+    logp = F.log_softmax(total.float().masked_fill(~valid, neg), -1)
+    has = valid.any(-1).float()
+    l_list = (-(target * logp.masked_fill(~valid, 0.0)).sum(-1) * has).sum() / has.sum().clamp_min(1.0)
+    w = valid.float()
+    l_safe = _bce_soft(sub[..., 0], y_overlap.float(), w) + _bce_soft(sub[..., 1], y_offroad.float(), w)
+    return l_list + w_safe * l_safe, l_list, l_safe
+
+
+def simple_score_loss(total: torch.Tensor, sub: torch.Tensor, labels: dict, valid: torch.Tensor, *,
+                      w_safe: float = 1.0, temp: float = 1.0, late: float = 0.5, progress_margin: float = 2.0,
+                      aux: dict | None = None, w_aux: float = 0.5) -> tuple[torch.Tensor, dict]:
+    """simple_rank_loss on self-generated candidates (label_candidates output)."""
+    h = labels["horizon"].float().clamp_min(1.0)[:, None]
+    unsafe = labels["overlap"] | labels["offroad"]
+    first = torch.minimum(labels["first_overlap"], labels["first_offroad"])
+    ttv = (first / h).clamp(max=1.0)
+    severity = (-labels["clearance"]).clamp_min(0.0) + labels["offroad_sd"].clamp_min(0.0)
+    u = simple_utility(unsafe, ttv, severity, labels["goal_gain"], labels["goal_dist"], valid, late=late)
+    tw = lambda first_k, flag: flag.float() * (1.0 - late * (first_k / h).clamp(0.0, 1.0))  # noqa: E731
+    loss, l_list, l_safe = simple_rank_loss(total, sub, valid, u, tw(labels["first_overlap"], labels["overlap"]),
+                                            tw(labels["first_offroad"], labels["offroad"]), w_safe=w_safe, temp=temp)
+    l_aux = None
+    if aux:
+        l_aux = _aux_loss(aux, ttv, (labels["goal_dist"] / 10.0).clamp(0.0, 2.0), valid.float())
+        loss = loss + w_aux * l_aux
+    with torch.no_grad():
+        diff = total.float()[:, :, None] - total.float()[:, None, :]
+        vv = valid[:, :, None] & valid[:, None, :]
+        gg = labels["goal_gain"]
+        pairs = vv & ~unsafe[:, :, None] & (unsafe[:, None, :] | (~unsafe[:, None, :] & ((gg[:, :, None] - gg[:, None, :]) >= progress_margin)))
+        neg = torch.finfo(torch.float32).min
+        pick = total.float().masked_fill(~valid, neg).argmax(-1)
+        ar = torch.arange(total.shape[0], device=total.device)
+        metrics = {"loss_score": float(loss), "score_list": float(l_list), "score_safe": float(l_safe),
+                   "score_pair_acc": float(_masked_mean((diff > 0).float() + 0.5 * (diff == 0).float(), pairs.float())),
+                   "picked_unsafe": float(unsafe[ar, pick].float().mean()),
+                   "cand_unsafe_rate": float(_masked_mean(unsafe.float(), valid.float())),
+                   "picked_progress": float(gg[ar, pick].mean()),
+                   "picked_goal_dist": float(labels["goal_dist"][ar, pick].mean())}
+        if l_aux is not None:
+            metrics["score_aux"] = float(l_aux)
     return loss, metrics
 
 
@@ -246,6 +359,32 @@ def bank_score_loss(total: torch.Tensor, sub: torch.Tensor, aux: dict, tg: dict,
                        picked_overlap=float((batch["overlap_step"][ar, pick] > 0).float().mean()),
                        picked_goal_gain=float(gg[ar, pick].mean()), picked_goal_dist=float(gd[ar, pick].mean()),
                        cand_unsafe_rate=float(unsafe.float().mean()))
+    return loss, metrics
+
+
+def bank_simple_loss(total: torch.Tensor, sub: torch.Tensor, aux: dict, tg: dict, batch: dict, *,
+                     w_safe: float = 1.0, temp: float = 1.0, late: float = 0.5,
+                     w_aux: float = 0.5) -> tuple[torch.Tensor, dict]:
+    """simple_rank_loss on a recorded bank (bank_targets output; Waymax first-violation steps)."""
+    s = total.float()
+    valid = torch.ones_like(tg["unsafe"])
+    h = batch["horizon"].float().clamp_min(1.0)[:, None]
+    u = simple_utility(tg["unsafe"], tg["ttv"], tg["severity"], tg["gg"], tg["gd"], valid, late=late)
+    ov, off = batch["overlap_step"].float(), batch["offroad_step"].float()
+    tw = lambda step: (step > 0).float() * (1.0 - late * (step / h).clamp(0.0, 1.0))  # noqa: E731
+    loss, l_list, l_safe = simple_rank_loss(s, sub, valid, u, tw(ov), tw(off), w_safe=w_safe, temp=temp)
+    l_aux = s.new_zeros(())
+    if aux:
+        l_aux = _aux_loss(aux, tg["ttv"], tg["gd_norm"], valid.float())
+        loss = loss + w_aux * l_aux
+    with torch.no_grad():
+        pick = s.argmax(-1)
+        ar = torch.arange(s.shape[0], device=s.device)
+        metrics = dict(loss=float(loss), l_list=float(l_list), l_safe=float(l_safe), l_aux=float(l_aux),
+                       picked_unsafe=float(tg["unsafe"][ar, pick].float().mean()),
+                       picked_overlap=float((batch["overlap_step"][ar, pick] > 0).float().mean()),
+                       picked_goal_gain=float(tg["gg"][ar, pick].mean()), picked_goal_dist=float(tg["gd"][ar, pick].mean()),
+                       cand_unsafe_rate=float(tg["unsafe"].float().mean()))
     return loss, metrics
 
 

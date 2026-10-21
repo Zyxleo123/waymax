@@ -55,3 +55,6 @@ old/
 *.sqlite
 
 waymo-open-dataset/
+
+# Local model checkpoints
+ckpts/
