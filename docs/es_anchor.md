@@ -112,9 +112,17 @@ ES_SMOKE=1 bash slurm/sim/submit_es_disc.sh          # 5 scenes x 3 configs, one
 
 ### val 0-9: 2916 scenes
 
-Done for `awm_sc_posthoc`, `mf_disc_posthoc` and `expert` (2916/2916 each), root
-`runs/awm_val10all_20261020_150640_3272023`; the table is pending. The expert alone scores 98.70%
-(t ≥ 11: 99.18%; overlap 0.34%, off-road 0.96%).
+| Arm | Success | Collision | Off-road | Goal not reached | Expert-clean 2878 |
+|---|---|---|---|---|---|
+| AnchorWM + learned reward + repair | **98.70%** | 0.31% | 0.93% | 0.10% | 99.76% |
+| MF + disc + repair | **98.56%** | 0.38% | 1.03% | 0.14% | 99.65% |
+| expert (logged human) | 98.70% | 0.34% | 0.96% | 0.00% | — |
+
+- The paired difference is +0.14 [−0.07, +0.38] (7 vs 3 discordant scenes): a tie.
+- Each arm is level with the human or just below it: AnchorWM 7 vs 7 discordant scenes, MF + disc
+  6 vs 10.
+- Counted from t ≥ 11, the expert scores 99.18%.
+- Root: `runs/awm_val10all_20261020_150640_3272023` (group_0 = val shards 0-1, reused below).
 
 ### Train 0-1 + val 0-1: 1529 scenes
 
