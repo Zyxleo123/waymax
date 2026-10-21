@@ -18,6 +18,18 @@
 #                             (the inputs it was trained on) -- "Ishan's WM with Sagar's discriminator"
 #   wm_mf_tb / wmI_mf_tb      Ishan's recommended ES objective (--offroad_mode margin_tiebreak) with
 #                             either WM: a 2x2 that separates the WM from the objective
+# ANCHOR WM (Ishan's joint WM + plan scorer, anchor_wm/ from mini-hong/waymax_rs@ishan 5755663, ckpt ft_rule_hdg):
+#   awm_sc / awm_sc_posthoc   AnchorWM forecaster + its fine-tuned scorer head as the ES reward (his
+#                             "Joint Anchor WM + Finetuned Score"); + o_am repair of every candidate against
+#                             the AnchorWM's 6 modes BEFORE the scorer ranks it (DEFAULT ARMS)
+#   awm / awm_posthoc         AnchorWM forecaster + the handcrafted reward (his "Anchor WM + rule")
+# WM x SCORER GRID (2026-10-19): each scorer always runs its OWN internal WM (best.pt = AnchorWM + scorer
+# head; Sagar's disc = its frozen MF epoch_0450). The planner's forecaster (the WM factor) only feeds the
+# repair's neighbours, so without repair the WM choice is a no-op and each scorer runs once:
+#   awm_sc(_posthoc)    AnchorWM forecaster  x best.pt learned reward
+#   awm_disc_posthoc    AnchorWM forecaster  x Sagar's disc
+#   mf_sc_posthoc       Sagar's MF WM        x best.pt learned reward
+#   mf_disc(_posthoc)   Sagar's MF WM        x Sagar's disc  (submit with ES_MF_WM_CKPT=<epoch_0450>)
 # VIEWS (es_WM c0fded3's evaluators; each view is its own planning run):
 #   log   NPCs replay the log (also re-scored with evaluation-only IDM: idm_* keys)
 #   idm   closed-loop IDM (simulation/idm_closed_loop.py): every non-SDC object runs Waymax's
@@ -41,17 +53,29 @@
 #   ES_PACK=1 bash ...         # one config per GPU task (default: both groups share one GPU)
 #   ES_PREEMPT_IDX=0,1,2 bash ...  # these task ids go to preempt (qos_preempt caps 10 submitted per user)
 set -euo pipefail
-ROOT="/home/yixiz/waymax_rs_es_newmodel"; cd "$ROOT"
+ROOT="/home/yixiz/waymax_rs_es_anchor"; cd "$ROOT"
 for v in $(compgen -v SLURM_); do unset "$v"; done
 source "$ROOT/slurm/sim/es_disc_common.sh"
 STAMP="$(date +%Y%m%d_%H%M%S)_$$"
 SMOKE="${ES_SMOKE:-}"
 SCR=/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/es_posthoc
 ES_SUBSET="${ES_SUBSET:-fail1500}"
+LANE_DIR=""
 case "$ES_SUBSET" in
   fail1500) SUBSET="${ES_SUBSET_DIR:-$SCR/fail1500_subset_g2}"; SPLIT=training; EXPECT=1500 ;;
   val10)    SUBSET="${ES_SUBSET_DIR:-$SCR/val10_subset_x5}"; SPLIT=validation; EXPECT=0 ;;
-  *) echo "FATAL: ES_SUBSET=$ES_SUBSET not fail1500|val10" >&2; exit 1 ;;
+  # the new goal-cond policy's 1568 WOMD validation failures (compact copy, all 150 shards);
+  # 4-19 targets per shard, so short batches are padded instead of dropped (323 scenes)
+  valfail1568) SUBSET="${ES_SUBSET_DIR:-$SCR/valfail1568_subset_g2}"; SPLIT=validation; EXPECT=1568 ;;
+  # every record of validation shards 0-9 (2916) as explicit targets, so short batches are padded, not dropped
+  val10all) SUBSET="${ES_SUBSET_DIR:-$SCR/val10all_g5}"; SPLIT=validation; EXPECT=2916 ;;
+  # every record of training shards 0-1 (934), one shard per group, padded like val10all; held out from
+  # both scorers' fine-tunes (train shards 02-11) except fail1500's 5 shard-1 scenes (split_json slices them)
+  # The lane-graph zips are partial (targets only): shard 1's holds 5 of 479 scenes and a scene missing
+  # from an existing zip crashes set_lane_graph(None), so point every config at an empty dir -> the
+  # learned-reward arms take the no-zip path (--lane_graph_optional) and rule arms fail loudly.
+  train2) SUBSET="${ES_SUBSET_DIR:-$SCR/train2_g2}"; SPLIT=training; EXPECT=934; LANE_DIR="$SUBSET/no_lane_graphs" ;;
+  *) echo "FATAL: ES_SUBSET=$ES_SUBSET not fail1500|val10|valfail1568|val10all|train2" >&2; exit 1 ;;
 esac
 [[ -s "$SUBSET/manifest.json" ]] || { echo "FATAL: $SUBSET has no manifest.json (build it with the es_posthoc prep job)" >&2; exit 1; }
 mapfile -t GROUP_DIRS < <(find "$SUBSET" -maxdepth 1 -type d -name 'group_*' | sort -V)
@@ -61,28 +85,29 @@ DISC_WM="${ES_DISC_WM_CKPT:-$ES_DEFAULT_DISC_WM}"
 POLICY="${ES_DIFFUSION_CKPT:-$ES_DEFAULT_POLICY}"
 MF_WM="${ES_MF_WM_CKPT:-$ES_DEFAULT_MF_WM}"
 ISHAN_WM="${ES_ISHAN_WM_CKPT:-$ES_DEFAULT_ISHAN_WM}"
-for f in "$DISC" "$DISC_WM" "$MF_WM" "$ISHAN_WM" "$POLICY"; do [[ -e "$f" ]] || { echo "FATAL: missing $f" >&2; exit 1; }; done
+ANCHOR_WM="${ES_ANCHOR_WM_CKPT:-$ES_DEFAULT_ANCHOR_WM}"
+for f in "$DISC" "$DISC_WM" "$MF_WM" "$ISHAN_WM" "$ANCHOR_WM" "$POLICY"; do [[ -e "$f" ]] || { echo "FATAL: missing $f" >&2; exit 1; }; done
 case "$SMOKE" in
-  "") OUT="${ES_OUT:-$SCR/runs/nm_${ES_SUBSET}_${STAMP}}" ;;
-  1) OUT="${ES_OUT:-$SCR/runs/nm_${ES_SUBSET}_smoke_${STAMP}}" ;;
+  "") OUT="${ES_OUT:-$SCR/runs/awm_${ES_SUBSET}_${STAMP}}" ;;
+  1) OUT="${ES_OUT:-$SCR/runs/awm_${ES_SUBSET}_smoke_${STAMP}}" ;;
   *) echo "FATAL: ES_SMOKE=$SMOKE not 1" >&2; exit 1 ;;
 esac
 # Longest first, so the slow arms start early.
-ARMS="${ES_ARMS_SEL:-wm_mf_disc_posthoc,wmI_mf_disc_posthoc,wm_mf_posthoc,wmI_mf_posthoc,cv_posthoc,gt,wm_mf_disc,cv,wm_mf,wmI_mf,wm_mf_tb,wmI_mf_tb,diff_posthoc,diff}"
+ARMS="${ES_ARMS_SEL:-awm_sc_posthoc,awm_sc}"
 VIEWS="${ES_VIEWS:-log,idm}"
 PACK="${ES_PACK:-groups}"
 mkdir -p "$OUT/cfg" "$OUT/env" "$ES_LOG_DIR"
 sb() { env -i HOME="$HOME" PATH="$PATH" USER="${USER:-}" sbatch "$@"; }
 kv() { printf "%s='%s'\n" "$1" "${2//\'/\'\\\'\'}"; }
 SBATCH_BIN="$(env -i PATH="$PATH" bash -c 'command -v sbatch' || true)"
-[[ -n "$SBATCH_BIN" ]] || { echo "FATAL: no sbatch on PATH (submit from lov4 or rhea)" >&2; exit 1; }
+[[ -n "$SBATCH_BIN" ]] || { echo "FATAL: no sbatch on PATH" >&2; exit 1; }
 echo "sbatch=$SBATCH_BIN root=$OUT subset=$SUBSET (${#GROUP_DIRS[@]} groups) views=$VIEWS pack=$PACK"
 echo "policy=$POLICY"
-echo "planner MF WM=$MF_WM; discriminator=$DISC (its WM: $DISC_WM)"
+echo "planner MF WM=$MF_WM; discriminator=$DISC (its WM: $DISC_WM); anchor WM=$ANCHOR_WM"
 
 # write_cfg VIEW ARM GROUP_DIR -> path of a self-contained config file (every key explicit)
 write_cfg() {
-  local view="$1" arm="$2" gdir="$3" pl=es fc ph disc="" om=binary
+  local view="$1" arm="$2" gdir="$3" pl=es fc ph disc="" om=binary asc=0
   case "$arm" in
     diff) pl=diffusion; fc=cv; ph=0 ;; diff_posthoc) pl=diffusion; fc=cv; ph=1 ;;
     gt) fc=gt; ph=0 ;;
@@ -92,15 +117,27 @@ write_cfg() {
     wmI_mf) fc=wm_mf_ishan; ph=0 ;; wmI_mf_posthoc) fc=wm_mf_ishan; ph=1 ;;
     wmI_mf_disc_posthoc) fc=wm_mf_ishan; ph=1; disc="$DISC" ;;
     wm_mf_tb) fc=wm_mf; ph=0; om=margin_tiebreak ;; wmI_mf_tb) fc=wm_mf_ishan; ph=0; om=margin_tiebreak ;;
+    awm) fc=anchor; ph=0 ;; awm_posthoc) fc=anchor; ph=1 ;;
+    # the logged human trajectory through the same evaluator: the ceiling (expert-clean labels)
+    expert) pl=log-replay; fc=cv; ph=0 ;;
+    awm_sc) fc=anchor; ph=0; asc=1 ;; awm_sc_posthoc) fc=anchor; ph=1; asc=1 ;;
+    awm_disc) fc=anchor; ph=0; disc="$DISC" ;; awm_disc_posthoc) fc=anchor; ph=1; disc="$DISC" ;;
+    mf_sc) fc=wm_mf; ph=0; asc=1 ;; mf_sc_posthoc) fc=wm_mf; ph=1; asc=1 ;;
+    mf_disc) fc=wm_mf; ph=0; disc="$DISC" ;; mf_disc_posthoc) fc=wm_mf; ph=1; disc="$DISC" ;;
     *) echo "FATAL: unknown arm '$arm'" >&2; return 1 ;;
   esac
   local f="$OUT/cfg/${ES_SUBSET}${SMOKE:+_smoke$SMOKE}.${view}.${arm}.$(basename "$gdir").env"
   { kv ES_OUT "$OUT"; kv ES_ARM "$arm"; kv ES_VIEW "$view"; kv ES_PLANNER "$pl"; kv ES_FORECAST "$fc"
     kv ES_POSTHOC "$ph"; kv ES_DISC_CKPT "$disc"; kv ES_DISC_WM_CKPT "$DISC_WM"
     kv ES_ISHAN_WM_CKPT "$ISHAN_WM"; kv ES_OFFROAD_MODE "$om"
+    kv ES_ANCHOR_WM_CKPT "$ANCHOR_WM"; kv ES_ANCHOR_SCORER "$asc"
+    # learned reward or discriminator: the handcrafted scorer (the one lane-graph consumer) is never called
+    kv ES_LANE_GRAPH_OPTIONAL "$([[ "$asc" == 1 || -n "$disc" ]] && echo 1 || echo 0)"
+    kv ES_PAD_SHORT_BATCHES "$([[ "$ES_SUBSET" == valfail1568 || "$ES_SUBSET" == val10all || "$ES_SUBSET" == train2 ]] && echo 1 || echo 0)"
     kv ES_ALSO_EVAL "$([[ "$view" == log ]] && echo "${ES_ALSO_EVAL:-idm}" || echo "")"
     kv ES_WORLD_DT_METHOD "${ES_WORLD_DT_METHOD:-median}"; kv ES_SAVE_TRAJ "${ES_SAVE_TRAJ:-1}"
     kv ES_GROUP_DIR "$gdir"; kv ES_SPLIT "$SPLIT"
+    [[ -n "$LANE_DIR" ]] && kv ES_LANE_GRAPH_DIR "$LANE_DIR"
     kv ES_DIFFUSION_CKPT "$POLICY"; kv ES_MF_WM_CKPT "$MF_WM"; kv ES_SEED "${ES_SEED:-0}"
     kv ES_XLA_MEM_FRACTION "${XLA_FRAC:-}"
     [[ -n "${XLA_PREALLOC:-}" ]] && kv ES_XLA_PREALLOCATE "$XLA_PREALLOC"
@@ -114,10 +151,8 @@ write_cfg() {
 
 if [[ -n "$SMOKE" ]]; then
   g0="${GROUP_DIRS[0]}"
-  # log:diff and log:cv_posthoc re-run scenes an earlier run planned (regression check);
-  # the rest exercise each new path once: the discriminator with and without the repair,
-  # and the closed loop with the discriminator, the diffusion-only repair, gt and the WM.
-  SPECS="${ES_SMOKE_SPECS:-log:diff log:cv_posthoc log:wm_mf_disc log:wm_mf_disc_posthoc idm:wm_mf_disc_posthoc idm:diff_posthoc idm:gt idm:wm_mf}"
+  # each new path once: the anchor scorer alone, with the repair, and the repair in the closed loop
+  SPECS="${ES_SMOKE_SPECS:-log:awm_sc log:awm_sc_posthoc idm:awm_sc_posthoc}"
   cfgs=()
   for s in $SPECS; do cfgs+=("$(write_cfg "${s%%:*}" "${s#*:}" "$g0")"); done
   { kv ES_SUBTASKS "${cfgs[*]}"; kv ES_SUBTASK_MODE seq; } > "$OUT/env/smoke.env"
@@ -168,6 +203,10 @@ for t in ${PRE_IDX//,/ }; do (( t >= 0 && t < N )) || { echo "FATAL: ES_PREEMPT_
 CPUS=$(( 8 * P )); MEM="$(( ${ES_MEM_PER_CFG_GB:-48} * P ))G"
 COMMON=(--cpus-per-task="$CPUS" --mem="$MEM")
 [[ -n "${ES_EXCLUDE-}" ]] && COMMON+=(--exclude="${ES_EXCLUDE-}")
+# ES_TIME=12:00:00: a shorter limit than the sbatch header's 2 days backfills sooner on preempt
+[[ -n "${ES_TIME-}" ]] && COMMON+=(--time="${ES_TIME-}")
+# ES_DEPEND=<jobid>: the ES tasks wait for that job to succeed (e.g. the smoke)
+[[ -n "${ES_DEPEND-}" ]] && COMMON+=(--dependency="afterok:${ES_DEPEND}")
 DEPS=()
 if [[ -n "$GEN_IDX" ]]; then
   A1=$(sb --parsable "${COMMON[@]}" --array="$GEN_IDX" slurm/sim/es_disc.sbatch "$OUT/env")
@@ -187,11 +226,13 @@ PAIRS="$PAIRS,diff_posthoc:diff,cv:diff,gt:cv,wm_mf_posthoc:diff_posthoc"
 # Ishan's WM vs Sagar's, and the offroad-objective 2x2
 PAIRS="$PAIRS,wmI_mf:wm_mf,wmI_mf_posthoc:wm_mf_posthoc,wmI_mf_disc_posthoc:wm_mf_disc_posthoc,wmI_mf:cv"
 PAIRS="$PAIRS,wm_mf_tb:wm_mf,wmI_mf_tb:wmI_mf,wmI_mf_tb:wm_mf_tb,wmI_mf_tb:wm_mf"
+# AnchorWM: the repair on top of the joint WM + scorer, and the scorer vs the rule reward
+PAIRS="${ES_PAIRS_SEL:-awm_sc_posthoc:awm_sc,mf_disc_posthoc:mf_disc,awm_sc:mf_disc,awm_sc_posthoc:awm_disc_posthoc,mf_sc_posthoc:mf_disc_posthoc,awm_sc_posthoc:mf_sc_posthoc,awm_disc_posthoc:mf_disc_posthoc,awm_sc_posthoc:mf_disc_posthoc}"
 { kv ES_CPU_MODE compare; kv ES_OUT "$OUT"
-  kv ES_ARMS "diff,diff_posthoc,gt,cv,cv_posthoc,wm_mf,wm_mf_posthoc,wm_mf_disc,wm_mf_disc_posthoc,wmI_mf,wmI_mf_posthoc,wmI_mf_disc_posthoc,wm_mf_tb,wmI_mf_tb"
+  kv ES_ARMS "$ARMS"
   kv ES_VIEWS "$VIEWS"; kv ES_PAIRS "$PAIRS"; kv ES_EXPECT "$EXPECT"
   # fail1500 scenes are in the discriminator's own training set: slice by its split
-  [[ "$ES_SUBSET" == fail1500 ]] && kv ES_SPLIT_JSON "${ES_DISC_SPLIT_JSON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/es_discriminator/training_sets/fail1500_plus_womd_train_s02_11/scenario_split_seed0.json}"
+  [[ "$ES_SUBSET" == fail1500 || "$ES_SUBSET" == train2 ]] && kv ES_SPLIT_JSON "${ES_DISC_SPLIT_JSON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/es_discriminator/training_sets/fail1500_plus_womd_train_s02_11/scenario_split_seed0.json}"
   true; } > "$OUT/compare.env"
 DEP="afterany:$(IFS=:; echo "${DEPS[*]}")"
 CID=$(sb --parsable --dependency="$DEP" slurm/sim/es_disc_cpu.sbatch "$OUT/compare.env")

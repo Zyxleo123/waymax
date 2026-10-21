@@ -10,19 +10,23 @@
 #   ES_VIEW         log = NPCs replay the log; idm = es_WM's closed-loop IDM
 #                   (simulation/idm_closed_loop.py: the planner sees the simulated NPCs)
 #   ES_PLANNER      es (Diffusion-ES) | diffusion (the policy alone, one sample per replan)
-#   ES_FORECAST     cv | gt | wm_mf (Sagar's MF WM) | wm_mf_ishan (Ishan's MF WM)
+#   ES_FORECAST     cv | gt | wm_mf (Sagar's MF WM) | wm_mf_ishan (Ishan's MF WM) |
+#                   anchor (Ishan's AnchorWM, anchor_wm/ from mini-hong/waymax_rs@ishan 5755663)
 #                   (feeds the ES scorer AND the repair's neighbours)
+#   ES_ANCHOR_SCORER 1 = the AnchorWM checkpoint's scorer head replaces the handcrafted ES reward
+#                   (--anchor_scorer_ckpt; same file as the forecaster, so one model serves both)
 #   ES_OFFROAD_MODE binary (es_WM's 0/1 gate) | margin_tiebreak (Ishan's clearance-graded offroad)
 #   ES_POSTHOC      1 = o_am repair of every candidate before scoring (planner/posthoc_repair.py)
 #   ES_DISC_CKPT    non-empty = es_WM's learned discriminator replaces the handcrafted ES reward
 #   ES_DISC_WM_CKPT the frozen MF world model whose forecasts the discriminator was trained on
 #   ES_ALSO_EVAL    extra evaluation-only NPC models for the log view (empty under idm)
+#   ES_PAD_SHORT_BATCHES 1 = run a shard's short last target batch (padded) instead of dropping it
 #   ES_GROUP_DIR / ES_SPLIT / ES_NUM_SCENARIOS / ES_WORLD_DT_METHOD / ES_SAVE_TRAJ / ES_SEED
 #   ES_NUM_WORLDS / ES_POP / ES_ELITE / ES_IT / ES_RESAMPLE_TIMESTEPS / ES_REPLAN_INTERVAL
 
-ES_ROOT="${ES_ROOT:-/home/yixiz/waymax_rs_es_newmodel}"
+ES_ROOT="${ES_ROOT:-/home/yixiz/waymax_rs_es_anchor}"
 ES_PYTHON="${ES_PYTHON:-/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/conda_envs/waymax_rs/bin/python}"
-ES_LOG_DIR="${ES_LOG_DIR:-/home/yixiz/waymax_rs/logs/es_newmodel}"
+ES_LOG_DIR="${ES_LOG_DIR:-/home/yixiz/waymax_rs/logs/es_anchor}"
 # mineuih goal-conditioned policy (mini-hong/waymax_rs@new_model architecture + map sampling).
 # Use epoch_1000 explicitly: its sibling "latest" is a stale copy of epoch_0500 (same commit
 # timestamp and bytes), and a bare run-dir path resolves to that "latest".
@@ -31,6 +35,9 @@ ES_DEFAULT_MF_WM=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_m
 ES_DEFAULT_DISC_WM=/data/user_data/yixiz/autonlab/zfsauton/scratch/sbellad/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20260916_200620/epoch_0450.pt
 # Ishan Jain's multi-future WM (mini-hong/waymax_rs@ishan code, vendored in multiFuture_GaussianWorldModel_ishan/).
 ES_DEFAULT_ISHAN_WM=/data/user_data/yixiz/autonlab/zfsauton/scratch/ishanj/world_model/ckpts_multifuture_gaussian/multiFuture_GaussianWorldModel_20261005_092950/epoch_0450.pt
+# Ishan's AnchorWM, joint WM + plan scorer (A2 joint init, scorer fine-tuned: "ft_rule_hdg", 2026-10-19),
+# his "Joint Anchor WM + Finetuned Score" row. Provenance next to the file.
+ES_DEFAULT_ANCHOR_WM=/data/user_data/yixiz/autonlab/zfsauton/scratch/ishanj/anchor_wm/finetune/ft_rule_hdg_20261019_014026/best.pt
 
 # es_load_args ARG...: an env FILE is sourced, an array DIR resolves to <dir>/<task>.env,
 # VAR=value is exported. Config never travels by `sbatch --export` (it strands jobs here).
@@ -78,6 +85,7 @@ es_run_one() {
   local policy="${ES_DIFFUSION_CKPT:-$ES_DEFAULT_POLICY}" mf_wm="${ES_MF_WM_CKPT:-$ES_DEFAULT_MF_WM}"
   local disc="${ES_DISC_CKPT-}" disc_wm="${ES_DISC_WM_CKPT:-$ES_DEFAULT_DISC_WM}"
   local ishan_wm="${ES_ISHAN_WM_CKPT:-$ES_DEFAULT_ISHAN_WM}" offroad_mode="${ES_OFFROAD_MODE:-binary}"
+  local anchor_wm="${ES_ANCHOR_WM_CKPT:-$ES_DEFAULT_ANCHOR_WM}" anchor_scorer="${ES_ANCHOR_SCORER:-0}"
   case "$view" in log|idm) ;; *) echo "FATAL: ES_VIEW=$view not log|idm" >&2; return 1 ;; esac
   if [[ "$view" == idm && -n "$also_eval" ]]; then
     echo "FATAL: ES_ALSO_EVAL=$also_eval is evaluation-only; the idm view is already closed loop" >&2; return 1
@@ -85,7 +93,7 @@ es_run_one() {
 
   cd "$ES_ROOT"
   echo "repo=$ES_ROOT @ $(git -C "$ES_ROOT" rev-parse --short HEAD) dirty=$(git -C "$ES_ROOT" status --porcelain | wc -l) python=$ES_PYTHON"
-  echo "arm=$arm view=$view planner=$planner forecast=$forecast posthoc=$posthoc offroad_mode=$offroad_mode disc=${disc:-<handcrafted reward>}"
+  echo "arm=$arm view=$view planner=$planner forecast=$forecast posthoc=$posthoc offroad_mode=$offroad_mode disc=${disc:-<handcrafted reward>} anchor_scorer=$anchor_scorer"
   echo "group=$group_dir split=$split scenes<=${ES_NUM_SCENARIOS:-100000} world_dt=$dt_method also_eval=${also_eval:-<none>} save_traj=${ES_SAVE_TRAJ:-1}"
   echo "es: worlds=${ES_NUM_WORLDS:-5} pop=${ES_POP:-64} elite=${ES_ELITE:-8} it=${ES_IT:-4} rt=${ES_RESAMPLE_TIMESTEPS:-5} replan=${ES_REPLAN_INTERVAL:-10} seed=${ES_SEED:-0}"
   echo "policy=$policy"
@@ -109,7 +117,12 @@ es_run_one() {
       fc=(--other_agent_forecast wm --world_model_ckpt "$ishan_wm" --world_model_device auto
           --wm_backend multifuture_ishan --wm_refresh_steps 10 --num_collision_worlds 1
           --collision_reduce any --collision_sample_seed 0 --wm_planning_mode expected_independent) ;;
-    *) echo "FATAL: ES_FORECAST=$forecast not cv|gt|wm_mf|wm_mf_ishan" >&2; return 1 ;;
+    anchor)
+      echo "anchor_wm=$anchor_wm (Ishan's AnchorWM, expected_independent)"
+      fc=(--other_agent_forecast wm --world_model_ckpt "$anchor_wm" --world_model_device auto
+          --wm_backend anchor --wm_refresh_steps 10 --num_collision_worlds 1
+          --collision_reduce any --collision_sample_seed 0 --wm_planning_mode expected_independent) ;;
+    *) echo "FATAL: ES_FORECAST=$forecast not cv|gt|wm_mf|wm_mf_ishan|anchor" >&2; return 1 ;;
   esac
   case "$offroad_mode" in binary|margin_tiebreak) ;; *) echo "FATAL: ES_OFFROAD_MODE=$offroad_mode" >&2; return 1 ;; esac
   local extra=()
@@ -118,7 +131,17 @@ es_run_one() {
     echo "discriminator=$disc wm=$disc_wm"
     extra+=(--discriminator_ckpt "$disc" --discriminator_wm_ckpt "$disc_wm" --discriminator_device auto)
   fi
+  if [[ "$anchor_scorer" == 1 ]]; then
+    # any forecaster: with another WM the scorer loads its own copy of the AnchorWM (its features)
+    [[ -z "$disc" ]] || { echo "FATAL: ES_ANCHOR_SCORER=1 and a discriminator are exclusive" >&2; return 1; }
+    echo "anchor scorer=$anchor_wm (learned reward; the handcrafted reward is bypassed)"
+    extra+=(--anchor_scorer_ckpt "$anchor_wm" --discriminator_device auto)
+  fi
   [[ -n "$also_eval" ]] && extra+=(--also_eval_sim_agents "$also_eval")
+  # Babel's lane-graph zips are partial (rebuilt 2026-10-20 for the val10 / fail1500 / valfail1568 targets
+  # only, scripts/rebuild_lane_graphs.py on posthoc-opt-es); only learned-reward arms run without them.
+  [[ "${ES_LANE_GRAPH_OPTIONAL:-0}" == 1 ]] && extra+=(--lane_graph_optional)
+  [[ "${ES_PAD_SHORT_BATCHES:-0}" == 1 ]] && extra+=(--pad_short_batches)
   [[ "${ES_SAVE_TRAJ:-1}" == 1 ]] && extra+=(--save_trajectory)
   # Without a target list the runner scores every scene of every shard in the group.
   [[ -s "$group_dir/target_scenarios.json" ]] && extra+=(--target_scenario_path "$group_dir/target_scenarios.json")

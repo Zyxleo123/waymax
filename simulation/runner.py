@@ -189,7 +189,8 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                 continue
             # Partial last batch on a shard: planner/batch_dims expect num_worlds.
             # Drop leftovers rather than crash; prefer target lists divisible by num_worlds.
-            if len(scenario_indices) < int(args.num_worlds):
+            # --pad_short_batches runs it instead (padded after loading, see below).
+            if len(scenario_indices) < int(args.num_worlds) and not getattr(args, "pad_short_batches", False):
                 print(
                     f"[target] dropping incomplete last batch of {len(scenario_indices)} "
                     f"on {scenario_base_name} (need num_worlds={args.num_worlds})."
@@ -217,10 +218,24 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                 scenario_indices.append(scenario_idx)
             if not scenario_indices:
                 break
+        num_real = len(scenario_indices)
         try:
             sim_state, _, scenario_ids = load_scenario_state_batch_fast(
                 ds_cfg, scenario_indices, return_scenario_ids=True
             )
+            # --pad_short_batches (Ishan's 858b344): planner/batch_dims expect num_worlds, so a short
+            # batch is padded with copies of its last scene AFTER loading (the loader deduplicates
+            # indices); only the first num_real results are kept.
+            num_pad = int(args.num_worlds) - num_real
+            if num_pad > 0 and getattr(args, "pad_short_batches", False):
+                sim_state = jax.tree_util.tree_map(
+                    lambda x: jnp.concatenate([x, jnp.repeat(x[-1:], num_pad, axis=0)], axis=0)
+                    if getattr(x, "ndim", 0) > 0 and x.shape[0] == num_real else x,
+                    sim_state,
+                )
+                scenario_indices = scenario_indices + [scenario_indices[-1]] * num_pad
+                scenario_ids = list(scenario_ids) + [scenario_ids[-1]] * num_pad
+                print(f"[pad] {num_real} real + {num_pad} padding copies", flush=True)
             # Which scenes the first-pair clock would have slowed (logged, not used).
             from data.preprocess import compute_world_dt_seconds
             _dt_first = np.asarray(compute_world_dt_seconds(sim_state, 0.1, "first"))
@@ -260,9 +275,19 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                             lane_graph_store = LaneGraphShardStore(lane_graph_zip_path.as_posix())
                         else:
                             lane_graph_store = None
-                            raise FileNotFoundError(f"Lane graph zip file {lane_graph_zip_path} not found for tfrecord {tfrecord_path}.")
+                            if not getattr(args, "lane_graph_optional", False):
+                                raise FileNotFoundError(f"Lane graph zip file {lane_graph_zip_path} not found for tfrecord {tfrecord_path}.")
+                            print(f"[lane_graph] none for {os.path.basename(str(tfrecord_path))}: handcrafted "
+                                  "scorers disabled (any call raises)", flush=True)
                 lane_graphs = []
                 for world_idx in range(len(scenario_indices)):
+                    # --lane_graph_optional: the handcrafted ES reward needs the lane graph (route /
+                    # progress terms); arms whose reward is learned never call it, so it may be
+                    # absent, and the scorer then refuses to score instead of scoring without a route.
+                    planner.scorers[world_idx].lane_graph_missing = lane_graph_store is None
+                    if lane_graph_store is None:
+                        lane_graphs.append(None)
+                        continue
                     graph = lane_graph_store.get_by_record_index(int(scenario_indices[world_idx]))
                     planner.scorers[world_idx].set_lane_graph(graph)
                     lane_graphs.append(graph)
@@ -371,7 +396,12 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
             ro = rollout_predicted_trajectories_with_metrics(replaced_state, rng_key=rng_key, sim_agents=sa)
             ovl, off = _window(ro)
             extra_eval[sa] = (ovl, off, goal_reached & (~ovl) & (~off))
-        reached_all += int(np.sum(goal_eval["reached"]))
+        if len(scenario_indices) > num_real:
+            # Padded batch: drop the padding copies before anything is counted or written.
+            scenario_indices = scenario_indices[:num_real]
+            scenario_ids = list(scenario_ids)[:num_real]
+            success = success[:num_real]
+        reached_all += int(np.sum(np.asarray(goal_eval["reached"])[:num_real]))
         success_all += int(np.sum(success))
 
         if args.save_trajectory:

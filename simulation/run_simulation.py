@@ -61,6 +61,18 @@ def _parse_args() -> argparse.Namespace:
         "--split", type=str, default="training", choices=["training", "validation"]
     )
     parser.add_argument(
+        "--pad_short_batches",
+        action="store_true",
+        help="With a target list, run a shard's short last batch (padded after loading with copies of "
+        "its last scene, padding results discarded) instead of dropping it.",
+    )
+    parser.add_argument(
+        "--lane_graph_optional",
+        action="store_true",
+        help="Run Diffusion-ES without a shard's lane graph zip (Babel has none). The handcrafted "
+        "scorer then raises if called, so only learned-reward arms can run.",
+    )
+    parser.add_argument(
         "--lane_graph_dir",
         type=str, 
         default="/data/user_data/yixiz/autonlab/zfsauton/scratch/mineuih/waymax_rs/lane_graphs"
@@ -127,11 +139,13 @@ def _parse_args() -> argparse.Namespace:
         "--wm_backend",
         type=str,
         default="production",
-        choices=["production", "multifuture", "multifuture_ishan", "occupancy", "ego"],
+        choices=["production", "multifuture", "multifuture_ishan", "occupancy", "ego", "anchor"],
         help="Which world-model package to load for --other_agent_forecast wm. "
         "'production' = model/world_model (det/gaussian). "
         "'multifuture' = Sagar's multi-future Gaussian WM (es_WM); 'multifuture_ishan' = Ishan's "
         "(mini-hong/waymax_rs@ishan, vendored in multiFuture_GaussianWorldModel_ishan/). "
+        "'anchor' = anchor_wm (AnchorWM checkpoint; 6 planner modes, independent-agent collision; "
+        "mini-hong/waymax_rs@ishan 5755663, vendored in anchor_wm/). "
         "Others load the matching package under the repo root.",
     )
     parser.add_argument(
@@ -220,6 +234,21 @@ def _parse_args() -> argparse.Namespace:
         "--other_agent_forecast wm loads the same checkpoint).",
     )
     parser.add_argument("--discriminator_device", type=str, default="auto")
+    parser.add_argument(
+        "--anchor_scorer_ckpt",
+        type=str,
+        default=None,
+        help="Diffusion-ES only: replace the handcrafted reward with the scorer head of this AnchorWM "
+        "checkpoint (anchor_wm.closed_loop.AnchorLearnedScorer). Not with --discriminator_ckpt.",
+    )
+    parser.add_argument(
+        "--anchor_scorer_rule_lambda",
+        type=float,
+        default=0.0,
+        help="With --anchor_scorer_ckpt: hybrid reward = learned score + lambda * sum of log handcrafted "
+        "factors in --anchor_scorer_rule_terms. 0 = learned score only.",
+    )
+    parser.add_argument("--anchor_scorer_rule_terms", type=str, default="collision,offroad")
     parser.add_argument("--start_from", type=str, default=None)
     parser.add_argument("--target_scenario_path", type=str, default=None)
     parser.add_argument(
@@ -404,11 +433,23 @@ def _load_world_model_forecaster(args: argparse.Namespace):
         "multifuture_ishan": repo_root / "multiFuture_GaussianWorldModel_ishan",
         "occupancy": repo_root / "occupancy_worldModel",
         "ego": repo_root / "egoConditioned_WM",
+        "anchor": None,
     }
     if backend not in backend_roots:
         raise ValueError(f"Unknown --wm_backend {backend!r}")
 
-    if backend == "production":
+    if backend == "anchor":
+        from anchor_wm.closed_loop import AnchorForecaster
+
+        forecaster = AnchorForecaster.from_checkpoint(
+            str(args.world_model_ckpt),
+            device=device,
+            planning_mode=getattr(args, "wm_planning_mode", None),
+            mode_temperature=1.0,  # Ishan's anchor runs use temperature 1 (no --wm_mode_temperature here)
+        )
+        if getattr(args, "output_dir", None):
+            forecaster.stats_path = os.path.join(args.output_dir, "wm_forecast_stats.json")
+    elif backend == "production":
         from model.world_model.inference import ScheduledWorldModelForecaster
 
         forecaster = ScheduledWorldModelForecaster.from_checkpoint(
@@ -772,6 +813,8 @@ def main(args: argparse.Namespace) -> None:
         _attach_learned_reward(args, planner)
     if getattr(args, "mf_collision_method", None):
         _write_mf_experiment_config(args)
+    if getattr(args, "anchor_scorer_ckpt", None):
+        _attach_anchor_reward(args, planner)
     run(args, planner, log_replay=(args.planner == "log-replay"))
 
 
@@ -861,6 +904,45 @@ def _write_mf_experiment_config(args: argparse.Namespace) -> None:
     for d in {args.output_dir, args.exp_dir}:
         with open(os.path.join(d, "experiment_config.json"), "w") as f:
             json.dump(config, f, indent=2)
+
+
+def _attach_anchor_reward(args: argparse.Namespace, planner) -> None:
+    """AnchorWM scorer head as the Diffusion-ES reward (anchor_wm.closed_loop.AnchorLearnedScorer)."""
+    import atexit
+
+    if args.planner != "es" or not hasattr(planner, "learned_scorer"):
+        raise ValueError("--anchor_scorer_ckpt requires --planner es (Diffusion-ES).")
+    if getattr(args, "discriminator_ckpt", None):
+        raise ValueError("--anchor_scorer_ckpt and --discriminator_ckpt are mutually exclusive.")
+    if getattr(args, "save_es_candidates", False):
+        raise ValueError("--save_es_candidates records handcrafted components; not with --anchor_scorer_ckpt.")
+    from anchor_wm.closed_loop import AnchorForecaster, AnchorLearnedScorer
+
+    forecaster = getattr(planner, "world_model_forecaster", None)
+    shared = (isinstance(forecaster, AnchorForecaster) and forecaster.checkpoint
+              and os.path.realpath(forecaster.checkpoint) == os.path.realpath(args.anchor_scorer_ckpt))
+    scorer = AnchorLearnedScorer(
+        args.anchor_scorer_ckpt,
+        device=_resolve_world_model_device(args.discriminator_device),
+        expected_calls_per_replan=int(args.num_es_iterations) + 1,
+        stats_path=os.path.join(args.output_dir, "anchor_scorer_stats.json"),
+        model=forecaster.model if shared else None,
+        rule_scorers=planner.scorers if float(args.anchor_scorer_rule_lambda) > 0 else None,
+        rule_lambda=float(args.anchor_scorer_rule_lambda),
+        rule_terms=tuple(t.strip() for t in str(args.anchor_scorer_rule_terms).split(",") if t.strip()),
+    )
+    planner.learned_scorer = scorer
+    atexit.register(scorer.close)
+    info = {**scorer.describe(), "shares_planner_wm": bool(shared), "other_agent_forecast": args.other_agent_forecast,
+            "planner_world_model_ckpt": args.world_model_ckpt, "wm_backend": args.wm_backend,
+            "handcrafted_scorer_used": False, "seed": int(args.seed),
+            "es": {"population_size": args.population_size, "elite_size": args.elite_size,
+                   "num_es_iterations": args.num_es_iterations, "resample_timesteps": args.resample_timesteps},
+            "timestamp": datetime.now().isoformat(timespec="seconds")}
+    with open(os.path.join(args.output_dir, "anchor_scorer_config.json"), "w") as f:
+        json.dump(info, f, indent=2)
+    print(f"[anchor_scorer] learned reward {args.anchor_scorer_ckpt}; shares planner WM: {bool(shared)}; "
+          f"forecast={args.other_agent_forecast}")
 
 
 if __name__ == "__main__":

@@ -736,6 +736,9 @@ class Scorer:
 
     def compute_score(self, trajectories, sim_state, timestep, world_idx=0):
         """Score ego proposals; other agents via ``other_agent_forecast`` (``cv``/``gt``/``wm``)."""
+        if getattr(self, "lane_graph_missing", False):
+            raise RuntimeError("handcrafted scorer called without a lane graph (--lane_graph_optional is "
+                               "only valid for arms whose ES reward is learned)")
         trajectories = jnp.asarray(trajectories)
         if trajectories.ndim != 3 or trajectories.shape[-1] != 5:
             raise ValueError(

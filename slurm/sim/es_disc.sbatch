@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=es_nm
+#SBATCH --job-name=es_awm
 #SBATCH --partition=preempt
 #SBATCH --qos=preempt_qos
 #SBATCH --nodes=1
@@ -10,8 +10,8 @@
 #SBATCH --time=2-00:00:00
 #SBATCH --requeue
 #SBATCH --open-mode=append
-#SBATCH --output=/home/yixiz/waymax_rs/logs/es_newmodel/slurm-%x-%A_%a.out
-#SBATCH --error=/home/yixiz/waymax_rs/logs/es_newmodel/slurm-%x-%A_%a.out
+#SBATCH --output=/home/yixiz/waymax_rs/logs/es_anchor/slurm-%x-%A_%a.out
+#SBATCH --error=/home/yixiz/waymax_rs/logs/es_anchor/slurm-%x-%A_%a.out
 #
 # Diffusion-ES (+ world model, + o_am repair, + es_WM's learned discriminator) on one or
 # more (arm, view, shard group) configs, scored by es_WM's evaluators (log replay, or the
@@ -28,7 +28,7 @@
 set -euo pipefail
 
 ES_COMMON="${SLURM_SUBMIT_DIR:-/nonexistent}/slurm/sim/es_disc_common.sh"
-[[ -r "$ES_COMMON" ]] || ES_COMMON=/home/yixiz/waymax_rs_es_newmodel/slurm/sim/es_disc_common.sh
+[[ -r "$ES_COMMON" ]] || ES_COMMON=/home/yixiz/waymax_rs_es_anchor/slurm/sim/es_disc_common.sh
 [[ -r "$ES_COMMON" ]] || { echo "FATAL: shared preamble $ES_COMMON missing" >&2; exit 1; }
 # shellcheck disable=SC1090
 source "$ES_COMMON"
