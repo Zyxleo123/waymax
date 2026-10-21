@@ -210,15 +210,19 @@ J=$(sbatch --parsable -p <gpu partition> --cpus-per-task=16 --mem=40G --array=0-
 sbatch -p <cpu partition> --dependency=afterany:$J slurm/sim/es_disc_cpu.sbatch $R/compare.env
 ```
 
-The fail1500 run cannot resume, because its training shards stayed on autonlab.
+The fail1500 run cannot resume from autonlab's copy, but Babel has the WOMD v1.3.1 training
+shards at `/data/datasets/waymo/waymo-open-dataset-v1.3.1/tf_example/training`. fail1500's 187
+shards are symlinked from there into `$NEWROOT/zfsauton/datasets/womd/tf_example/training/`
+(`verify_womd` PASS 187/187, 2026-10-19), so fail1500 runs again.
 
 **The new eval set** is `womd_compact/valfail1568/`: shards in `validation/`, plus
 `target_scenarios.json` in the ES runner's format and `manifest.json`. The source list is
 `mineuih/waymax_rs/exp/validation_0_150_failure_scenarios.json`, where index k means
-`validation_tfexample.tfrecord-<k:05d>-of-00150`. It is not wired in yet. It needs:
-- a subset directory like `es_posthoc/fail1500_subset_g2`, per group: a `target_scenarios.json`
-  and `tfrecords/validation/` symlinks into the compact shards
-- an `ES_SUBSET` case in `slurm/sim/submit_es_disc.sh`
+`validation_tfexample.tfrecord-<k:05d>-of-00150`. **Wired in (2026-10-19)** on branch
+`es_wm_anchor` (`~/waymax_rs_es_anchor`): `ES_SUBSET=valfail1568` (subset
+`es_posthoc/valfail1568_subset_g2`), plus `val10all` (every record of val shards 0-9) and
+`train2` (every record of train shards 0-1). Arms, protocol and results are in that branch's
+`docs/es_anchor.md`.
 
 ## 7. Claude memory
 
@@ -265,9 +269,17 @@ which corrects the notes written from `sinfo` on 10-18:
 
 ## Deliberately not copied
 
-- WOMD training shards (1.3 TB): not needed for evaluation. If they are needed later, take a
-  copy and pass `env/verify_womd.sbatch` before using it.
-- `mineuih/waymax_rs/lane_graphs` (58 GB): the ES runner's lane-graph loader is commented out.
+- WOMD training shards (1.3 TB): not copied, and not needed: Babel already has them (section 6).
+  Pass `env/verify_womd.sbatch` before trusting any other copy.
+- `mineuih/waymax_rs/lane_graphs` (58 GB). The note here used to say the ES runner's loader is
+  commented out. That is wrong: the runner feeds every scene's graph to the handcrafted ES reward
+  (route and progress terms). Only the red-light check that would also read it is commented out.
+  `scripts/rebuild_lane_graphs.py` rebuilt the graphs for the val10, fail1500 and valfail1568
+  targets into `$NEWROOT/zfsauton/scratch/yixiz/waymax_rs/lane_graphs_babel`, and
+  `mineuih/waymax_rs/lane_graphs` is a symlink to it. A cv regression on 10 val10 scenes matched
+  the original graphs. The zips are partial, so a scene missing from an existing zip crashes
+  `set_lane_graph(None)`. mineuih reports his full set at `/data/user_data/mineuih/waymax_rs/`,
+  unreadable to yixiz as of 2026-10-21.
 - `mineuih/waymax_rs/sim_state_cache_npz` (120 GB): used only by annotation and legacy code.
 - `yixiz/ScenarioMaxWaymo/training.tfrecord` (930 GB): from the SB3/V-Max era.
 - The conda envs (rebuilt) and `.jax_compilation_cache` (it is GPU-specific).
