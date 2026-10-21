@@ -76,7 +76,16 @@ def label_file(path: str, tfrecord_dir: str) -> str | None:
     d = dict(np.load(path))
     v1 = dict(np.load(path[:-4] + ".labels.npz"))
     v2 = dict(np.load(path[:-4] + ".labels_v2.npz"))
-    st = load_batch_state(d, tfrecord_dir)
+    labels = compute_waymax_labels(d, v1, v2, load_batch_state(d, tfrecord_dir))
+    tmp = out + ".tmp.npz"
+    np.savez_compressed(tmp, **labels)
+    os.replace(tmp, out)
+    return out
+
+
+def compute_waymax_labels(d: dict, v1: dict, v2: dict, st) -> dict[str, np.ndarray]:
+    """The `.labels_waymax.npz` arrays of a recorded batch `d` with its `.labels.npz` (`v1`) and
+    `.labels_v2.npz` (`v2`), given its scenarios' original simulator state `st`."""
     log = st.log_trajectory
     lx, ly, lyaw = np.asarray(log.x), np.asarray(log.y), np.asarray(log.yaw)
     llen, lwid, lz = np.asarray(log.length), np.asarray(log.width), np.asarray(log.z)
@@ -136,14 +145,11 @@ def label_file(path: str, tfrecord_dir: str) -> str | None:
     wm_unsafe = ov_step > 0
     agree = np.array([n, (v1_unsafe & wm_unsafe).sum(), (v1_unsafe & ~wm_unsafe).sum(),
                       (~v1_unsafe & wm_unsafe).sum()], np.int64)
-    tmp = out + ".tmp.npz"
-    np.savez_compressed(
-        tmp, gt_overlap_step=ov_step, gt_offroad_step=v2["gt_offroad_step"], label_horizon=v1["label_horizon"],
+    return dict(
+        gt_overlap_step=ov_step, gt_offroad_step=v2["gt_offroad_step"], label_horizon=v1["label_horizon"],
         anchor_overlap=anchor_ov, anchor_offroad=v2["anchor_offroad"],
         expert_overlap_step=exp_ov, expert_offroad_step=exp_off,
         overlap_vs_v1_collision=agree, label_version=np.asarray(3))
-    os.replace(tmp, out)
-    return out
 
 
 def summarize(data_dir: str) -> dict:

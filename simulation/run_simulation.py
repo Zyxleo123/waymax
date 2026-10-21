@@ -65,7 +65,7 @@ def _parse_args() -> argparse.Namespace:
         default="/zfsauton/scratch/mineuih/waymax_rs/exp"
     )
     parser.add_argument("--planner", type=str, default="diffusion",
-                         choices=["diffusion", "es", "es_fm", "vla", "log-replay", "temporal-vla", "fm"])
+                         choices=["diffusion", "es", "es_fm", "vla", "log-replay", "temporal-vla", "fm", "pdm_closed", "diffusion_planner"])
     parser.add_argument("--start_timestep", type=int, default=10)
     parser.add_argument("--mask_goal", action="store_true", default=False)
     parser.add_argument("--use_ema", action="store_true", default=True)
@@ -198,6 +198,14 @@ def _parse_args() -> argparse.Namespace:
         "(es_discriminator.es_candidate_recorder), discriminator training data. Planning is unchanged.",
     )
     parser.add_argument(
+        "--label_in_loop",
+        action="store_true",
+        default=False,
+        help="With --save_es_candidates: also write each batch's labels (.labels / .labels_v2 / .labels_waymax.npz) "
+        "and AnchorWM bank cache (<output_dir>/anchor_cache) as it finishes (anchor_wm.label_in_loop), in place of "
+        "the offline label / cache passes.",
+    )
+    parser.add_argument(
         "--discriminator_ckpt",
         type=str,
         default=None,
@@ -239,6 +247,27 @@ def _parse_args() -> argparse.Namespace:
         help="How non-ego agents move during evaluation rollout: 'log' = log replay, "
         "'idm' = IDM along logged routes. Planning still sees logged agents.",
     )
+    parser.add_argument(
+        "--pdm_cv_velocity_ratios",
+        type=str,
+        default="1.0",
+        help="PDM-Closed and --es_reward pdms: comma-separated constant-velocity ratios for the agent forecast. "
+        "'1.0' = upstream tuplan_garage; '0.8,1.0' = the nuplan_rs fork.",
+    )
+    parser.add_argument(
+        "--es_reward",
+        type=str,
+        default="rule",
+        choices=["rule", "pdms"],
+        help="Diffusion-ES reward: 'rule' = the handcrafted scorer (--metrics weights); 'pdms' = NAVSIM v1 PDM score "
+        "with PDM-Closed's constant-velocity forecast (planner/pdm_score.py).",
+    )
+    parser.add_argument("--dp_repo", type=str, default=None,
+                        help="Diffusion Planner only: path to the Diffusion-Planner checkout (a3a621f).")
+    parser.add_argument("--dp_args_file", type=str, default=None,
+                        help="Diffusion Planner only: args.json written by their train_predictor.py.")
+    parser.add_argument("--dp_ckpt", type=str, default=None,
+                        help="Diffusion Planner only: checkpoint (.pth) from their train_predictor.py.")
     return parser.parse_args()
 
 
@@ -693,13 +722,36 @@ def main(args: argparse.Namespace) -> None:
             elite_size=args.elite_size,
             num_iterations=args.num_es_iterations,
         )
+    elif args.planner == "pdm_closed":
+        from planner.pdm_closed_planner import PDMClosedPlanner
+
+        planner = PDMClosedPlanner(
+            num_worlds=args.num_worlds,
+            cv_velocity_ratios=[float(r) for r in args.pdm_cv_velocity_ratios.split(",")],
+        )
+    elif args.planner == "diffusion_planner":
+        from planner.diffusion_planner_baseline import DiffusionPlannerBaseline
+
+        planner = DiffusionPlannerBaseline(
+            args_file=args.dp_args_file,
+            ckpt_path=args.dp_ckpt,
+            num_worlds=args.num_worlds,
+            repo_path=args.dp_repo,
+            seed=args.seed,
+        )
     elif args.planner == "log-replay":
         planner = None
     if getattr(args, "discriminator_ckpt", None):
         _attach_learned_reward(args, planner)
     if getattr(args, "anchor_scorer_ckpt", None):
         _attach_anchor_reward(args, planner)
+    if args.es_reward == "pdms":
+        _attach_pdms_reward(args, planner)
+    if args.label_in_loop and not args.save_es_candidates:
+        raise ValueError("--label_in_loop needs --save_es_candidates.")
     run(args, planner, log_replay=(args.planner == "log-replay"))
+    if args.es_reward == "pdms":
+        print("[pdms] stats:", json.dumps(planner.learned_scorer.stats()))
 
     forecaster = getattr(planner, "world_model_forecaster", None)
     if forecaster is not None and hasattr(forecaster, "write_forecast_stats"):
@@ -759,8 +811,6 @@ def _attach_anchor_reward(args: argparse.Namespace, planner) -> None:
         raise ValueError("--anchor_scorer_ckpt requires --planner es (Diffusion-ES).")
     if getattr(args, "discriminator_ckpt", None):
         raise ValueError("--anchor_scorer_ckpt and --discriminator_ckpt are mutually exclusive.")
-    if getattr(args, "save_es_candidates", False):
-        raise ValueError("--save_es_candidates records handcrafted components; not with --anchor_scorer_ckpt.")
     from anchor_wm.closed_loop import AnchorForecaster, AnchorLearnedScorer
 
     forecaster = getattr(planner, "world_model_forecaster", None)
@@ -788,6 +838,27 @@ def _attach_anchor_reward(args: argparse.Namespace, planner) -> None:
         json.dump(info, f, indent=2)
     print(f"[anchor_scorer] learned reward {args.anchor_scorer_ckpt}; shares planner WM: {bool(shared)}; "
           f"forecast={args.other_agent_forecast}")
+
+
+def _attach_pdms_reward(args: argparse.Namespace, planner) -> None:
+    """NAVSIM v1 PDM score as the Diffusion-ES reward (planner.pdm_score.PDMScoreReward)."""
+    if args.planner != "es" or not hasattr(planner, "learned_scorer"):
+        raise ValueError("--es_reward pdms requires --planner es (Diffusion-ES).")
+    if getattr(args, "discriminator_ckpt", None) or getattr(args, "anchor_scorer_ckpt", None):
+        raise ValueError("--es_reward pdms excludes --discriminator_ckpt and --anchor_scorer_ckpt.")
+    from planner.pdm_score import PDMScoreReward
+
+    ratios = tuple(float(r) for r in args.pdm_cv_velocity_ratios.split(","))
+    scorer = PDMScoreReward(planner.scorers, num_worlds=args.num_worlds, cv_velocity_ratios=ratios)
+    planner.learned_scorer = scorer
+    info = {**scorer.describe(), "handcrafted_scorer_used": False, "seed": int(args.seed),
+            "planner_other_agent_forecast_unused": args.other_agent_forecast,
+            "es": {"population_size": args.population_size, "elite_size": args.elite_size,
+                   "num_es_iterations": args.num_es_iterations, "resample_timesteps": args.resample_timesteps},
+            "timestamp": datetime.now().isoformat(timespec="seconds")}
+    with open(os.path.join(args.output_dir, "pdms_reward_config.json"), "w") as f:
+        json.dump(info, f, indent=2)
+    print(f"[pdms] Diffusion-ES reward: NAVSIM v1 PDMS, constant-velocity ratios {ratios}")
 
 
 if __name__ == "__main__":

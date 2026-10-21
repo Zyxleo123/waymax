@@ -221,14 +221,16 @@ def step_geometry(cand: np.ndarray, ego_lw: np.ndarray, fut: dict, edges: dict, 
 
 
 def process_file(path: str, tfrecord_dir: str, cfg: AnchorWMConfig, check: bool, state=None,
-                 d: dict | None = None, prefilter: bool = True) -> dict:
-    """`state` (+ the loaded batch `d`): a simulator state already built by load_states_one_pass."""
+                 d: dict | None = None, prefilter: bool = True, lab: dict | None = None) -> dict:
+    """`state` (+ the loaded batch `d`): a simulator state already built by load_states_one_pass, or kept in
+    memory by the closed-loop run (anchor_wm.label_in_loop). `lab`: the batch's `.labels_waymax.npz` arrays
+    (read from disk when omitted)."""
     import jax
     from es_discriminator.analyze_es_decisions import load_batch_state
     from es_discriminator.real_es.check_alignment import replaced_state
 
     d = d if d is not None else dict(np.load(path))
-    lab = dict(np.load(path[:-4] + ".labels_waymax.npz"))
+    lab = lab if lab is not None else dict(np.load(path[:-4] + ".labels_waymax.npz"))
     st = jax.device_get(state if state is not None else load_batch_state(d, tfrecord_dir))
     log_payload = payload_from_sim_state(st)                              # other agents: log replay
     model_payload = payload_from_sim_state(replaced_state(st, d))        # executed ego history

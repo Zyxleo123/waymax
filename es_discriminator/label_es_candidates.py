@@ -121,7 +121,15 @@ def label_file(path: str, tfrecord_dir: str, max_num_objects: int, chunk: int) -
     ids = [s.decode() if isinstance(s, bytes) else str(s) for s in ids]
     if list(ids) != [str(s) for s in d["scen_id"]]:
         raise RuntimeError(f"{path}: reloaded scenario ids {ids} != recorded {list(d['scen_id'])}")
+    labels = compute_labels(d, st, chunk)
+    tmp = out_path + ".tmp.npz"
+    np.savez_compressed(tmp, **labels)
+    os.replace(tmp, out_path)
+    return out_path
 
+
+def compute_labels(d: dict, st, chunk: int) -> dict[str, np.ndarray]:
+    """The `.labels.npz` arrays of a recorded batch `d`, given its scenarios' original simulator state `st`."""
     scorer = Scorer(metrics=["collision", "offroad"], other_agent_forecast="gt")
     n_groups = len(d["group_t"])
     T = d["cand_traj"].shape[1]
@@ -170,11 +178,8 @@ def label_file(path: str, tfrecord_dir: str, max_num_objects: int, chunk: int) -
         for key, value in m.items():
             prog.setdefault(key, np.full((n,), np.nan, np.float32))[rows] = value
 
-    tmp = out_path + ".tmp.npz"
-    np.savez_compressed(tmp, gt_collision_step=coll_step, gt_offroad_step=off_step, label_horizon=label_h,
-                        anchor_collision=anchor_coll, anchor_offroad=anchor_off, **prog)
-    os.replace(tmp, out_path)
-    return out_path
+    return dict(gt_collision_step=coll_step, gt_offroad_step=off_step, label_horizon=label_h,
+                anchor_collision=anchor_coll, anchor_offroad=anchor_off, **prog)
 
 
 def main() -> None:

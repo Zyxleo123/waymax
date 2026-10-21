@@ -183,16 +183,7 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                 if not _advance_tfrecord():
                     break
                 continue
-            # Partial last batch on a shard: planner/batch_dims expect num_worlds.
-            # Drop leftovers rather than crash; prefer target lists divisible by num_worlds.
-            if len(scenario_indices) < int(args.num_worlds):
-                print(
-                    f"[target] dropping incomplete last batch of {len(scenario_indices)} "
-                    f"on {scenario_base_name} (need num_worlds={args.num_worlds})."
-                )
-                if not _advance_tfrecord():
-                    break
-                continue
+            # A partial last batch on a shard is padded after loading (below), not dropped.
         elif target_scenario_indices is not None:
             scenario_indices = []
             while len(scenario_indices) < int(args.num_worlds) and target_scenario_cursor < len(target_scenario_indices):
@@ -228,6 +219,7 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
             sim_state, _, scenario_ids = load_scenario_state_batch_fast(
                 ds_cfg, scenario_indices, return_scenario_ids=True
             )
+            batch_state = sim_state  # one world per real scenario (--label_in_loop labels against it)
             num_pad = int(args.num_worlds) - num_real
             if num_pad > 0:
                 sim_state = jax.tree_util.tree_map(
@@ -259,7 +251,7 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
             target_lane_ids = [None for _ in range(len(scenario_indices))]
             target_lane_xys = [None for _ in range(len(scenario_indices))]
         else:
-            if args.planner in ("es", "es_fm", "temporal-vla"):
+            if args.planner in ("es", "es_fm", "temporal-vla", "pdm_closed", "diffusion_planner"):
                 if args.lane_graph_dir:
                     requested_zip_path = lane_graph_zip_path_for_tfrecord(str(tfrecord_path), args.lane_graph_dir)
                     if lane_graph_zip_path != requested_zip_path:
@@ -335,7 +327,7 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
 
         success = goal_reached & (~overlap) & (~offroad)
         if candidate_recorder is not None:
-            candidate_recorder.finish_batch(replaced_state, {
+            batch_path = candidate_recorder.finish_batch(replaced_state, {
                 "overlap": overlap,
                 "offroad": offroad,
                 "goal_reached": goal_reached,
@@ -343,7 +335,12 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                 "success": success,
                 "min_goal_dist": np.asarray(goal_eval["min_goal_distance_m"]),
                 "final_goal_dist": np.asarray(goal_eval["final_goal_distance_m"]),
-            })
+            }, num_real=num_real)
+            if batch_path is not None and getattr(args, "label_in_loop", False):
+                from anchor_wm.label_in_loop import label_and_cache
+
+                info = label_and_cache(str(batch_path), batch_state, str(output_dir / "anchor_cache"))
+                print(f"[label_in_loop] {batch_path.name}: {json.dumps(info)}", flush=True)
         if num_real < len(scenario_indices):
             # Padded last batch: drop the padding copies.
             scenario_indices = scenario_indices[:num_real]

@@ -126,7 +126,7 @@ class DiffusionESPlanner(DiffusionPlanner):
         recorder = self.candidate_recorder
         if recorder is not None:
             recorder.begin_replan(sim_state, int(timestep), goal, self.world_model_forecaster)
-            recorder.record_stage(0, current_world_bkt5, [sc.last_components for sc in self.scorers], None)
+            recorder.record_stage(0, current_world_bkt5, self._stage_components(current_scores_bk), None)
         # print(f"Initial scores: {current_scores_bk} \n Shape: {current_scores_bk.shape} \n Mean: {jnp.mean(current_scores_bk)}, Std: {jnp.std(current_scores_bk)}")
         for iteration_index in range(self.num_iterations + 1):
             elite_indices_bk, elite_scores_bk = self._select_topk_per_scenario(
@@ -180,7 +180,7 @@ class DiffusionESPlanner(DiffusionPlanner):
                 recorder.record_stage(
                     iteration_index + 1,
                     current_world_bkt5,
-                    [sc.last_components for sc in self.scorers],
+                    self._stage_components(current_scores_bk),
                     self._elite_selector(self.elite_size, self.population_size),
                 )
             current_norm_bktd = jnp.concat([elite_norm_betd, current_norm_bktd], axis=1)
@@ -226,6 +226,15 @@ class DiffusionESPlanner(DiffusionPlanner):
             world_t_valid_bt=world_t_valid_bt,
             aux=aux,
         )
+
+    def _stage_components(self, scores_bk) -> list[dict]:
+        """Per-world score components of the population just scored, for the candidate recorder: the
+        handcrafted scorers' factors, or with a learned scorer its score as `total` (collision / offroad NaN)."""
+        if self.learned_scorer is None:
+            return [sc.last_components for sc in self.scorers]
+        scores = np.asarray(jax.device_get(scores_bk), dtype=np.float32)
+        nan = np.full(scores.shape[1], np.nan, dtype=np.float32)
+        return [{"total": scores[w], "collision": nan, "offroad": nan} for w in range(scores.shape[0])]
 
     def _resample_population(
         self,

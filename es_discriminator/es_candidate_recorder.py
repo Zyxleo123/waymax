@@ -153,11 +153,25 @@ class ESCandidateRecorder:
             "cands": [],
         }
 
-    def finish_batch(self, replaced_state, outcomes: dict[str, np.ndarray]) -> Path | None:
+    def finish_batch(self, replaced_state, outcomes: dict[str, np.ndarray], num_real: int | None = None) -> Path | None:
+        """`num_real`: worlds before the runner's padding (copies of the batch's last scenario on a short final
+        batch); the copies are dropped, so a batch file holds each scenario once."""
         if self._batch is None:
             return None
         b = self._batch
         self._batch = None
+        n = len(b["indices"]) if num_real is None else int(num_real)
+        if n < len(b["indices"]):
+            for key in ("indices", "ids"):
+                b[key] = b[key][:n]
+            for key in ("ego", "goal", "expert_world", "expert_valid"):
+                b[key] = b[key][:n]
+            keep = [i for i, g in enumerate(b["groups"]) if int(g["group_scen"]) < n]
+            new_index = {old: new for new, old in enumerate(keep)}
+            b["groups"] = [b["groups"][i] for i in keep]
+            b["cands"] = [dict(b["cands"][i], cand_group=np.full_like(b["cands"][i]["cand_group"], new_index[i]))
+                          for i in keep]
+            outcomes = {key: np.asarray(value)[:n] for key, value in outcomes.items()}
         log = jax.device_get(replaced_state.log_trajectory)
         w_idx = np.arange(len(b["indices"]))
         executed = np.stack([np.asarray(getattr(log, f))[w_idx, b["ego"]]

@@ -6,6 +6,13 @@ from pathlib import Path
 
 import torch
 
+# Load Triton before jax/tensorflow come in via waymax: loading its LLVM after
+# theirs segfaults in some environments (same guard as train_world_model.py).
+try:
+    import triton  # noqa: F401
+except ImportError:
+    pass
+
 from data.utils import resolve_cache_paths, split_cache_paths
 from data.world_model_cache_loader import build_world_model_cache_loader
 from model.world_model.config import WorldModelConfig

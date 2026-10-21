@@ -130,7 +130,15 @@ def relabel_file(path: str, tfrecord_dir: str) -> None:
         return
     d = dict(np.load(path))
     lab = dict(np.load(path[:-4] + ".labels.npz"))
-    st = load_batch_state(d, tfrecord_dir)
+    v2 = compute_labels_v2(d, lab, load_batch_state(d, tfrecord_dir))
+    tmp = out + ".tmp.npz"
+    np.savez_compressed(tmp, **v2)
+    os.replace(tmp, out)
+
+
+def compute_labels_v2(d: dict, lab: dict, st) -> dict[str, np.ndarray]:
+    """The `.labels_v2.npz` arrays (Waymax-exact offroad) of a recorded batch `d` with its `.labels.npz` `lab`,
+    given its scenarios' original simulator state `st`."""
     log_z = np.asarray(st.log_trajectory.z)
     is_sdc = np.asarray(st.object_metadata.is_sdc).astype(bool)
     T = d["cand_traj"].shape[1]
@@ -155,11 +163,9 @@ def relabel_file(path: str, tfrecord_dir: str) -> None:
         off_step[rows] = first_step(flags)
         now = np.array([o[0], o[1], hd, L, W])
         anchor_off[g] = bool(offroad_poses(now[None], np.array([log_z[w, e, t]]), edges[w])[0])
-    tmp = out + ".tmp.npz"
-    np.savez_compressed(tmp, gt_offroad_step=off_step, anchor_offroad=anchor_off,
-                        gt_collision_step=lab["gt_collision_step"], anchor_collision=lab["anchor_collision"],
-                        label_horizon=lab["label_horizon"], label_version=np.asarray(2))
-    os.replace(tmp, out)
+    return dict(gt_offroad_step=off_step, anchor_offroad=anchor_off,
+                gt_collision_step=lab["gt_collision_step"], anchor_collision=lab["anchor_collision"],
+                label_horizon=lab["label_horizon"], label_version=np.asarray(2))
 
 
 # ---- stage 2: scene-level Waymax metrics ---------------------------------------------
