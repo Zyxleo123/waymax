@@ -8,6 +8,11 @@ from pathlib import Path
 from datetime import datetime
 from typing import Any
 from flax import nnx
+import tensorflow as tf
+
+# TensorFlow only reads the tfrecords here. A GPU build of it (babel's envs) otherwise claims the whole GPU on
+# first use and JAX then fails to launch its kernels (CUDA_ERROR_OUT_OF_MEMORY).
+tf.config.set_visible_devices([], "GPU")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:

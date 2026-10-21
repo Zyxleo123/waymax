@@ -29,6 +29,9 @@ class DiffusionPlanner(AbstractPlanner):
         self.preprocess_cfg = preprocess_cfg
         self.num_worlds = int(num_worlds)
         self.population_size = int(population_size)
+        # The policies of branch new_model (diffusion_policy_v2) take the scene condition only; the earlier ones
+        # also an instruction / subgoal condition, which is fed zeros here.
+        self._instruction_conditioned = hasattr(policy, "instruction_encoder")
         self._compute_condition_jit = jax.jit(self.policy.compute_condition)
         self._sample_population_jit = jax.jit(
             lambda *, cond_bf, inst_cond_bf, inst_cond_mask_bf, rng: self._sample_population(
@@ -62,19 +65,10 @@ class DiffusionPlanner(AbstractPlanner):
             world_dt_method="median",
         )
         features = pre_batch.features
-        if instruction is None:
-            instruction = jnp.zeros((self.num_worlds, self.preprocess_cfg.inst_dim), dtype=jnp.float32)
-            instruction_mask = jnp.zeros((self.num_worlds,), dtype=jnp.float32)
-        else:
-            raise NotImplementedError("Conditioning on instruction is not yet implemented.")
-        features["inst_features"] = instruction
-        features["inst_valid"] = instruction_mask
         if mask_goal:
             features["goal_xy"] = jnp.zeros_like(features["goal_xy"])
             features["remaining_timesteps"] = jnp.zeros_like(features["remaining_timesteps"])
-        features["subgoal_xy"] = jnp.zeros((self.num_worlds, 2), dtype=jnp.float32)
-        features["subgoal_valid"] = jnp.zeros((self.num_worlds,), dtype=jnp.float32)
-        cond_bf, inst_cond_bf = self._compute_condition_jit(features)
+        cond_bf, inst_cond_bf, instruction_mask = self._compute_condition(features, instruction)
 
         current_norm_bktd = self._sample_population_jit(
             cond_bf=cond_bf,
@@ -99,19 +93,41 @@ class DiffusionPlanner(AbstractPlanner):
             aux=pre_batch.aux,
         )
 
+    def _compute_condition(
+        self,
+        features: dict[str, jax.Array],
+        instruction: jnp.ndarray | None,
+    ) -> tuple[jax.Array, jax.Array | None, jax.Array | None]:
+        """Scene condition ``[B, ...]``, plus the instruction condition and its mask for an instruction-conditioned
+        policy (``None`` otherwise). Adds the (zero) instruction / subgoal inputs to ``features`` for those."""
+        if instruction is not None:
+            raise NotImplementedError("Conditioning on instruction is not yet implemented.")
+        if not self._instruction_conditioned:
+            return self._compute_condition_jit(features), None, None
+        instruction_mask = jnp.zeros((self.num_worlds,), dtype=jnp.float32)
+        features["inst_features"] = jnp.zeros((self.num_worlds, self.preprocess_cfg.inst_dim), dtype=jnp.float32)
+        features["inst_valid"] = instruction_mask
+        features["subgoal_xy"] = jnp.zeros((self.num_worlds, 2), dtype=jnp.float32)
+        features["subgoal_valid"] = jnp.zeros((self.num_worlds,), dtype=jnp.float32)
+        cond_bf, inst_cond_bf = self._compute_condition_jit(features)
+        return cond_bf, inst_cond_bf, instruction_mask
+
     def _sample_population(
         self,
         *,
         cond_bf: jax.Array,
-        inst_cond_bf: jax.Array,
-        inst_cond_mask_bf: jax.Array,
+        inst_cond_bf: jax.Array | None,
+        inst_cond_mask_bf: jax.Array | None,
         rng: jax.Array,
     ) -> jax.Array:
         batch_size = int(cond_bf.shape[0])
         cond_bkf = jnp.repeat(cond_bf, repeats=self.population_size, axis=0)
-        inst_cond_bf = jnp.repeat(inst_cond_bf, repeats=self.population_size, axis=0)
-        inst_cond_mask_bf = jnp.repeat(inst_cond_mask_bf, repeats=self.population_size, axis=0)
-        samples_btd = self.policy.sample_from_condition(cond_bkf, inst_cond_bf, inst_cond_mask_bf, rng=rng)
+        if inst_cond_bf is None:
+            samples_btd = self.policy.sample_from_condition(cond_bkf, rng=rng)
+        else:
+            inst_cond_bf = jnp.repeat(inst_cond_bf, repeats=self.population_size, axis=0)
+            inst_cond_mask_bf = jnp.repeat(inst_cond_mask_bf, repeats=self.population_size, axis=0)
+            samples_btd = self.policy.sample_from_condition(cond_bkf, inst_cond_bf, inst_cond_mask_bf, rng=rng)
         horizon = int(samples_btd.shape[1])
         target_dim = int(samples_btd.shape[2])
         return samples_btd.reshape(batch_size, self.population_size, horizon, target_dim)

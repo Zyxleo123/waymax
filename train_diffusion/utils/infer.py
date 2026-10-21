@@ -13,6 +13,7 @@ import numpy as np
 from flax import nnx
 
 from model.diffusion.diffusion_policy import DiffusionPolicy
+from model.diffusion.diffusion_policy_v2 import DiffusionPolicy as DiffusionPolicyV2
 from train_diffusion.utils.checkpoints import restore_checkpoint
 from train_diffusion.utils.utils import coerce_tree_like
 from data.types import PreprocessConfig
@@ -78,7 +79,14 @@ def _load_checkpoint_metadata(
     return metadata
 
 
+def is_v2_checkpoint(metadata: dict[str, Any]) -> bool:
+    """A checkpoint of branch new_model's DiffusionPolicy (diffusion_policy_v2): no instruction / subgoal
+    condition, so its metadata has no ``inst_dim`` (it records ``goal_conditioned`` instead)."""
+    return "inst_dim" not in metadata
+
+
 def _build_preprocess_cfg(metadata: dict[str, Any]) -> PreprocessConfig:
+    v2 = is_v2_checkpoint(metadata)
     return PreprocessConfig(
         model_dt=float(metadata["model_dt"]),
         world_dt_fallback=0.1,
@@ -92,11 +100,27 @@ def _build_preprocess_cfg(metadata: dict[str, Any]) -> PreprocessConfig:
         map_unknown_type_index=20,
         max_segments=int(metadata["max_num_segments"]),
         max_points_per_segment=int(metadata["max_points_per_segment"]),
-        inst_dim=int(metadata["inst_dim"]),
+        inst_dim=int(metadata.get("inst_dim", 768)),
+        # new_model's checkpoints were trained on its random per-segment point sampling.
+        map_point_sampling="random" if v2 else "nearest",
     )
 
 
-def _build_model_from_metadata(metadata: dict[str, Any], seed: int) -> DiffusionPolicy:
+def _build_model_from_metadata(metadata: dict[str, Any], seed: int) -> DiffusionPolicy | DiffusionPolicyV2:
+    if is_v2_checkpoint(metadata):
+        return DiffusionPolicyV2(
+            target_dim=int(metadata["target_dim"]),
+            hidden_dim=int(metadata["hidden_dim"]),
+            cond_dim=int(metadata["cond_dim"]),
+            map_attr_dim=int(metadata["map_attr_dim"]),
+            tl_attr_dim=int(metadata["tl_attr_dim"]),
+            other_dim=int(metadata.get("other_dim", 15)),
+            predict_horizon=int(metadata["predict_horizon"]),
+            predict_type=str(metadata["predict_type"]),
+            goal_conditioned=bool(metadata.get("goal_conditioned", True)),
+            num_denoising_steps=int(metadata.get("num_denoising_steps", 100)),
+            rngs=nnx.Rngs(int(seed)),
+        )
     return DiffusionPolicy(
         target_dim=int(metadata["target_dim"]),
         hidden_dim=int(metadata["hidden_dim"]),

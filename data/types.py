@@ -27,6 +27,9 @@ class PreprocessConfig:
     max_points_per_segment: int = 128
     num_object_types: int = 8
     inst_dim: int = 768
+    # "nearest" | "random": how map segments and their points are picked (data.preprocess._build_map_features).
+    # Static, so jitted code can branch on it.
+    map_point_sampling: str = struct.field(pytree_node=False, default="nearest")
 
 
 @struct.dataclass

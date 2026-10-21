@@ -58,6 +58,8 @@ def extract_ego_index(state: datatypes.SimulatorState) -> jax.Array:
 
 # How `compute_world_dt_seconds` reads a scene's dt off its timestamps.
 WORLD_DT_METHODS = ("first", "median")
+# How `_build_map_features` picks map segments and their points (``PreprocessConfig.map_point_sampling``).
+MAP_POINT_SAMPLINGS = ("nearest", "random")
 
 
 def compute_world_dt_seconds(state: datatypes.SimulatorState, fallback_dt: float = 0.1,
@@ -203,10 +205,22 @@ def _build_map_features(
     origin_xy_b2: jax.Array,
     heading_b: jax.Array,
     cfg: PreprocessConfig,
+    rng: jax.Array | None = None,
     *,
     allowed_types: tuple[int, ...] | None = None,
     max_segments: int | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Map segments around the anchor, ``cfg.map_point_sampling`` picking segments and points:
+
+    * ``"nearest"`` -- the first ``max_segments`` ids in id order, each with its points nearest the anchor.
+    * ``"random"`` -- the ``max_segments`` segments nearest the anchor (mean point distance), each with a
+      random subset of its in-range points (``rng``). Branch new_model's map features, which its checkpoints
+      were trained with.
+    """
+    if cfg.map_point_sampling not in MAP_POINT_SAMPLINGS:
+        raise ValueError(f"map_point_sampling must be one of {MAP_POINT_SAMPLINGS}, got {cfg.map_point_sampling!r}")
+    if cfg.map_point_sampling == "random" and rng is None:
+        raise ValueError("map_point_sampling='random' needs an rng")
     x_bm = state.roadgraph_points.x
     y_bm = state.roadgraph_points.y
     dir_x_bm = state.roadgraph_points.dir_x
@@ -219,13 +233,15 @@ def _build_map_features(
     max_points_per_segment = int(cfg.max_points_per_segment)
     feat_dim = 2 + 2 + cfg.num_map_type_classes
     sentinel_id = jnp.iinfo(jnp.int32).max
+    batch_keys = jax.random.split(jax.random.PRNGKey(0) if rng is None else rng, x_bm.shape[0])
 
-    def _build_for_batch(batch_idx: int) -> tuple[jax.Array, jax.Array]:
+    def _build_for_batch(batch_idx: int, rng_b: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
         xy = jnp.stack([x_bm[batch_idx], y_bm[batch_idx]], axis=-1)
         dirs = jnp.stack([dir_x_bm[batch_idx], dir_y_bm[batch_idx]], axis=-1)
         types = types_bm[batch_idx]
         ids = ids_bm[batch_idx]
         valid = valid_bm[batch_idx]
+        num_points = ids.shape[0]
 
         centered = xy - origin_xy_b2[batch_idx][None, :]
         dist = jnp.linalg.norm(centered, axis=-1)
@@ -237,7 +253,7 @@ def _build_map_features(
         empty_valid = jnp.zeros((max_segments, max_points_per_segment), dtype=jnp.bool_)
         empty_ids = jnp.zeros((max_segments,), dtype=jnp.int32)
 
-        def _build(_: None) -> tuple[jax.Array, jax.Array]:
+        def _build_nearest(_: None) -> tuple[jax.Array, jax.Array, jax.Array]:
             sort_ids = jnp.where(valid_and_range, ids, sentinel_id)
             sort_dist = jnp.where(valid_and_range, dist, jnp.inf)
             order = jnp.lexsort((sort_dist, sort_ids))
@@ -305,14 +321,62 @@ def _build_map_features(
             segment_ids = jnp.where(unique_ids == sentinel_id, 0, unique_ids[:max_segments]).astype(jnp.int32)
             return segment_feats, segment_valids, segment_ids
 
+        def _build_random(_: None) -> tuple[jax.Array, jax.Array, jax.Array]:
+            grouped_ids = jnp.where(valid_and_range, ids, sentinel_id)
+            unique_ids, inverse, counts = jnp.unique(
+                grouped_ids,
+                return_inverse=True,
+                return_counts=True,
+                size=num_points,
+                fill_value=sentinel_id,
+            )
+            sum_dist = jnp.zeros((num_points,), dtype=dist.dtype).at[inverse].add(
+                jnp.where(valid_and_range, dist, 0.0)
+            )
+            mean_dist = sum_dist / jnp.maximum(counts.astype(dist.dtype), 1.0)
+            mean_dist = jnp.where(unique_ids == sentinel_id, jnp.inf, mean_dist)
+            segment_rank = jnp.lexsort((unique_ids, mean_dist))
+            selected_ids = unique_ids[segment_rank[:max_segments]]
+
+            point_scores = jax.random.uniform(rng_b, (num_points,))
+
+            def _build_segment(seg_idx: jax.Array) -> tuple[jax.Array, jax.Array]:
+                seg_id = selected_ids[seg_idx]
+                in_seg = valid_and_range & (ids == seg_id)
+                scores = jnp.where(in_seg, point_scores, jnp.asarray(2.0, dtype=point_scores.dtype))
+                pick = jnp.argsort(scores)[:max_points_per_segment]
+                seg_xy = xy[pick]
+                seg_dirs = dirs[pick]
+                seg_types = types[pick]
+                seg_valid = scores[pick] < 1.0
+
+                xy_rel = _rotate_xy(seg_xy - origin_xy_b2[batch_idx][None, :], heading_b[batch_idx]) / cfg.max_range
+                dir_rel = _rotate_xy(seg_dirs, heading_b[batch_idx])
+                dir_norm = jnp.linalg.norm(dir_rel, axis=-1, keepdims=True)
+                dir_rel = dir_rel / jnp.maximum(dir_norm, 1e-6)
+
+                ty_safe = jnp.where(
+                    (seg_types >= 0) & (seg_types < cfg.num_map_type_classes),
+                    seg_types,
+                    jnp.full_like(seg_types, cfg.map_unknown_type_index),
+                )
+                type_oh = jax.nn.one_hot(ty_safe, cfg.num_map_type_classes, dtype=jnp.float32)
+                seg_feat = jnp.concatenate([xy_rel.astype(jnp.float32), dir_rel.astype(jnp.float32), type_oh], axis=-1)
+                seg_feat = jnp.where(seg_valid[:, None], seg_feat, 0.0)
+                return seg_feat, seg_valid
+
+            segment_feats, segment_valids = jax.vmap(_build_segment)(jnp.arange(max_segments, dtype=jnp.int32))
+            segment_ids = jnp.where(selected_ids == sentinel_id, 0, selected_ids).astype(jnp.int32)
+            return segment_feats, segment_valids, segment_ids
+
         return jax.lax.cond(
             jnp.any(valid_and_range),
-            _build,
+            _build_random if cfg.map_point_sampling == "random" else _build_nearest,
             lambda _: (empty_feat, empty_valid, empty_ids),
             operand=None,
         )
 
-    feats, valids, ids = jax.vmap(_build_for_batch)(jnp.arange(x_bm.shape[0], dtype=jnp.int32))
+    feats, valids, ids = jax.vmap(_build_for_batch)(jnp.arange(x_bm.shape[0], dtype=jnp.int32), batch_keys)
     return feats, valids, ids
 
 
@@ -455,12 +519,16 @@ def _preprocess_single_batch(
     goal_xy = _rotate_xy(goal_xy_world - origin_xy, anchor_yaw) / cfg.ego_range
     remaining_timesteps = (goal_step_b - anchor_step_b) / 100.0
 
-    map_features, map_valid, map_ids = _build_map_features(state, origin_xy, anchor_yaw, cfg)
+    rng_map = rng_lane = None
+    if cfg.map_point_sampling == "random":  # leaves rng untouched for "nearest"
+        rng, rng_map, rng_lane = jax.random.split(rng, 3)
+    map_features, map_valid, map_ids = _build_map_features(state, origin_xy, anchor_yaw, cfg, rng_map)
     lane_features, lane_valid, lane_ids = _build_map_features(
         state,
         origin_xy,
         anchor_yaw,
         cfg,
+        rng_lane,
         allowed_types=LANE_MAP_ELEMENT_TYPES,
         max_segments=64,
     )

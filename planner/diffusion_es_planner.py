@@ -96,19 +96,10 @@ class DiffusionESPlanner(DiffusionPlanner):
             world_dt_method="median",
         )
         features = pre_batch.features
-        if instruction is None:
-            instruction = jnp.zeros((self.num_worlds, self.preprocess_cfg.inst_dim), dtype=jnp.float32)
-            instruction_mask = jnp.zeros((self.num_worlds,), dtype=jnp.float32)
-        else:
-            raise NotImplementedError("Conditioning on instruction is not yet implemented.")
-        features["inst_features"] = instruction
-        features["inst_valid"] = instruction_mask
         if mask_goal:
             features["goal_xy"] = jnp.zeros_like(features["goal_xy"])
             features["remaining_timesteps"] = jnp.zeros_like(features["remaining_timesteps"])
-        features["subgoal_xy"] = jnp.zeros((self.num_worlds, 2), dtype=jnp.float32)
-        features["subgoal_valid"] = jnp.zeros((self.num_worlds,), dtype=jnp.float32)
-        cond_bf, inst_cond_bf = self._compute_condition_jit(pre_batch.features)
+        cond_bf, inst_cond_bf, instruction_mask = self._compute_condition(features, instruction)
 
         current_norm_bktd = self._sample_population_jit(
             cond_bf=cond_bf,
@@ -240,20 +231,22 @@ class DiffusionESPlanner(DiffusionPlanner):
         self,
         *,
         cond_bf: jax.Array,
-        inst_cond_bf: jax.Array,
-        inst_cond_mask_bf: jax.Array,
+        inst_cond_bf: jax.Array | None,
+        inst_cond_mask_bf: jax.Array | None,
         proposals_bktd: jax.Array,
         rng: jax.Array,
     ) -> jax.Array:
         batch_size, population_size, horizon, target_dim = proposals_bktd.shape
         cond_bkf = jnp.repeat(cond_bf, repeats=population_size, axis=0)
-        inst_cond_bkf = jnp.repeat(inst_cond_bf, repeats=population_size, axis=0)
-        inst_cond_mask_bkf = jnp.repeat(inst_cond_mask_bf, repeats=population_size, axis=0)
         flat_proposals = proposals_bktd.reshape(batch_size * population_size, horizon, target_dim)
+        if inst_cond_bf is None:
+            inst_args = ()
+        else:
+            inst_args = (jnp.repeat(inst_cond_bf, repeats=population_size, axis=0),
+                         jnp.repeat(inst_cond_mask_bf, repeats=population_size, axis=0))
         samples_btd = self.policy.resample_from_condition(
             cond_bkf,
-            inst_cond_bkf,
-            inst_cond_mask_bkf,
+            *inst_args,
             flat_proposals,
             self.resample_timesteps,
             rng=rng,
