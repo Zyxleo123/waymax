@@ -24,7 +24,10 @@
 #         IDMRoutePolicy and the planner observes the simulated NPCs. Stock IDM races every
 #         unobstructed NPC toward 30 m/s; kept so the nm_* runs stay reproducible
 #   idm_brake  the same loop, NPCs capped at their own logged speed and braking for the ego only
-#         (simulation/sim_agents.py; gate: ES_CPU_MODE=test_idm_brake). The default here.
+#         (simulation/sim_agents.py; gate: ES_CPU_MODE=test_idm_brake)
+#   idm_faithful  idm_brake with log-replay existence (no NPC alive outside its log, no (-1,-1)
+#         sentinel teleports) and no acceleration lag: the human's own log scores as under log
+#         replay (scripts/diagnose_idm_gap.py). The default here.
 # Every scene JSON also carries es_WM's original failure window (*_oldwin).
 # POLICY: mineuih goal_cond_diffusion_policy/epoch_1000 (mini-hong/waymax_rs@new_model architecture and
 # map-feature sampling, ported into this worktree; see es_disc_common.sh for why not "latest").
@@ -72,7 +75,7 @@ case "$SMOKE" in
 esac
 # Longest first, so the slow arms start early.
 ARMS="${ES_ARMS_SEL:-wm_mf_disc_posthoc,wmI_mf_disc_posthoc,wm_mf_posthoc,wmI_mf_posthoc,cv_posthoc,gt,wm_mf_disc,cv,wm_mf,wmI_mf,wm_mf_tb,wmI_mf_tb,diff_posthoc,diff}"
-VIEWS="${ES_VIEWS:-log,idm_brake}"
+VIEWS="${ES_VIEWS:-log,idm_faithful}"
 PACK="${ES_PACK:-groups}"
 mkdir -p "$OUT/cfg" "$OUT/env" "$ES_LOG_DIR"
 sb() { env -i HOME="$HOME" PATH="$PATH" USER="${USER:-}" sbatch "$@"; }
@@ -101,7 +104,7 @@ write_cfg() {
   { kv ES_OUT "$OUT"; kv ES_ARM "$arm"; kv ES_VIEW "$view"; kv ES_PLANNER "$pl"; kv ES_FORECAST "$fc"
     kv ES_POSTHOC "$ph"; kv ES_DISC_CKPT "$disc"; kv ES_DISC_WM_CKPT "$DISC_WM"
     kv ES_ISHAN_WM_CKPT "$ISHAN_WM"; kv ES_OFFROAD_MODE "$om"
-    kv ES_ALSO_EVAL "$([[ "$view" == log ]] && echo "${ES_ALSO_EVAL:-idm,idm_brake}" || echo "")"
+    kv ES_ALSO_EVAL "$([[ "$view" == log ]] && echo "${ES_ALSO_EVAL:-idm,idm_faithful}" || echo "")"
     kv ES_WORLD_DT_METHOD "${ES_WORLD_DT_METHOD:-median}"; kv ES_SAVE_TRAJ "${ES_SAVE_TRAJ:-1}"
     kv ES_GROUP_DIR "$gdir"; kv ES_SPLIT "$SPLIT"
     kv ES_DIFFUSION_CKPT "$POLICY"; kv ES_MF_WM_CKPT "$MF_WM"; kv ES_SEED "${ES_SEED:-0}"

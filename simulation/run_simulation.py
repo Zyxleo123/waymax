@@ -226,19 +226,20 @@ def _parse_args() -> argparse.Namespace:
         "--other_agents",
         type=str,
         default="log",
-        choices=["log", "idm", "idm_brake"],
+        choices=["log", "idm", "idm_brake", "idm_faithful"],
         help="Non-ego agents: 'log' replays the log; 'idm' runs Waymax's default IDMRoutePolicy "
         "on every non-SDC object in a closed loop with the planner (simulation/idm_closed_loop.py); "
         "'idm_brake' the same loop with IDM capped at each NPC's logged speed, braking for the ego "
-        "only (simulation/sim_agents.py).",
+        "only; 'idm_faithful' idm_brake with log-replay existence and no acceleration lag, so the "
+        "human's own log scores as under log replay (simulation/sim_agents.py).",
     )
     parser.add_argument(
         "--sim_agents",
         type=str,
         default="log",
-        choices=["log", "idm", "idm_brake"],
+        choices=["log", "idm", "idm_brake", "idm_faithful"],
         help="How non-ego agents move during the EVALUATION rollout only: 'log' = log replay, "
-        "'idm' / 'idm_brake' = IDM along logged routes (simulation/sim_agents.py). Planning still "
+        "'idm' / 'idm_brake' / 'idm_faithful' = IDM along logged routes (simulation/sim_agents.py). Planning still "
         "sees logged agents (open loop for the NPCs); for a true closed loop use --other_agents.",
     )
     parser.add_argument(

@@ -37,6 +37,7 @@ from simulation.planning_utils import (
     sim_state_to_ego_trajectory,
 )
 from simulation.idm_closed_loop import predict_planner_trajectories_closed_loop_idm
+from simulation.sim_agents import REACTIVE_CHOICES
 from planner.abstract_planner import AbstractPlanner, PlannerResult
 
 from simulation.utils import _save_json  # noqa: E402
@@ -269,7 +270,7 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                     scorer_helpers.update_lane_points(
                         planner.scorers[world_idx], sim_state, world_idx
                     )
-            if getattr(args, "other_agents", "log") in ("idm", "idm_brake"):
+            if getattr(args, "other_agents", "log") in REACTIVE_CHOICES:
                 replan_fn = predict_planner_trajectories_closed_loop_idm
             else:
                 replan_fn = predict_planner_trajectories_with_periodic_replan
@@ -527,7 +528,7 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                 "success_oldwin": bool(success_old[i]),
                 # WOMD scenario/id: joins against es_discriminator's scenario-hash train/val/test split.
                 "scenario_id": str(scenario_ids[i]) if scenario_ids is not None else None,
-                # log = NPCs replay the log; idm / idm_brake = closed-loop IDM (simulation/idm_closed_loop.py).
+                # log = NPCs replay the log; idm / idm_brake / idm_faithful = closed-loop IDM (simulation/idm_closed_loop.py).
                 "other_agents": str(getattr(args, "other_agents", "log")),
                 "discriminator": bool(getattr(args, "discriminator_ckpt", None)),
             }

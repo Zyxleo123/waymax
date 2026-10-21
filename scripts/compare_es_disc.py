@@ -12,6 +12,7 @@ Reported views (all over the scenes EVERY arm of that run view finished):
   log_idm_evalonly         the log run's executed ego re-scored with evaluation-only IDM NPCs
                            (the previous protocol's "idm" view; not a closed loop)
   idm_brake / idm_brake_oldwin, log_idm_brake_evalonly   the same, with idm_brake NPCs
+  idm_faithful / idm_faithful_oldwin, log_idm_faithful_evalonly   the same, with idm_faithful NPCs
 Per arm: success, collision, off-road, goal-not-reached rates; per pair (b:a) the paired
 success difference with a scene-bootstrap 95% CI and the discordant counts.
 
@@ -50,14 +51,22 @@ VIEWS = {
     "idm_brake": ("idm_brake", {k: k for k in KEYS}),
     "idm_brake_oldwin": ("idm_brake", {"success": "success_oldwin", "offroad": "offroad_oldwin",
                                        "overlap": "overlap_oldwin", "goal_reached": "goal_reached"}),
+    "log_idm_faithful_evalonly": ("log", {"success": "idm_faithful_success", "offroad": "idm_faithful_offroad",
+                                          "overlap": "idm_faithful_overlap", "goal_reached": "goal_reached"}),
+    "idm_faithful": ("idm_faithful", {k: k for k in KEYS}),
+    "idm_faithful_oldwin": ("idm_faithful", {"success": "success_oldwin", "offroad": "offroad_oldwin",
+                                             "overlap": "overlap_oldwin", "goal_reached": "goal_reached"}),
 }
 TITLES = {"log": "log replay", "log_oldwin": "log replay, es_WM original window",
           "log_idm_evalonly": "log run re-scored with evaluation-only IDM (old protocol)",
           "idm": "closed-loop IDM (es_WM evaluator)", "idm_oldwin": "closed-loop IDM, es_WM original window",
           "log_idm_brake_evalonly": "log run re-scored with evaluation-only idm_brake NPCs",
           "idm_brake": "closed-loop idm_brake (NPCs capped at logged speed, brake for ego)",
-          "idm_brake_oldwin": "closed-loop idm_brake, es_WM original window"}
-SPLIT_VIEWS = ("log", "idm", "idm_brake")
+          "idm_brake_oldwin": "closed-loop idm_brake, es_WM original window",
+          "log_idm_faithful_evalonly": "log run re-scored with evaluation-only idm_faithful NPCs",
+          "idm_faithful": "closed-loop idm_faithful (idm_brake + log-replay existence, no acceleration lag)",
+          "idm_faithful_oldwin": "closed-loop idm_faithful, es_WM original window"}
+SPLIT_VIEWS = ("log", "idm", "idm_brake", "idm_faithful")
 
 
 def load_arm(d: Path, expected_agents: str) -> dict:

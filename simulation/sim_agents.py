@@ -20,6 +20,7 @@ one change for this pipeline -- see :func:`build_sim_agents` on late entrants.
 
 from __future__ import annotations
 
+import jax
 import numpy as np
 from jax import numpy as jnp
 from waymax import datatypes
@@ -30,10 +31,11 @@ from waymax.agents.waypoint_following_agent import (
     IDMRoutePolicy,
     _add_headway_waypoints,
     _find_reference_traj_from_log_traj,
+    _project_to_a_trajectory,
 )
 from waymax.utils import geometry
 
-REACTIVE_CHOICES = ("idm", "idm_brake")
+REACTIVE_CHOICES = ("idm", "idm_brake", "idm_faithful")
 
 
 class BrakingIDMPolicy(IDMRoutePolicy):
@@ -77,6 +79,10 @@ class BrakingIDMPolicy(IDMRoutePolicy):
 
     def _get_accel(self, log_waypoints, cur_position, cur_speed, obj_curr_traj):
         """Waymax's ``IDMRoutePolicy._get_accel`` with the SDC as the only possible leader."""
+        return self._accel_and_lead_dist(log_waypoints, cur_position, cur_speed, obj_curr_traj)[0]
+
+    def _accel_and_lead_dist(self, log_waypoints, cur_position, cur_speed, obj_curr_traj):
+        """``(accel, lead_dist)``; ``lead_dist`` is ``_DEFAULT_LEAD_DISTANCE`` when no leader is in the lookahead."""
         num_obj = obj_curr_traj.num_objects
         prefix_shape = obj_curr_traj.shape[:-2]
 
@@ -128,14 +134,100 @@ class BrakingIDMPolicy(IDMRoutePolicy):
             + cur_speed * (cur_speed - lead_vel) / (2 * jnp.sqrt(self.max_accel * self.max_decel)),
         )
         s_star = jnp.where((lead_dist == _DEFAULT_LEAD_DISTANCE) | (lead_vel == _DEFAULT_LEAD_VELOCITY), 0, s_star)
+        found = lead_dist
         lead_dist = jnp.where(lead_dist == 0, _MINIMUM_LEAD_DISTANCE, lead_dist)
-        return self.max_accel * (1 - (cur_speed / self.desired_vel) ** self.delta - (s_star / lead_dist) ** 2)
+        accel = self.max_accel * (1 - (cur_speed / self.desired_vel) ** self.delta - (s_star / lead_dist) ** 2)
+        return accel, found
 
     def update_trajectory(self, state):
         # _get_accel's signature is fixed by waymax, so the SDC mask rides on self for
         # the duration of this call (traced once per jit; the actor stays stateless).
         self._is_sdc_j = jnp.asarray(state.object_metadata.is_sdc)[..., None, :]
         return super().update_trajectory(state)
+
+
+class FaithfulIDMPolicy(BrakingIDMPolicy):
+    """``idm_brake`` with the two defects the expert replay exposed removed.
+
+    scripts/diagnose_idm_gap.py replays the human's own log (val10): stock ``idm`` makes
+    it collide in ~6.5% of scenes (log replay 0.2%), and ``idm_brake`` still invents
+    collisions of two kinds, both fixed here:
+
+    * **Lag.** IDM's free-road acceleration is at most ``max_accel`` = 2 m/s^2, so an NPC
+      whose human pulled away harder falls behind its recording with nothing in its way,
+      and ``v <= v_log`` keeps the lag forever; the ego, on the human's path, rear-ends it.
+      An NPC with no leader here accelerates at ``max(IDM, a_log)`` (``a_log`` = its human's
+      own acceleration at this step), so on schedule it reproduces ``v_log`` exactly, and
+      after braking for the ego it recovers at >= ``max_accel``. With the ego ahead it is
+      plain IDM, still capped at ``v_log``.
+    * **Existence.** waymax's ``apply_trajectory_update_to_state`` keeps a controlled object
+      that exists valid whatever the policy says (``next_valid = current.valid`` for
+      ``exist_and_controlled``). So ``invalidate_on_end`` does not remove a finished NPC: it
+      parks it at the (-1, -1) sentinel, still valid, and the next projection drops it back
+      onto its path; and an NPC whose log has ended is driven on past it. Here an NPC is
+      controlled only while it exists AND its log is valid at t+1 (``build_sim_agents``);
+      otherwise the environment takes it from the log, which removes it when the log does
+      and injects late entrants at their logged pose -- log replay's existence exactly.
+      ``invalidate_on_end`` is off, so the policy never writes the sentinel.
+    * **Run-away.** Once an agent is at the end of its logged path or > 5 m off it, waymax's
+      projection (``invalidate_on_end=False``) freezes its velocity and extrapolates it in a
+      straight line for good: a jittery parked car whose log reads 27 m/s for one step leaves
+      at 27 m/s and never comes back (val10 shard 5 scene 169; stock idm's whole ``off_path``
+      class, p50 16 m off). Here such an agent is snapped to its nearest logged waypoint with
+      zero velocity and stays valid -- waymax's ``invalidate_on_end=True`` branch without the
+      invalidation that the environment turns into the sentinel teleport.
+    """
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("invalidate_on_end", False)
+        super().__init__(*args, **kwargs)
+
+    def update_speed(self, state, dt: float = 0.1):
+        cur = state.current_sim_trajectory
+        cur_speed = cur.speed[..., 0]
+        accel, lead_dist = self._accel_and_lead_dist(state.log_trajectory, cur.xyz[..., 0, :], cur_speed, cur)
+        log = state.log_trajectory
+        n_t = jnp.asarray(log.x).shape[-1]
+        now = datatypes.dynamic_slice(log, jnp.clip(state.timestep, 0, n_t - 1), 1, axis=-1)
+        nxt = datatypes.dynamic_slice(log, jnp.clip(state.timestep + 1, 0, n_t - 1), 1, axis=-1)
+        v_now, v_next = now.speed[..., 0], nxt.speed[..., 0]
+        a_log = jnp.where(now.valid[..., 0] & nxt.valid[..., 0], (v_next - v_now) / dt, 0.0)
+        accel = jnp.where(lead_dist == _DEFAULT_LEAD_DISTANCE, jnp.maximum(accel, a_log), accel)
+        speed = jnp.maximum(cur_speed + dt * accel, 0.0)
+        cap = jnp.where(nxt.valid[..., 0], v_next, jnp.inf)
+        return jnp.minimum(speed, cap), jnp.ones_like(cur_speed, dtype=jnp.bool_)
+
+    def _get_next_trajectory_by_projection(self, log_traj, cur_sim_traj, new_speed, new_speed_valid, dt=0.1):
+        """waymax's ``WaypointFollowingPolicy._get_next_trajectory_by_projection``, minus the run-away:
+        an agent at its path's end or > 5 m off it snaps to the nearest waypoint at rest (no extrapolation,
+        no frozen velocity) and keeps its validity."""
+        cur_speed = cur_sim_traj.speed
+        valid = new_speed_valid[..., jnp.newaxis]
+        new_speed = jnp.where(valid, new_speed[..., jnp.newaxis], cur_speed)
+        dist_travel = (new_speed + cur_speed) / 2 * dt
+        next_x = cur_sim_traj.x + dist_travel * jnp.cos(cur_sim_traj.yaw)
+        next_y = cur_sim_traj.y + dist_travel * jnp.sin(cur_sim_traj.yaw)
+        next_xy, next_yaw, reached = _project_to_a_trajectory(
+            jnp.stack([next_x, next_y], axis=-1), log_traj, extrapolate_traj=False
+        )
+        next_traj = cur_sim_traj.replace(
+            x=next_xy[..., 0],
+            y=next_xy[..., 1],
+            yaw=next_yaw,
+            vel_x=jnp.where(reached, 0.0, new_speed * jnp.cos(cur_sim_traj.yaw)),
+            vel_y=jnp.where(reached, 0.0, new_speed * jnp.sin(cur_sim_traj.yaw)),
+            valid=valid & cur_sim_traj.valid,
+        )
+        next_traj.validate()
+        invalid_traj = jax.tree_util.tree_map(datatypes.make_invalid_data, next_traj)
+        return jax.tree_util.tree_map(lambda x, y: jnp.where(next_traj.valid, x, y), next_traj, invalid_traj)
+
+
+def _exists_with_log_next(st):
+    """NPCs that exist now and whose log is valid at t+1; the environment moves the rest by the log."""
+    n_t = jnp.asarray(st.log_trajectory.x).shape[-1]
+    nxt = datatypes.dynamic_slice(st.log_trajectory, jnp.clip(st.timestep + 1, 0, n_t - 1), 1, axis=-1)
+    return ~st.object_metadata.is_sdc & st.current_sim_trajectory.valid[..., 0] & nxt.valid[..., 0]
 
 
 def build_sim_agents(kind: str):
@@ -161,4 +253,6 @@ def build_sim_agents(kind: str):
             return ~st.object_metadata.is_sdc & st.current_sim_trajectory.valid[..., 0]
 
         return [BrakingIDMPolicy(is_controlled_func=present_npc)], [None]
+    if kind == "idm_faithful":
+        return [FaithfulIDMPolicy(is_controlled_func=_exists_with_log_next)], [None]
     raise ValueError(f"Unknown non-ego agent model {kind!r}; expected log | {' | '.join(REACTIVE_CHOICES)}.")

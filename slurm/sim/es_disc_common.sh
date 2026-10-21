@@ -10,7 +10,9 @@
 #   ES_VIEW         log = NPCs replay the log; idm = es_WM's closed-loop IDM
 #                   (simulation/idm_closed_loop.py: the planner sees the simulated NPCs);
 #                   idm_brake = the same loop with IDM capped at each NPC's logged speed,
-#                   braking for the ego only (simulation/sim_agents.py)
+#                   braking for the ego only (simulation/sim_agents.py); idm_faithful = idm_brake
+#                   with log-replay existence and no acceleration lag (the human's log scores as
+#                   under log replay; scripts/diagnose_idm_gap.py)
 #   ES_PLANNER      es (Diffusion-ES) | diffusion (the policy alone, one sample per replan)
 #   ES_FORECAST     cv | gt | wm_mf (Sagar's MF WM) | wm_mf_ishan (Ishan's MF WM)
 #                   (feeds the ES scorer AND the repair's neighbours)
@@ -18,7 +20,7 @@
 #   ES_POSTHOC      1 = o_am repair of every candidate before scoring (planner/posthoc_repair.py)
 #   ES_DISC_CKPT    non-empty = es_WM's learned discriminator replaces the handcrafted ES reward
 #   ES_DISC_WM_CKPT the frozen MF world model whose forecasts the discriminator was trained on
-#   ES_ALSO_EVAL    extra evaluation-only NPC models for the log view (idm, idm_brake; empty otherwise)
+#   ES_ALSO_EVAL    extra evaluation-only NPC models for the log view (idm, idm_brake, idm_faithful; empty otherwise)
 #   ES_GROUP_DIR / ES_SPLIT / ES_NUM_SCENARIOS / ES_WORLD_DT_METHOD / ES_SAVE_TRAJ / ES_SEED
 #   ES_NUM_WORLDS / ES_POP / ES_ELITE / ES_IT / ES_RESAMPLE_TIMESTEPS / ES_REPLAN_INTERVAL
 
@@ -80,7 +82,7 @@ es_run_one() {
   local policy="${ES_DIFFUSION_CKPT:-$ES_DEFAULT_POLICY}" mf_wm="${ES_MF_WM_CKPT:-$ES_DEFAULT_MF_WM}"
   local disc="${ES_DISC_CKPT-}" disc_wm="${ES_DISC_WM_CKPT:-$ES_DEFAULT_DISC_WM}"
   local ishan_wm="${ES_ISHAN_WM_CKPT:-$ES_DEFAULT_ISHAN_WM}" offroad_mode="${ES_OFFROAD_MODE:-binary}"
-  case "$view" in log|idm|idm_brake) ;; *) echo "FATAL: ES_VIEW=$view not log|idm|idm_brake" >&2; return 1 ;; esac
+  case "$view" in log|idm|idm_brake|idm_faithful) ;; *) echo "FATAL: ES_VIEW=$view not log|idm|idm_brake|idm_faithful" >&2; return 1 ;; esac
   if [[ "$view" != log && -n "$also_eval" ]]; then
     echo "FATAL: ES_ALSO_EVAL=$also_eval is evaluation-only; the $view view is already closed loop" >&2; return 1
   fi
