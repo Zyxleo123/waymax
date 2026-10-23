@@ -237,6 +237,20 @@ def _parse_args() -> argparse.Namespace:
         "factors in --anchor_scorer_rule_terms. 0 = learned score only.",
     )
     parser.add_argument("--anchor_scorer_rule_terms", type=str, default="collision,offroad")
+    parser.add_argument(
+        "--anchor_ego_seed",
+        type=int,
+        default=0,
+        help="Diffusion-ES with --wm_backend anchor: append the planner WM's K ego modes to every initial "
+        "population (anchor_wm.es_debug.AnchorEgoSeeder). 0 = off.",
+    )
+    parser.add_argument(
+        "--es_debug_dir",
+        type=str,
+        default=None,
+        help="Diffusion-ES with --wm_backend anchor: dump every replan (scene, AnchorWM ego modes, ES pools, "
+        "chosen plan, seed lineage) to this dir for anchor_wm.viz_ego_seed.",
+    )
     parser.add_argument("--start_from", type=str, default=None)
     parser.add_argument("--target_scenario_path", type=str, default=None)
     parser.add_argument(
@@ -747,6 +761,8 @@ def main(args: argparse.Namespace) -> None:
         _attach_anchor_reward(args, planner)
     if args.es_reward == "pdms":
         _attach_pdms_reward(args, planner)
+    if args.anchor_ego_seed > 0 or args.es_debug_dir:
+        _attach_es_debug(args, planner)
     if args.label_in_loop and not args.save_es_candidates:
         raise ValueError("--label_in_loop needs --save_es_candidates.")
     run(args, planner, log_replay=(args.planner == "log-replay"))
@@ -838,6 +854,21 @@ def _attach_anchor_reward(args: argparse.Namespace, planner) -> None:
         json.dump(info, f, indent=2)
     print(f"[anchor_scorer] learned reward {args.anchor_scorer_ckpt}; shares planner WM: {bool(shared)}; "
           f"forecast={args.other_agent_forecast}")
+
+
+def _attach_es_debug(args: argparse.Namespace, planner) -> None:
+    """AnchorWM ego-mode seeding of the ES initial population and / or per-replan dumps (anchor_wm.es_debug)."""
+    from anchor_wm.closed_loop import AnchorForecaster
+    from anchor_wm.es_debug import AnchorEgoSeeder, ESDebugDumper
+
+    forecaster = getattr(planner, "world_model_forecaster", None)
+    if args.planner != "es" or not isinstance(forecaster, AnchorForecaster):
+        raise ValueError("--anchor_ego_seed / --es_debug_dir need --planner es with --wm_backend anchor.")
+    if args.anchor_ego_seed > 0:
+        planner.ego_seed_fn = AnchorEgoSeeder(forecaster.model, args.anchor_ego_seed)
+    if args.es_debug_dir:
+        planner.debug_dump_fn = ESDebugDumper(forecaster.model, args.es_debug_dir, k=max(6, args.anchor_ego_seed))
+    print(f"[es_debug] ego seeds {args.anchor_ego_seed} from {forecaster.checkpoint}; dumps -> {args.es_debug_dir}")
 
 
 def _attach_pdms_reward(args: argparse.Namespace, planner) -> None:

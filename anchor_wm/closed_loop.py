@@ -63,6 +63,27 @@ def _inputs(model, sim_state, timestep: int) -> tuple[dict, dict]:
     return f, {"payload": payload, "origin_xy": arrays["origin_xy"], "origin_yaw": arrays["origin_yaw"]}
 
 
+@torch.no_grad()
+def ego_modes_world(model, sim_state, timestep: int, k: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The model's own forecast of the ego: k modes (endpoint NMS as the planner modes), world frame at the
+    model future steps (future_dt apart, first step future_dt after now): xy [B,k,T,2], yaw [B,k,T], probs [B,k]
+    renormalized over the k."""
+    cfg = model.config
+    f, meta = _inputs(model, sim_state, timestep)
+    _, dec = model(f)
+    rows = torch.arange(f["ego_idx"].shape[0], device=f["ego_idx"].device)
+    ego = f["ego_idx"].long()
+    sel = select_modes(dec, k, cfg.nms_dist_m, cfg.max_range)[rows, ego][:, None]           # [B,1,k]
+    delta = gather_k(dec["pred_xy_k"].float()[rows, ego][:, None], sel)[:, 0].cpu().numpy() * cfg.max_range
+    yaw_vec = gather_k(dec["yaw_vec_k"].float()[rows, ego][:, None], sel)[:, 0].cpu().numpy()
+    p = dec["probs"].float()[rows, ego].gather(-1, sel[:, 0])
+    p = (p / p.sum(-1, keepdim=True).clamp_min(1e-12)).cpu().numpy()
+    oyaw = meta["origin_yaw"]
+    xy = rotate_xy_np(delta, -oyaw[:, None, None]) + meta["origin_xy"][:, None, None]          # ego is the origin
+    yaw = wrap_to_pi(oyaw[:, None, None] + np.arctan2(yaw_vec[..., 0], yaw_vec[..., 1]))
+    return xy, yaw, p
+
+
 class AnchorForecaster:
     num_collision_worlds = 1
     collision_reduce = "any"

@@ -14,6 +14,10 @@ Each yielded batch stacks B groups:
   lane_xy / lane_dir / lane_id / lane_valid   cache_bank "C"
 K candidates per group are sampled at random during training (`cands_per_group`, at most `max_unsafe_frac`
 of them unsafe, as B0's stratified sampling), or all 320 for evaluation (`cands_per_group=0`).
+
+An index entry is (batch file, group indices) or (batch file, group indices, cache dir); the third element lets
+one index span several banks (each with its own cache), else the loader's `cache_dir` is used. `focus_index`
+selects the groups worth oversampling (the replans just before a closed-loop failure, and near misses).
 """
 
 from __future__ import annotations
@@ -81,6 +85,53 @@ def build_index(bank_dir: str, cache_dir: str, split_json: str, invalid_json: st
         if m.any():
             index.append((f, np.flatnonzero(m)))
     return index, counts
+
+
+def _scene_failure_t(z, anchor_bad: np.ndarray) -> np.ndarray:
+    """Per scene of a bank file: absolute timestep of the closed-loop failure (first overlap / offroad), or a
+    large value when the scene did not fail. Banks recorded with the runner's `overlap_step` / `offroad_step`
+    give it exactly; older ones bound it by the first replan whose pose is already in violation (else the end)."""
+    n = len(z["scen_index"])
+    failed = z["scen_overlap"].astype(bool) | z["scen_offroad"].astype(bool)
+    out = np.full(n, 10 ** 6, np.int64)
+    if "scen_overlap_step" in z.files:
+        steps = np.stack([z["scen_overlap_step"], z["scen_offroad_step"]]).astype(np.int64)
+        steps = np.where(steps >= 0, steps, 10 ** 6).min(0)
+        return np.where(failed, steps, out)
+    g_scen, g_t = z["group_scen"].astype(int), z["group_t"].astype(np.int64)
+    for s in np.flatnonzero(failed):
+        bad_t = g_t[(g_scen == s) & anchor_bad]
+        out[s] = bad_t.min() if len(bad_t) else int(z["scen_executed_world"].shape[1]) - 1
+    return out
+
+
+def focus_index(index: list[tuple], window_steps: int, near_miss: bool = True) -> tuple[list[tuple], dict]:
+    """Sub-index of the usable groups worth oversampling: replans in the `window_steps` (0.1 s) before a failed
+    scene's first overlap / offroad, and (with `near_miss`) replans whose selected candidate is labelled unsafe
+    although the episode may have recovered."""
+    out, counts = [], {"pre_failure": 0, "near_miss": 0, "focus": 0, "of_groups": 0}
+    for entry in index:
+        f, groups = entry[0], np.asarray(entry[1])
+        with np.load(f) as z:
+            with np.load(f[:-4] + ".labels_waymax.npz") as lw:
+                anchor_bad = lw["anchor_overlap"].astype(bool) | lw["anchor_offroad"].astype(bool)
+                unsafe = (lw["gt_overlap_step"] > 0) | (lw["gt_offroad_step"] > 0)
+            fail_t = _scene_failure_t(z, anchor_bad)
+            g_t, g_scen = z["group_t"].astype(np.int64), z["group_scen"].astype(int)
+            lead = fail_t[g_scen] - g_t
+            pre = (lead > 0) & (lead <= int(window_steps))
+            sel_bad = np.zeros(len(g_t), bool)
+            if near_miss:
+                pick = z["cand_selected"].astype(bool) & unsafe
+                sel_bad[np.unique(z["cand_group"][pick])] = True
+        keep = groups[pre[groups] | sel_bad[groups]]
+        counts["pre_failure"] += int(pre[groups].sum())
+        counts["near_miss"] += int(sel_bad[groups].sum())
+        counts["focus"] += len(keep)
+        counts["of_groups"] += len(groups)
+        if len(keep):
+            out.append((f, keep, *entry[2:]))
+    return out, counts
 
 
 def _sample_cands(unsafe: np.ndarray, k: int, max_unsafe_frac: float, rng: np.random.Generator) -> np.ndarray:
@@ -159,8 +210,8 @@ class BankGroupDataset(IterableDataset):
         np_rng = np.random.default_rng(self.seed * 1000 + wid)
         buf: list[dict] = []
         for i in order[wid::nw]:
-            f, groups = self.index[i]
-            recs = load_file_groups(f, self.cache_dir, groups, cands_per_group=self.cands_per_group,
+            f, groups, *cache = self.index[i]
+            recs = load_file_groups(f, cache[0] if cache else self.cache_dir, groups, cands_per_group=self.cands_per_group,
                                     max_unsafe_frac=self.max_unsafe_frac, rng=np_rng)
             if self.shuffle:
                 np_rng.shuffle(recs)

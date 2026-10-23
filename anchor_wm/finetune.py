@@ -30,7 +30,7 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
-from anchor_wm.bank_data import build_index, make_bank_loader
+from anchor_wm.bank_data import build_index, focus_index, make_bank_loader
 from anchor_wm.config import AnchorWMConfig
 from anchor_wm.data import make_loader, resolve_cache_paths, split_cache_paths
 from anchor_wm.losses import bank_eval_metrics, bank_score_loss, bank_simple_loss, bank_targets
@@ -48,9 +48,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--init_ckpt", required=True)
     p.add_argument("--resume", default="", help="a latest.pt / final.pt of this script: continue its weights, optimizer, "
                                                "step and learning-rate schedule (same --max_steps and model flags)")
-    p.add_argument("--bank_dir", required=True)
-    p.add_argument("--cache_dir", required=True)
-    p.add_argument("--split_json", required=True)
+    p.add_argument("--bank_dir", required=True, nargs="+", help="one or more banks' es_candidates dirs (aggregated)")
+    p.add_argument("--cache_dir", required=True, nargs="+", help="their anchor caches, one per --bank_dir")
+    p.add_argument("--split_json", required=True, nargs="+", help="their scenario splits, one per bank or one for all")
     p.add_argument("--invalid_json", default="")
     p.add_argument("--save_dir", required=True)
     p.add_argument("--run_name", default="ft")
@@ -102,6 +102,11 @@ def parse_args() -> argparse.Namespace:
     # self-generated candidates (WOMD cache shards)
     p.add_argument("--self_cache_dir", default="", help="WOMD cache shards for self-generated batches")
     p.add_argument("--self_frac", type=float, default=0.25)
+    p.add_argument("--focus_frac", type=float, default=0.0,
+                   help="share of bank batches drawn from focus groups (bank_data.focus_index): replans in the "
+                   "--focus_window_s before a closed-loop failure and near misses. 0 = uniform over groups.")
+    p.add_argument("--focus_window_s", type=float, default=3.0)
+    p.add_argument("--no_near_miss", action="store_true", help="focus groups: pre-failure replans only")
     # bookkeeping
     p.add_argument("--log_every", type=int, default=50)
     p.add_argument("--val_every", type=int, default=1000)
@@ -162,7 +167,7 @@ def score_bank(model, f: dict, scale: float, train_wm: bool, chunk: int = 0):
 @torch.no_grad()
 def validate(model, val_index, args, device, amp) -> dict:
     model.eval()
-    loader = make_bank_loader(val_index, args.cache_dir, batch_groups=4, cands_per_group=0, shuffle=False,
+    loader = make_bank_loader(val_index, args.cache_dir[0], batch_groups=4, cands_per_group=0, shuffle=False,
                               seed=0, num_workers=2)
     # Each metric is averaged over the batches where it is defined (safety AUROC needs a group with both
     # safe and unsafe candidates, which most batches of 4 lack), not over all batches.
@@ -184,6 +189,28 @@ def validate(model, val_index, args, device, amp) -> dict:
     return {k: v / counts[k] for k, v in sums.items()}
 
 
+def validate_all(model, val_index, val_focus_index, args, device, amp) -> dict:
+    """Validation metrics on the val split, plus `focus_*` on its focus groups when there are any."""
+    vm = validate(model, val_index, args, device, amp)
+    if val_focus_index:
+        vm.update({f"focus_{k}": v for k, v in validate(model, val_focus_index, args, device, amp).items()})
+    return vm
+
+
+def build_multi_index(args):
+    """Train / val indexes over every --bank_dir, each entry tagged with its bank's cache dir, and counts."""
+    if len(args.cache_dir) != len(args.bank_dir) or len(args.split_json) not in (1, len(args.bank_dir)):
+        raise ValueError("need one --cache_dir per --bank_dir and one --split_json per bank (or one for all)")
+    splits = args.split_json * len(args.bank_dir) if len(args.split_json) == 1 else args.split_json
+    out = {"train": ([], {}), "val": ([], {})}
+    for bank, cache, split in zip(args.bank_dir, args.cache_dir, splits):
+        for name in out:
+            index, counts = build_index(bank, cache, split, args.invalid_json, (name,))
+            out[name][0].extend((f, g, cache) for f, g in index)
+            out[name][1][bank] = counts
+    return out["train"][0], out["val"][0], out["train"][1], out["val"][1]
+
+
 def main() -> None:
     args = parse_args()
     random.seed(args.seed)
@@ -203,13 +230,23 @@ def main() -> None:
     base_lrs = [g["lr"] for g in groups]
     scale = 1.0 if args.unfreeze_decoder else 0.0
 
-    train_index, train_counts = build_index(args.bank_dir, args.cache_dir, args.split_json, args.invalid_json, ("train",))
-    val_index, val_counts = build_index(args.bank_dir, args.cache_dir, args.split_json, args.invalid_json, ("val",))
+    train_index, val_index, train_counts, val_counts = build_multi_index(args)
     if not train_index or not val_index:
         raise RuntimeError(f"empty bank index: train {train_counts}, val {val_counts}")
-    bank_loader = lambda epoch: make_bank_loader(  # noqa: E731
-        train_index, args.cache_dir, batch_groups=args.batch_groups, cands_per_group=args.cands_per_group,
-        max_unsafe_frac=args.max_unsafe_frac, shuffle=True, seed=args.seed + epoch, num_workers=args.num_workers)
+
+    def bank_loader_for(index):
+        return lambda epoch: make_bank_loader(
+            index, args.cache_dir[0], batch_groups=args.batch_groups, cands_per_group=args.cands_per_group,
+            max_unsafe_frac=args.max_unsafe_frac, shuffle=True, seed=args.seed + epoch, num_workers=args.num_workers)
+
+    bank_loader = bank_loader_for(train_index)
+    focus_batches, val_focus_index = None, []
+    if args.focus_frac > 0:
+        window = int(round(args.focus_window_s * 10))
+        focus_train, train_counts["focus"] = focus_index(train_index, window, near_miss=not args.no_near_miss)
+        val_focus_index, val_counts["focus"] = focus_index(val_index, window, near_miss=not args.no_near_miss)
+        if not focus_train:
+            raise RuntimeError(f"--focus_frac {args.focus_frac} but no focus groups: {train_counts['focus']}")
 
     def cycle(fn):
         epoch = 0
@@ -219,6 +256,8 @@ def main() -> None:
             epoch += 1
 
     bank_batches = cycle(bank_loader)
+    if args.focus_frac > 0:
+        focus_batches = cycle(bank_loader_for(focus_train))
     self_batches = None
     targs = None
     if args.self_cache_dir and args.self_frac > 0:
@@ -260,7 +299,7 @@ def main() -> None:
         step, best = int(rk["step"]), rk.get("best")
         print(json.dumps({"resumed": args.resume, "step": step, "best": best}), flush=True)
     running, n_run = {}, 0
-    val0 = validate(model, val_index, args, device, amp)
+    val0 = validate_all(model, val_index, val_focus_index, args, device, amp)
     print(json.dumps({"step": step, "val": {k: round(v, 4) for k, v in val0.items()}}), flush=True)
     if wb is not None:
         wb.log({f"val/{k}": v for k, v in val0.items()}, step=step)
@@ -279,7 +318,8 @@ def main() -> None:
                 loss, m = scorer_step(model, enc, dec, f, targs, cfg, 0.0, gen)
                 m = {f"self/{k}": v for k, v in m.items()}
             else:
-                f = move(next(bank_batches), device)
+                use_focus = focus_batches is not None and rng.random() < args.focus_frac
+                f = move(next(focus_batches if use_focus else bank_batches), device)
                 total, sub, aux, _, _ = score_bank(model, f, scale, args.unfreeze_decoder)
                 tg = bank_targets(f)
                 if args.scorer_loss == "simple":
@@ -310,7 +350,7 @@ def main() -> None:
             running, n_run = {}, 0
         stop = bool(args.max_hours) and (time.time() - t0) / 3600 >= args.max_hours
         if step % args.val_every == 0 or step == args.max_steps or stop:
-            vm = validate(model, val_index, args, device, amp)
+            vm = validate_all(model, val_index, val_focus_index, args, device, amp)
             print(json.dumps({"step": step, "val": {k: round(v, 4) for k, v in vm.items()}}), flush=True)
             if wb is not None:
                 wb.log({f"val/{k}": v for k, v in vm.items()}, step=step)

@@ -155,6 +155,24 @@ def episode_failure_flags(
     return ((metric_tb > 0) & window_tb).any(axis=0)
 
 
+def episode_failure_step(
+    metric_tb,
+    rollout_timestep,
+    *,
+    start_timestep: int,
+    goal_reached_b,
+    goal_reached_step_b,
+    num_log_steps: int,
+) -> np.ndarray:
+    """Per world: first absolute timestep in the window of ``episode_failure_flags`` where the metric fired, else -1."""
+    metric_tb = np.asarray(metric_tb)
+    t = np.asarray(rollout_timestep)[: metric_tb.shape[0]]
+    reached = np.asarray(goal_reached_b).astype(bool)
+    end_b = np.where(reached, np.asarray(goal_reached_step_b), int(num_log_steps) - 1)
+    fired_tb = (metric_tb > 0) & (t[:, None] >= int(start_timestep)) & (t[:, None] <= end_b[None, :])
+    return np.where(fired_tb.any(axis=0), t[np.argmax(fired_tb, axis=0)], -1).astype(np.int64)
+
+
 def infer_goals_from_sim_state(sim_state) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Infers one goal per world from ego's last valid log position."""
     x_bnt = jnp.asarray(sim_state.log_trajectory.x)

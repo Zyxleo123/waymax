@@ -32,6 +32,7 @@ from simulation.evaluation_utils import (
     check_goal_reaching,
     check_traffic_light_violation,
     episode_failure_flags,
+    episode_failure_step,
 )
 from simulation.planning_utils import (
     predict_planner_trajectories_with_periodic_replan,
@@ -323,6 +324,17 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
             )
             for name in ("overlap", "offroad")
         )
+        overlap_step, offroad_step = (
+            episode_failure_step(
+                rollout["metric_timeseries"][name],
+                rollout["timestep"],
+                start_timestep=int(args.start_timestep),
+                goal_reached_b=goal_reached,
+                goal_reached_step_b=goal_reached_step,
+                num_log_steps=rollout["num_log_steps"],
+            )
+            for name in ("overlap", "offroad")
+        )
         # tl_violation = tl_violation & (tl_violation_step < goal_reached_step)
 
         success = goal_reached & (~overlap) & (~offroad)
@@ -330,6 +342,8 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
             batch_path = candidate_recorder.finish_batch(replaced_state, {
                 "overlap": overlap,
                 "offroad": offroad,
+                "overlap_step": overlap_step,
+                "offroad_step": offroad_step,
                 "goal_reached": goal_reached,
                 "reached_step": goal_reached_step,
                 "success": success,
@@ -345,6 +359,7 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
             # Padded last batch: drop the padding copies.
             scenario_indices = scenario_indices[:num_real]
             overlap, offroad, success = overlap[:num_real], offroad[:num_real], success[:num_real]
+            overlap_step, offroad_step = overlap_step[:num_real], offroad_step[:num_real]
             goal_eval = {key: value[:num_real] for key, value in goal_eval.items()}
         reached_all += int(np.sum(goal_eval["reached"]))
         success_all += int(np.sum(success))
@@ -482,6 +497,8 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                 "final_goal_distance_m": float(goal_eval["final_goal_distance_m"][i]),
                 "overlap": bool(overlap[i]),
                 "offroad": bool(offroad[i]),
+                "overlap_timestep": int(overlap_step[i]),
+                "offroad_timestep": int(offroad_step[i]),
                 "success": bool(success[i]),
                 "tfrecord": str(tfrecord_path),
             }

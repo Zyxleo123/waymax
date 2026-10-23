@@ -49,6 +49,11 @@ class DiffusionESPlanner(DiffusionPlanner):
         # Optional es_discriminator.real_es.closed_loop.LearnedESScorer; when set it replaces the
         # handcrafted scorers for every population (hence every elite and the final selection).
         self.learned_scorer = None
+        # Optional (sim_state, timestep) -> (xy [B,M,T,2], yaw [B,M,T], ...) world-frame ego trajectories at the
+        # policy's model steps, appended to the initial population (anchor_wm.es_debug.AnchorEgoSeeder).
+        self.ego_seed_fn = None
+        # Optional (sim_state, timestep, goal, info: dict) callback after every replan (anchor_wm.es_debug).
+        self.debug_dump_fn = None
         self.scorers = [
             Scorer(
                 metrics=metrics,
@@ -107,6 +112,15 @@ class DiffusionESPlanner(DiffusionPlanner):
             inst_cond_mask_bf=instruction_mask,
             rng=key_sample,
         )
+        num_seeds = 0
+        if self.ego_seed_fn is not None:
+            seed_xy, seed_yaw = self.ego_seed_fn(sim_state, timestep)[:2]
+            seeds_bmtd = self._world_to_norm(seed_xy, seed_yaw, pre_batch.aux, current_norm_bktd.shape)
+            num_seeds = int(seeds_bmtd.shape[1])
+            current_norm_bktd = jnp.concatenate([current_norm_bktd, seeds_bmtd.astype(current_norm_bktd.dtype)], axis=1)
+        # 1 = descends from an ego seed (through elite resampling), 0 = from the diffusion samples.
+        origin_bk = np.zeros(current_norm_bktd.shape[:2], np.int8)
+        origin_bk[:, origin_bk.shape[1] - num_seeds:] = 1
         current_world_bkt5, world_t_seconds_bt, world_t_valid_bt = self._postprocess_population(
             current_norm_bktd,
             pre_batch,
@@ -123,7 +137,13 @@ class DiffusionESPlanner(DiffusionPlanner):
                     world_idx=world_idx
                 ))
             current_scores_bk = jnp.stack(current_scores_bk)
+        debug = None
+        if self.debug_dump_fn is not None:
+            debug = {"num_seeds": num_seeds, "init_world": np.asarray(current_world_bkt5),
+                     "init_scores": np.asarray(current_scores_bk), "init_origin": origin_bk.copy(), "elite_seed_frac": []}
         recorder = self.candidate_recorder
+        if recorder is not None and num_seeds:
+            raise ValueError("ego seeding changes the initial population size; not with the candidate recorder")
         if recorder is not None:
             recorder.begin_replan(sim_state, int(timestep), goal, self.world_model_forecaster)
             recorder.record_stage(0, current_world_bkt5, self._stage_components(current_scores_bk), None)
@@ -135,8 +155,13 @@ class DiffusionESPlanner(DiffusionPlanner):
             )
             if recorder is not None:
                 recorder.record_elites(iteration_index, elite_indices_bk)
+            elite_origin_be = np.take_along_axis(origin_bk, np.asarray(elite_indices_bk), axis=1)
+            if debug is not None:
+                debug["elite_seed_frac"].append(elite_origin_be.mean(1))
             if iteration_index == self.num_iterations:
                 break
+            origin_bk = np.concatenate(
+                [elite_origin_be, elite_origin_be[:, self._elite_selector(self.elite_size, self.population_size)]], axis=1)
 
             elite_norm_betd = self._gather_population(
                 current_norm_bktd,
@@ -217,6 +242,14 @@ class DiffusionESPlanner(DiffusionPlanner):
         aux["es_pop_world_bkt5"] = pop_world_bkt5
         aux["es_pop_scores_bk"] = pop_scores_bk
         aux["es_best_score_b"] = jnp.squeeze(best_scores_b1, axis=1)
+        if debug is not None:
+            best_idx = np.asarray(best_indices_b1)
+            debug.update(final_world=np.asarray(pop_world_bkt5), final_scores=np.asarray(pop_scores_bk),
+                         final_origin=np.take_along_axis(origin_bk, np.asarray(pop_order_bk), axis=1),
+                         best_world=np.asarray(best_world_bt15[:, 0]),
+                         best_origin=np.take_along_axis(origin_bk, best_idx, axis=1)[:, 0],
+                         elite_seed_frac=np.stack(debug["elite_seed_frac"], 1))
+            self.debug_dump_fn(sim_state, timestep, goal, debug)
 
         return PlannerResult(
             start_t_b=pre_batch.aux["anchor_step"].astype(jnp.int32),
@@ -226,6 +259,24 @@ class DiffusionESPlanner(DiffusionPlanner):
             world_t_valid_bt=world_t_valid_bt,
             aux=aux,
         )
+
+    def _world_to_norm(self, xy_bmt2, yaw_bmt, aux: dict, pop_shape) -> jax.Array:
+        """World ego trajectories at the model steps -> the policy's normalized [x, y, vx, vy, yaw] (inverse of
+        data.postprocess.ego_normalized_to_world); velocity by backward differences from the anchor pose."""
+        cfg = self.preprocess_cfg
+        horizon, target_dim = int(pop_shape[2]), int(pop_shape[3])
+        if xy_bmt2.shape[2] != horizon or target_dim != 5:
+            raise ValueError(f"ego seeds have {xy_bmt2.shape[2]} steps, policy {horizon} x {target_dim}")
+        origin = np.asarray(aux["origin_xy"], np.float64)[:, None, None]                     # [B,1,1,2]
+        heading = np.asarray(aux["anchor_yaw"], np.float64)[:, None, None]                   # [B,1,1]
+        rot = lambda v: np.stack([v[..., 0] * np.cos(heading) + v[..., 1] * np.sin(heading),  # noqa: E731
+                                  -v[..., 0] * np.sin(heading) + v[..., 1] * np.cos(heading)], -1)
+        pos = rot(np.asarray(xy_bmt2, np.float64) - origin)
+        prev = np.concatenate([np.zeros_like(pos[:, :, :1]), pos[:, :, :-1]], axis=2)
+        vel = (pos - prev) / float(cfg.model_dt)
+        yaw = np.angle(np.exp(1j * (np.asarray(yaw_bmt, np.float64) - heading)))
+        out = np.concatenate([pos / cfg.ego_range, vel / cfg.max_velocity, (yaw / np.pi)[..., None]], -1)
+        return jnp.asarray(out, jnp.float32)
 
     def _stage_components(self, scores_bk) -> list[dict]:
         """Per-world score components of the population just scored, for the candidate recorder: the
