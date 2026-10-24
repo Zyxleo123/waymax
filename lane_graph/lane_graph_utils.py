@@ -222,7 +222,7 @@ class LaneGraphLoader:
             return None
 
         source_path, source_idx = self._resolve(tfrecord_path, scenario_id)
-        zip_path = _lane_graph_zip_path_for_tfrecord(source_path, self.lane_graph_dir).as_posix()
+        zip_path = lane_graph_zip_path_for_tfrecord(source_path, self.lane_graph_dir).as_posix()
         store = self._zip_stores.get(zip_path)
         if store is None:
             store = LaneGraphShardStore(zip_path)
