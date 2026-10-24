@@ -21,6 +21,8 @@
 #   CKPT=.../final.pt sbatch slurm_es_anchorwm_valfail1568.sh [log|idm] [tag]
 #   CKPT=.../final.pt sbatch --array=3 slurm_es_anchorwm_valfail1568.sh log    # rerun / resume one chunk
 #   CKPT=forecaster.pt SCORER_CKPT=scorer.pt sbatch slurm_es_anchorwm_valfail1568.sh   # mix forecaster / reward
+#   POSTHOC_REPAIR=1 CKPT=.../best.pt sbatch slurm_es_anchorwm_valfail1568.sh log    # + post-hoc repair of the ES winner
+#   sbatch --chdir=<checkout> ...   # run another checkout (ROOT follows the submit / chdir directory)
 set -euo pipefail
 
 SIM_AGENTS="${1:-log}"
@@ -34,7 +36,8 @@ NUM_CHUNKS="${NUM_CHUNKS:-8}"
 CHUNK="${SLURM_ARRAY_TASK_ID:-0}"
 SEED="${SEED:-0}"
 
-ROOT="/home/mineuih/ishan/waymax_rs"
+ROOT="${ROOT:-${SLURM_SUBMIT_DIR:-/home/mineuih/ishan/waymax_rs}}"
+POSTHOC_REPAIR="${POSTHOC_REPAIR:-0}"
 EXP_ROOT="/data/user_data/mineuih/ishan/world_model_sim"
 DATA="/data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs"
 COMPACT_DIR="${DATA}/womd_compact/valfail1568"      # has validation/ and target_scenarios.json
@@ -55,6 +58,9 @@ ckpt_tag() { echo "$(basename "$(dirname "$1")" | sed -E 's/_[0-9]{8}_[0-9]{6}$/
 AWM_TAG="$(ckpt_tag "${CKPT}")"
 [[ "${SCORER_CKPT}" == "${CKPT}" ]] || AWM_TAG="wm_${AWM_TAG}_sc_$(ckpt_tag "${SCORER_CKPT}")"
 RUN_NAME="es_awm_${AWM_TAG}_${SIM_AGENTS}_r${REPLAN_INTERVAL_STEPS}_seed${SEED}_valfail1568${TAG:+_${TAG}}"
+[[ "${POSTHOC_REPAIR}" == "1" ]] && RUN_NAME="${RUN_NAME}_posthoc"
+EXTRA_ARGS=()
+[[ "${POSTHOC_REPAIR}" == "1" ]] && EXTRA_ARGS+=(--posthoc_repair)
 OUT="${EXP_ROOT}/${RUN_NAME}/chunk_${CHUNK}"
 mkdir -p "${OUT}"
 for p in "${COMPACT_DIR}/validation" "${COMPACT_DIR}/target_scenarios.json" "${LANE_GRAPH_DIR}" "${DIFFUSION_CKPT}" "${CKPT}" "${SCORER_CKPT}"; do
@@ -72,7 +78,7 @@ json.dump(chunk, open(dst, "w"), indent=1)
 print(f"chunk {k}/{n}: {len(chunk)} tfrecords, {sum(len(v) for v in chunk.values())} scenarios")
 EOF
 
-echo "Diffusion-ES + AnchorWM ${RUN_NAME}: chunk ${CHUNK}/${NUM_CHUNKS}, anchorwm=${CKPT}, scorer=${SCORER_CKPT}, policy=${DIFFUSION_CKPT}, sim_agents=${SIM_AGENTS}, host=$(hostname), out=${OUT}"
+echo "Diffusion-ES + AnchorWM ${RUN_NAME}: chunk ${CHUNK}/${NUM_CHUNKS}, anchorwm=${CKPT}, scorer=${SCORER_CKPT}, policy=${DIFFUSION_CKPT}, sim_agents=${SIM_AGENTS}, posthoc_repair=${POSTHOC_REPAIR}, code=${ROOT} ($(git -C "${ROOT}" rev-parse --short HEAD)), host=$(hostname), out=${OUT}"
 python -u "${ROOT}/simulation/run_simulation.py" \
   --planner es \
   --other_agent_forecast wm --world_model_ckpt "${CKPT}" --wm_backend anchor --wm_refresh_steps 10 \
@@ -95,5 +101,6 @@ python -u "${ROOT}/simulation/run_simulation.py" \
   --num_es_iterations 4 \
   --replan_interval_steps "${REPLAN_INTERVAL_STEPS}" \
   --sim_agents "${SIM_AGENTS}" \
-  --visualize_mode none
+  --visualize_mode none \
+  ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
 echo "done: $(ls "${OUT}"/*.scenario_*.json 2>/dev/null | wc -l) scenario results in ${OUT}"
