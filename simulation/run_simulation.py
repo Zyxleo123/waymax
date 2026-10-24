@@ -216,6 +216,12 @@ def _parse_args() -> argparse.Namespace:
         "the offline label / cache passes.",
     )
     parser.add_argument(
+        "--posthoc_repair",
+        action="store_true",
+        help="Diffusion-ES only: repair the ES winner before executing it with yixiz's post-hoc optimization "
+        "(arm o_am: safety barrier + comfort, constant-velocity neighbours, 2 s window; planner/posthoc_repair.py).",
+    )
+    parser.add_argument(
         "--discriminator_ckpt",
         type=str,
         default=None,
@@ -732,6 +738,9 @@ def main(args: argparse.Namespace) -> None:
             world_model_forecaster=_load_world_model_forecaster(args),
             offroad_mode=args.offroad_mode,
         )
+        if args.posthoc_repair:
+            from planner.posthoc_repair import PosthocRepair
+            planner.posthoc_repair = PosthocRepair()
     elif args.planner == "fm" and (args.fm_ckpt_path or args.diffusion_ckpt_path) and _is_fm_v2_checkpoint(
         args.fm_ckpt_path or args.diffusion_ckpt_path
     ):

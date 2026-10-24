@@ -54,6 +54,10 @@ class DiffusionESPlanner(DiffusionPlanner):
         self.ego_seed_fn = None
         # Optional (sim_state, timestep, goal, info: dict) callback after every replan (anchor_wm.es_debug).
         self.debug_dump_fn = None
+        # Optional planner.posthoc_repair.PosthocRepair: edits the ES winner clear of the safety margins before it
+        # is executed (yixiz's post-hoc optimization, arm o_am). None = the ES winner runs as chosen.
+        self.posthoc_repair = None
+        self.posthoc_moved = [0, 0]  # [replanned rows the repair edited, replanned rows]
         self.scorers = [
             Scorer(
                 metrics=metrics,
@@ -251,10 +255,20 @@ class DiffusionESPlanner(DiffusionPlanner):
                          elite_seed_frac=np.stack(debug["elite_seed_frac"], 1))
             self.debug_dump_fn(sim_state, timestep, goal, debug)
 
+        trajectory_world_bt5 = jnp.squeeze(best_world_bt15, axis=1)
+        if self.posthoc_repair is not None:
+            # Only the world-frame plan is executed (trajectory_norm_btd stays the ES winner's).
+            trajectory_world_bt5, moved_b = self.posthoc_repair(trajectory_world_bt5, sim_state, timestep)
+            aux["posthoc_moved_b"] = jnp.asarray(moved_b)
+            self.posthoc_moved[0] += int(np.sum(moved_b))
+            self.posthoc_moved[1] += int(moved_b.shape[0])
+            print(f"[posthoc] t={int(timestep)} edited {int(np.sum(moved_b))}/{moved_b.shape[0]} "
+                  f"(total {self.posthoc_moved[0]}/{self.posthoc_moved[1]})", flush=True)
+
         return PlannerResult(
             start_t_b=pre_batch.aux["anchor_step"].astype(jnp.int32),
             trajectory_norm_btd=jnp.squeeze(best_norm_bt1d, axis=1),
-            trajectory_world_bt5=jnp.squeeze(best_world_bt15, axis=1),
+            trajectory_world_bt5=trajectory_world_bt5,
             world_t_seconds_bt=world_t_seconds_bt,
             world_t_valid_bt=world_t_valid_bt,
             aux=aux,
