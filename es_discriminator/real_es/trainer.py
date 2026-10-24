@@ -23,6 +23,8 @@ from typing import Callable
 import numpy as np
 import torch
 
+from es_discriminator.analyse_discriminator.ablations import ABLATIONS, FLAG_KEYS
+from es_discriminator.analyse_discriminator.ablations import flags as ablation_flags
 from es_discriminator.model import make_candidate_features_torch
 
 from . import evaluate as ev
@@ -95,6 +97,8 @@ def common_parser(description: str, *, default_out: str, default_name: str) -> a
     p.add_argument("--eval-chunk", type=int, default=64, help="candidates scored per chunk at evaluation")
     p.add_argument("--select-key", default="", help="override the method's validation selection metric")
     p.add_argument("--select-mode", default="", choices=["", "min", "max"])
+    p.add_argument("--ablation", default="A0", choices=sorted(ABLATIONS),
+                   help="architecture ablation (es_discriminator/analyse_discriminator/ablations.py); A0 = original")
     return p
 
 
@@ -142,7 +146,8 @@ def build_model(model_kwargs: dict) -> torch.nn.Module:
     if variant != VARIANT:
         raise ValueError(f"checkpoint variant {variant!r} is not supported; only {VARIANT!r}")
     return WMTrajectoryDiscriminator(kw["hidden"], kw["heads"], kw["dropout"],
-                                     pos_scale=kw["pos_scale"], vel_scale=kw["vel_scale"])
+                                     pos_scale=kw["pos_scale"], vel_scale=kw["vel_scale"],
+                                     **{k: bool(kw.get(k, True)) for k in FLAG_KEYS})
 
 
 def _subsample(idx: np.ndarray, n: int, rng: np.random.Generator) -> np.ndarray:
@@ -192,9 +197,12 @@ def run(args: argparse.Namespace, method: Method) -> dict:
         raise RuntimeError("empty train or validation set; check --max-files / split")
 
     model_kwargs = {"hidden": args.hidden, "heads": args.heads, "dropout": args.dropout, "variant": VARIANT,
-                    "pos_scale": args.pos_scale, "vel_scale": args.vel_scale}
+                    "pos_scale": args.pos_scale, "vel_scale": args.vel_scale,
+                    "ablation": args.ablation, **ablation_flags(args.ablation)}
     model = build_model(model_kwargs).to(device)
     data_info["parameters"] = int(sum(p.numel() for p in model.parameters()))
+    data_info["trainable_parameters"] = int(sum(p.numel() for p in model.parameters() if p.requires_grad))
+    data_info["ablation"] = args.ablation
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     steps_per_epoch = math.ceil(len(train_idx) / args.batch_groups)
     if args.max_steps_per_epoch:

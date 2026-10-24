@@ -17,9 +17,12 @@ and the WM's per-candidate max agent collision probability). Context, logged
 futures and WM forecasts are stored once per replan. Without the flag, nothing
 changes.
 
+`slurm/train/discriminator_data.sh` runs the whole data pipeline in stages
+(collect, label, decisions, waymax, wm_cache; `--stage S` runs one, resubmitting resumes):
+
 ```bash
-sbatch slurm/sim/collect_es_candidates_fail1500.sh --smoke   # 10 scenes, separate folder
-sbatch slurm/sim/collect_es_candidates_fail1500.sh           # all 1,500, then labels; resubmit to resume
+sbatch slurm/train/discriminator_data.sh --source fail1500 --smoke   # 10 scenes, separate folder
+sbatch slurm/train/discriminator_data.sh --source fail1500           # all 1,500 + labels + caches
 ```
 
 `label_es_candidates.py` adds GT-replay labels offline (`<batch>.labels.npz`):
@@ -28,17 +31,17 @@ ADE/FDE metrics. The array reference is in the `es_candidate_recorder.py` docstr
 
 ## More data: whole WOMD training shards
 
-`slurm/sim/collect_es_candidates_womd_train.sh` runs the same planner on training shards
-00002-00011 (one array task per shard). It skips scenes already in fail1500, using
-`make_collection_targets.py`. Each task also writes all three label files and the WM and
-road-edge caches. Shards 00000-00001 are left out because they are the trainval benchmark.
+`--source womd` runs the same planner on training shards 00002-00011 (one array task per
+shard). It skips scenes already in fail1500, using `make_collection_targets.py`. Shards
+00000-00001 are left out because they are the trainval benchmark.
 `build_training_set.py` then symlinks fail1500 and the finished shards into one training set.
 The trainval batch is dropped and the invalid-at-start list is merged. Scenes keep their
 hash-based train/val/test split.
 
 ```bash
-sbatch --array=2 slurm/sim/collect_es_candidates_womd_train.sh --smoke   # 5 scenes
-sbatch slurm/sim/collect_es_candidates_womd_train.sh                     # shards 2-11, 2 GPUs at a time
+sbatch --array=2 slurm/train/discriminator_data.sh --source womd --smoke     # 5 scenes
+sbatch --array=2-11%2 --gres=gpu:a6000:1 --time=16:00:00 \
+       slurm/train/discriminator_data.sh --source womd                       # shards 2-11, 2 at a time
 python -m es_discriminator.build_training_set --name fail1500_plus_womd_train_s02_11
 sbatch slurm/train/train_wm_discriminator.sh --data fail1500_plus_womd_train_s02_11
 ```
@@ -57,8 +60,13 @@ L=16 traffic lights):
 | `goal` | `[B,2]` | ego-relative goal (last valid logged ego position) / 100 |
 | `ego_vel` | `[B,2]` | rotated ego vx,vy / 25 |
 
-## Tests
+## Architecture ablations
+
+`analyse_discriminator/` holds the A0-A8 ablations (`ablations.py`, read by the trainer), their
+training and comparison scripts, and the unit tests:
 
 ```bash
-python -m unittest discover -s es_discriminator/tests -t . -v
+bash es_discriminator/analyse_discriminator/submit_ablations.sh A5 A6 A7 A8
+sbatch es_discriminator/analyse_discriminator/compare_ablations.sh --baseline A4
+python -m unittest es_discriminator.analyse_discriminator.test_ablations -v
 ```

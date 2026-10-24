@@ -1,0 +1,812 @@
+[
+ {
+  "epoch": 1,
+  "step": 2066,
+  "train": {
+   "loss": 0.4358377121244661,
+   "grad_norm": 1.3269406754635311,
+   "pair_accuracy": 0.7990760950070498,
+   "pairs": 2362.97192642788,
+   "safety_pair_fraction": 0.5780349588646352
+  },
+  "val": {
+   "discriminator/ade": 1.542916985410158,
+   "discriminator/unsafe": 0.03892132332499305,
+   "discriminator/goal_gain": 24.783914103436352,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7905779356930627,
+   "ranking/spearman_score_vs_neg_ade": 0.10683942578190547,
+   "ranking/pairwise_accuracy": 0.9017063822378756,
+   "ranking/safety_auroc": 0.87332727727816
+  },
+  "elapsed_min": 17.3
+ },
+ {
+  "epoch": 2,
+  "step": 4132,
+  "train": {
+   "loss": 0.3144780960734591,
+   "grad_norm": 1.2570277127398526,
+   "pair_accuracy": 0.8761558106596449,
+   "pairs": 2365.7284607938045,
+   "safety_pair_fraction": 0.5773674809533946
+  },
+  "val": {
+   "discriminator/ade": 1.5299001426572196,
+   "discriminator/unsafe": 0.032388101195440645,
+   "discriminator/goal_gain": 24.780564380417754,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7775610929401242,
+   "ranking/spearman_score_vs_neg_ade": 0.08363498261405963,
+   "ranking/pairwise_accuracy": 0.9125148518114751,
+   "ranking/safety_auroc": 0.8897797886438457
+  },
+  "elapsed_min": 26.4
+ },
+ {
+  "epoch": 3,
+  "step": 6196,
+  "train": {
+   "loss": 0.28414662189279905,
+   "grad_norm": 1.2141206797010216,
+   "pair_accuracy": 0.8917925489358893,
+   "pairs": 2367.0426356589146,
+   "safety_pair_fraction": 0.5758487707554133
+  },
+  "val": {
+   "discriminator/ade": 1.4893139850715638,
+   "discriminator/unsafe": 0.03099805393383375,
+   "discriminator/goal_gain": 24.79127301528373,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7369749353544681,
+   "ranking/spearman_score_vs_neg_ade": 0.11762381615589806,
+   "ranking/pairwise_accuracy": 0.9206208018731884,
+   "ranking/safety_auroc": 0.902077476407048
+  },
+  "elapsed_min": 35.3
+ },
+ {
+  "epoch": 4,
+  "step": 8262,
+  "train": {
+   "loss": 0.2692187022046337,
+   "grad_norm": 1.1839175155929074,
+   "pair_accuracy": 0.8995037437033445,
+   "pairs": 2365.101645692159,
+   "safety_pair_fraction": 0.5781151701579356
+  },
+  "val": {
+   "discriminator/ade": 1.4928133343051253,
+   "discriminator/unsafe": 0.02891298304142341,
+   "discriminator/goal_gain": 24.81023768974536,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7404742845880297,
+   "ranking/spearman_score_vs_neg_ade": 0.11998730677581404,
+   "ranking/pairwise_accuracy": 0.930176884497355,
+   "ranking/safety_auroc": 0.9063659484717467
+  },
+  "elapsed_min": 44.2
+ },
+ {
+  "epoch": 5,
+  "step": 10327,
+  "train": {
+   "loss": 0.2554501129490195,
+   "grad_norm": 1.1953431226367235,
+   "pair_accuracy": 0.9058077865305016,
+   "pairs": 2365.3297820823245,
+   "safety_pair_fraction": 0.5756123943071183
+  },
+  "val": {
+   "discriminator/ade": 1.4728691983230884,
+   "discriminator/unsafe": 0.02863497358910203,
+   "discriminator/goal_gain": 24.7884227503588,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.720530148605993,
+   "ranking/spearman_score_vs_neg_ade": 0.11158917141979369,
+   "ranking/pairwise_accuracy": 0.9314692893300536,
+   "ranking/safety_auroc": 0.9085179373933197
+  },
+  "elapsed_min": 53.1
+ },
+ {
+  "epoch": 6,
+  "step": 12392,
+  "train": {
+   "loss": 0.2465717760769348,
+   "grad_norm": 1.1946872227489227,
+   "pair_accuracy": 0.9096231453932515,
+   "pairs": 2366.26004842615,
+   "safety_pair_fraction": 0.5780410566171785
+  },
+  "val": {
+   "discriminator/ade": 1.506881794988439,
+   "discriminator/unsafe": 0.02835696413678065,
+   "discriminator/goal_gain": 24.80439314009154,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7545427452713435,
+   "ranking/spearman_score_vs_neg_ade": 0.11930302095457568,
+   "ranking/pairwise_accuracy": 0.9265853428925152,
+   "ranking/safety_auroc": 0.9071325248998606
+  },
+  "elapsed_min": 62.0
+ },
+ {
+  "epoch": 7,
+  "step": 14457,
+  "train": {
+   "loss": 0.2378466622782172,
+   "grad_norm": 1.1898951801275226,
+   "pair_accuracy": 0.9128818422628084,
+   "pairs": 2365.2590799031477,
+   "safety_pair_fraction": 0.575937918560132
+  },
+  "val": {
+   "discriminator/ade": 1.4808124276685892,
+   "discriminator/unsafe": 0.02571587433972755,
+   "discriminator/goal_gain": 24.813328410916025,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7284733779514936,
+   "ranking/spearman_score_vs_neg_ade": 0.11990414778233038,
+   "ranking/pairwise_accuracy": 0.9327538147850554,
+   "ranking/safety_auroc": 0.9155070910645859
+  },
+  "elapsed_min": 70.9
+ },
+ {
+  "epoch": 8,
+  "step": 16523,
+  "train": {
+   "loss": 0.22971864228395136,
+   "grad_norm": 1.1926484405092845,
+   "pair_accuracy": 0.9162290829656662,
+   "pairs": 2364.647628267183,
+   "safety_pair_fraction": 0.576127904220963
+  },
+  "val": {
+   "discriminator/ade": 1.5083914806149499,
+   "discriminator/unsafe": 0.027522935779816515,
+   "discriminator/goal_gain": 24.829174848619083,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7560524308978543,
+   "ranking/spearman_score_vs_neg_ade": 0.10939569635364221,
+   "ranking/pairwise_accuracy": 0.9368306253188224,
+   "ranking/safety_auroc": 0.9149335456161902
+  },
+  "elapsed_min": 79.8
+ },
+ {
+  "epoch": 9,
+  "step": 18588,
+  "train": {
+   "loss": 0.22200632799240888,
+   "grad_norm": 1.2069758344558914,
+   "pair_accuracy": 0.919766320501055,
+   "pairs": 2364.050363196126,
+   "safety_pair_fraction": 0.5781054868271185
+  },
+  "val": {
+   "discriminator/ade": 1.5003325022366867,
+   "discriminator/unsafe": 0.02599388379204893,
+   "discriminator/goal_gain": 24.793159953761002,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7479934525195912,
+   "ranking/spearman_score_vs_neg_ade": 0.11218271430607504,
+   "ranking/pairwise_accuracy": 0.9279957629356768,
+   "ranking/safety_auroc": 0.9173207106080954
+  },
+  "elapsed_min": 88.7
+ },
+ {
+  "epoch": 10,
+  "step": 20653,
+  "train": {
+   "loss": 0.21593342647041006,
+   "grad_norm": 1.2290899510245057,
+   "pair_accuracy": 0.9220305869134806,
+   "pairs": 2363.740435835351,
+   "safety_pair_fraction": 0.5770172068659951
+  },
+  "val": {
+   "discriminator/ade": 1.490945438654254,
+   "discriminator/unsafe": 0.02543786488740617,
+   "discriminator/goal_gain": 24.80000919335041,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7386063889371584,
+   "ranking/spearman_score_vs_neg_ade": 0.1125785413509461,
+   "ranking/pairwise_accuracy": 0.9324124154904136,
+   "ranking/safety_auroc": 0.920144180324483
+  },
+  "elapsed_min": 97.6
+ },
+ {
+  "epoch": 11,
+  "step": 22718,
+  "train": {
+   "loss": 0.21047956847786434,
+   "grad_norm": 1.2271989876724618,
+   "pair_accuracy": 0.9242538259623991,
+   "pairs": 2367.216464891041,
+   "safety_pair_fraction": 0.576070046394324
+  },
+  "val": {
+   "discriminator/ade": 1.4856848835429626,
+   "discriminator/unsafe": 0.025159855435084793,
+   "discriminator/goal_gain": 24.78156180759063,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7333458338258672,
+   "ranking/spearman_score_vs_neg_ade": 0.11806126425704908,
+   "ranking/pairwise_accuracy": 0.9339540997249923,
+   "ranking/safety_auroc": 0.9231612115499297
+  },
+  "elapsed_min": 106.5
+ },
+ {
+  "epoch": 12,
+  "step": 24783,
+  "train": {
+   "loss": 0.20458718718933822,
+   "grad_norm": 1.2387070111190723,
+   "pair_accuracy": 0.9267547277792314,
+   "pairs": 2364.365617433414,
+   "safety_pair_fraction": 0.5753993206535437
+  },
+  "val": {
+   "discriminator/ade": 1.507832740227805,
+   "discriminator/unsafe": 0.02543786488740617,
+   "discriminator/goal_gain": 24.826689889674814,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7554936905107095,
+   "ranking/spearman_score_vs_neg_ade": 0.11205186907204244,
+   "ranking/pairwise_accuracy": 0.9355939240043512,
+   "ranking/safety_auroc": 0.917717880163426
+  },
+  "elapsed_min": 115.4
+ },
+ {
+  "epoch": 13,
+  "step": 26848,
+  "train": {
+   "loss": 0.19900793495833802,
+   "grad_norm": 1.2417091148889672,
+   "pair_accuracy": 0.9285202467989979,
+   "pairs": 2364.8799031476997,
+   "safety_pair_fraction": 0.5768332609527853
+  },
+  "val": {
+   "discriminator/ade": 1.5110471150030018,
+   "discriminator/unsafe": 0.026132888518209618,
+   "discriminator/goal_gain": 24.837055604501046,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7587080652859064,
+   "ranking/spearman_score_vs_neg_ade": 0.11607409424427033,
+   "ranking/pairwise_accuracy": 0.9357718801664863,
+   "ranking/safety_auroc": 0.9119343778121923
+  },
+  "elapsed_min": 124.3
+ },
+ {
+  "epoch": 14,
+  "step": 28913,
+  "train": {
+   "loss": 0.19469066584551065,
+   "grad_norm": 1.2387634406139616,
+   "pair_accuracy": 0.930338948026985,
+   "pairs": 2366.912348668281,
+   "safety_pair_fraction": 0.5753287701424
+  },
+  "val": {
+   "discriminator/ade": 1.4837188021338645,
+   "discriminator/unsafe": 0.02529886016124548,
+   "discriminator/goal_gain": 24.821294864259663,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.731379752416769,
+   "ranking/spearman_score_vs_neg_ade": 0.11827469105764553,
+   "ranking/pairwise_accuracy": 0.9403049569723771,
+   "ranking/safety_auroc": 0.9234146227111005
+  },
+  "elapsed_min": 133.2
+ },
+ {
+  "epoch": 15,
+  "step": 30979,
+  "train": {
+   "loss": 0.1890063212472038,
+   "grad_norm": 1.250270014818774,
+   "pair_accuracy": 0.932516428127178,
+   "pairs": 2365.432720232333,
+   "safety_pair_fraction": 0.5761886845637817
+  },
+  "val": {
+   "discriminator/ade": 1.4903021668989396,
+   "discriminator/unsafe": 0.025020850708924104,
+   "discriminator/goal_gain": 24.820799509037432,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7379631171818442,
+   "ranking/spearman_score_vs_neg_ade": 0.11898408244728381,
+   "ranking/pairwise_accuracy": 0.9396179630668023,
+   "ranking/safety_auroc": 0.9216608815140215
+  },
+  "elapsed_min": 142.2
+ },
+ {
+  "epoch": 16,
+  "step": 33044,
+  "train": {
+   "loss": 0.18664026197110734,
+   "grad_norm": 1.2892621060226734,
+   "pair_accuracy": 0.9335705482930883,
+   "pairs": 2364.2726392251816,
+   "safety_pair_fraction": 0.5780430212398856
+  },
+  "val": {
+   "discriminator/ade": 1.4907772681663682,
+   "discriminator/unsafe": 0.02529886016124548,
+   "discriminator/goal_gain": 24.839527359581584,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7384382184492727,
+   "ranking/spearman_score_vs_neg_ade": 0.11762560047546226,
+   "ranking/pairwise_accuracy": 0.9409324004716926,
+   "ranking/safety_auroc": 0.9197809886987282
+  },
+  "elapsed_min": 151.2
+ },
+ {
+  "epoch": 17,
+  "step": 35109,
+  "train": {
+   "loss": 0.1799283197724664,
+   "grad_norm": 1.2711390258667687,
+   "pair_accuracy": 0.9365404117626948,
+   "pairs": 2364.007263922518,
+   "safety_pair_fraction": 0.5760142463697014
+  },
+  "val": {
+   "discriminator/ade": 1.4991599726840215,
+   "discriminator/unsafe": 0.026410897970531,
+   "discriminator/goal_gain": 24.81367755732774,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7468209229669258,
+   "ranking/spearman_score_vs_neg_ade": 0.10494587876177658,
+   "ranking/pairwise_accuracy": 0.9346431815037062,
+   "ranking/safety_auroc": 0.9206030280210041
+  },
+  "elapsed_min": 160.1
+ },
+ {
+  "epoch": 18,
+  "step": 37174,
+  "train": {
+   "loss": 0.17440227844664144,
+   "grad_norm": 1.2783341641666381,
+   "pair_accuracy": 0.937847770184062,
+   "pairs": 2366.696852300242,
+   "safety_pair_fraction": 0.5745186033288101
+  },
+  "val": {
+   "discriminator/ade": 1.478062744091985,
+   "discriminator/unsafe": 0.023908812899638587,
+   "discriminator/goal_gain": 24.83802724250621,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7257236943748895,
+   "ranking/spearman_score_vs_neg_ade": 0.12202621399808614,
+   "ranking/pairwise_accuracy": 0.9397774096720363,
+   "ranking/safety_auroc": 0.9212013411379182
+  },
+  "elapsed_min": 169.0
+ },
+ {
+  "epoch": 19,
+  "step": 39240,
+  "train": {
+   "loss": 0.17012535531552994,
+   "grad_norm": 1.2720420274158646,
+   "pair_accuracy": 0.9399589266977837,
+   "pairs": 2364.9549854791867,
+   "safety_pair_fraction": 0.5750109036472498
+  },
+  "val": {
+   "discriminator/ade": 1.4997959390724342,
+   "discriminator/unsafe": 0.024742841256602723,
+   "discriminator/goal_gain": 24.821193195151757,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7474568893553387,
+   "ranking/spearman_score_vs_neg_ade": 0.1142167918739615,
+   "ranking/pairwise_accuracy": 0.9364716638284678,
+   "ranking/safety_auroc": 0.9239135585376703
+  },
+  "elapsed_min": 177.9
+ },
+ {
+  "epoch": 20,
+  "step": 41306,
+  "train": {
+   "loss": 0.16818704016420233,
+   "grad_norm": 1.3019624560125198,
+   "pair_accuracy": 0.9401745965843163,
+   "pairs": 2366.558083252662,
+   "safety_pair_fraction": 0.5784096203819968
+  },
+  "val": {
+   "discriminator/ade": 1.4974888341350148,
+   "discriminator/unsafe": 0.024603836530442035,
+   "discriminator/goal_gain": 24.816414084539065,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7451497844179192,
+   "ranking/spearman_score_vs_neg_ade": 0.11559937283631602,
+   "ranking/pairwise_accuracy": 0.9379068841880229,
+   "ranking/safety_auroc": 0.9239185510112896
+  },
+  "elapsed_min": 186.8
+ },
+ {
+  "epoch": 21,
+  "step": 43371,
+  "train": {
+   "loss": 0.16573168890444748,
+   "grad_norm": 1.334160576173111,
+   "pair_accuracy": 0.9414067162728483,
+   "pairs": 2363.9762711864405,
+   "safety_pair_fraction": 0.5769314029122601
+  },
+  "val": {
+   "discriminator/ade": 1.483704948760797,
+   "discriminator/unsafe": 0.02543786488740617,
+   "discriminator/goal_gain": 24.827056120811722,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7313658990437014,
+   "ranking/spearman_score_vs_neg_ade": 0.11334191349518487,
+   "ranking/pairwise_accuracy": 0.9402577831482993,
+   "ranking/safety_auroc": 0.9225734982057247
+  },
+  "elapsed_min": 195.7
+ },
+ {
+  "epoch": 22,
+  "step": 45437,
+  "train": {
+   "loss": 0.16086987114571386,
+   "grad_norm": 1.3077451625328587,
+   "pair_accuracy": 0.9427746894398825,
+   "pairs": 2365.5818005808324,
+   "safety_pair_fraction": 0.5751941931008375
+  },
+  "val": {
+   "discriminator/ade": 1.4789508623669112,
+   "discriminator/unsafe": 0.023491798721156518,
+   "discriminator/goal_gain": 24.821536775777396,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7266118126498157,
+   "ranking/spearman_score_vs_neg_ade": 0.1172363361563204,
+   "ranking/pairwise_accuracy": 0.9398612122785415,
+   "ranking/safety_auroc": 0.924194140879246
+  },
+  "elapsed_min": 204.6
+ },
+ {
+  "epoch": 23,
+  "step": 47502,
+  "train": {
+   "loss": 0.15839649083672913,
+   "grad_norm": 1.3090472161372984,
+   "pair_accuracy": 0.9444882857886123,
+   "pairs": 2365.1849878934627,
+   "safety_pair_fraction": 0.5764293873031364
+  },
+  "val": {
+   "discriminator/ade": 1.4808284197306099,
+   "discriminator/unsafe": 0.023908812899638587,
+   "discriminator/goal_gain": 24.818225810615072,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7284893700135144,
+   "ranking/spearman_score_vs_neg_ade": 0.11713827152497658,
+   "ranking/pairwise_accuracy": 0.9392579256670301,
+   "ranking/safety_auroc": 0.9250546052407291
+  },
+  "elapsed_min": 213.5
+ },
+ {
+  "epoch": 24,
+  "step": 49568,
+  "train": {
+   "loss": 0.15565739554304148,
+   "grad_norm": 1.3287037659422039,
+   "pair_accuracy": 0.9443527927184036,
+   "pairs": 2365.307357212004,
+   "safety_pair_fraction": 0.5777065295053536
+  },
+  "val": {
+   "discriminator/ade": 1.4877655984277685,
+   "discriminator/unsafe": 0.024047817625799276,
+   "discriminator/goal_gain": 24.829776772630098,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7354265487106729,
+   "ranking/spearman_score_vs_neg_ade": 0.11336959339061006,
+   "ranking/pairwise_accuracy": 0.9407133393520568,
+   "ranking/safety_auroc": 0.9234382763407732
+  },
+  "elapsed_min": 222.4
+ },
+ {
+  "epoch": 25,
+  "step": 51634,
+  "train": {
+   "loss": 0.15391728372476998,
+   "grad_norm": 1.323253060976631,
+   "pair_accuracy": 0.9459085626760272,
+   "pairs": 2364.5101645692157,
+   "safety_pair_fraction": 0.5754441264233537
+  },
+  "val": {
+   "discriminator/ade": 1.4797378871165277,
+   "discriminator/unsafe": 0.023908812899638587,
+   "discriminator/goal_gain": 24.823106846667425,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7273988373994321,
+   "ranking/spearman_score_vs_neg_ade": 0.11668289026735197,
+   "ranking/pairwise_accuracy": 0.9414251554614738,
+   "ranking/safety_auroc": 0.9251186215735581
+  },
+  "elapsed_min": 231.3
+ },
+ {
+  "epoch": 26,
+  "step": 53700,
+  "train": {
+   "loss": 0.1520361430647297,
+   "grad_norm": 1.3288391513456046,
+   "pair_accuracy": 0.9460096737479886,
+   "pairs": 2363.182962245886,
+   "safety_pair_fraction": 0.576473600979424
+  },
+  "val": {
+   "discriminator/ade": 1.4836464502927913,
+   "discriminator/unsafe": 0.023491798721156518,
+   "discriminator/goal_gain": 24.81936576862163,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7313074005756958,
+   "ranking/spearman_score_vs_neg_ade": 0.1177786254690072,
+   "ranking/pairwise_accuracy": 0.9395294642508327,
+   "ranking/safety_auroc": 0.9265418292817086
+  },
+  "elapsed_min": 240.3
+ },
+ {
+  "epoch": 27,
+  "step": 55766,
+  "train": {
+   "loss": 0.15096835505773343,
+   "grad_norm": 1.3474005608486295,
+   "pair_accuracy": 0.9464022639962156,
+   "pairs": 2364.3039690222654,
+   "safety_pair_fraction": 0.5762761017085218
+  },
+  "val": {
+   "discriminator/ade": 1.4869255993610015,
+   "discriminator/unsafe": 0.024047817625799276,
+   "discriminator/goal_gain": 24.829588749323943,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7345865496439061,
+   "ranking/spearman_score_vs_neg_ade": 0.11732519453962864,
+   "ranking/pairwise_accuracy": 0.9407449925980405,
+   "ranking/safety_auroc": 0.9247814339546189
+  },
+  "elapsed_min": 249.3
+ },
+ {
+  "epoch": 28,
+  "step": 57831,
+  "train": {
+   "loss": 0.14956756735527235,
+   "grad_norm": 1.3309779053919253,
+   "pair_accuracy": 0.9470716227342084,
+   "pairs": 2365.073123486683,
+   "safety_pair_fraction": 0.5756502870877694
+  },
+  "val": {
+   "discriminator/ade": 1.484861414434224,
+   "discriminator/unsafe": 0.02418682235195997,
+   "discriminator/goal_gain": 24.829734355254466,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7325223647171286,
+   "ranking/spearman_score_vs_neg_ade": 0.11693512556499715,
+   "ranking/pairwise_accuracy": 0.9412771609298686,
+   "ranking/safety_auroc": 0.9244100471863448
+  },
+  "elapsed_min": 258.3
+ },
+ {
+  "epoch": 29,
+  "step": 59897,
+  "train": {
+   "loss": 0.1481968332566064,
+   "grad_norm": 1.302926959516796,
+   "pair_accuracy": 0.9473695731636169,
+   "pairs": 2366.226040658277,
+   "safety_pair_fraction": 0.5768899796787764
+  },
+  "val": {
+   "discriminator/ade": 1.4841208376010069,
+   "discriminator/unsafe": 0.023908812899638587,
+   "discriminator/goal_gain": 24.827947409055227,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7317817878839113,
+   "ranking/spearman_score_vs_neg_ade": 0.11713632177533548,
+   "ranking/pairwise_accuracy": 0.941003635534822,
+   "ranking/safety_auroc": 0.9247813462392501
+  },
+  "elapsed_min": 267.2
+ },
+ {
+  "epoch": 30,
+  "step": 61962,
+  "train": {
+   "loss": 0.14840206578067366,
+   "grad_norm": 1.3083856844690518,
+   "pair_accuracy": 0.9475471854787184,
+   "pairs": 2365.246004842615,
+   "safety_pair_fraction": 0.5776199940339427
+  },
+  "val": {
+   "discriminator/ade": 1.4841668985698353,
+   "discriminator/unsafe": 0.023908812899638587,
+   "discriminator/goal_gain": 24.82839171302641,
+   "es_reward/ade": 1.2930642524990468,
+   "es_reward/unsafe": 0.029329997219905476,
+   "es_reward/goal_gain": 23.760963629775553,
+   "gt_oracle/ade": 0.7523390497170955,
+   "gt_oracle/unsafe": 0.029747011398387545,
+   "gt_oracle/goal_gain": 23.968960512804394,
+   "ade_gap_to_oracle": 0.7318278488527398,
+   "ranking/spearman_score_vs_neg_ade": 0.11706617048868899,
+   "ranking/pairwise_accuracy": 0.9410027291541212,
+   "ranking/safety_auroc": 0.9247999715082869
+  },
+  "elapsed_min": 276.2
+ }
+]

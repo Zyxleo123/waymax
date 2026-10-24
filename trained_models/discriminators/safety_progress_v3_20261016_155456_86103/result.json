@@ -1,0 +1,5 @@
+{
+ "best_epoch": 26,
+ "best_val_discriminator/unsafe": 0.02154573255490687,
+ "selection_split": "val"
+}
