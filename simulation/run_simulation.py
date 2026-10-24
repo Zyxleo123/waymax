@@ -49,7 +49,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tfrecord_dir",
         type=str,
-        default="/zfsauton/scratch/eshau/womd/tf_example/",
+        default="/zfsauton/scratch/mineuih/womd/tf_example/",
     )
     parser.add_argument(
         "--split", type=str, default="training", choices=["training", "validation"]
@@ -65,14 +65,24 @@ def _parse_args() -> argparse.Namespace:
         default="/zfsauton/scratch/mineuih/waymax_rs/exp"
     )
     parser.add_argument("--planner", type=str, default="diffusion",
-                         choices=["diffusion", "es", "es_fm", "vla", "log-replay", "temporal-vla", "fm", "pdm_closed", "diffusion_planner"])
+                         choices=["diffusion", "es", "es_fm", "vla", "log-replay", "temporal-vla", "fm", "fm-fd",
+                                  "pdm_closed", "diffusion_planner"])
+    parser.add_argument("--fd_vla_ckpt_path", type=str, default=None)
+    parser.add_argument("--guidance_scale", type=float, default=2.0)
+    parser.add_argument("--num_denoising_steps", type=int, default=None)
+    parser.add_argument("--goal_conditioned", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--cfg_t_start", type=float, default=1.0)
+    parser.add_argument("--cfg_correction_mode", type=str, default="resample", choices=["resample", "sample"])
+    parser.add_argument("--fd_torch_device", type=str, default=None)
     parser.add_argument("--start_timestep", type=int, default=10)
     parser.add_argument("--mask_goal", action="store_true", default=False)
     parser.add_argument("--use_ema", action="store_true", default=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max_num_objects", type=int, default=128)
-    parser.add_argument("--num_worlds", type=int, default=5)
-    parser.add_argument("--num_scenarios", type=int, default=100000000)
+    parser.add_argument("--num_worlds", type=int, default=10)
+    parser.add_argument("--num_scenarios", type=int, default=10000000)
+    parser.add_argument("--num_shards", type=int, default=None,
+                        help="Use only the first N tfrecord shards (sorted, from index 0). Default: all.")
     parser.add_argument("--replan_interval_steps", type=int, default=10)
     parser.add_argument("--instruction_interval_steps", type=int, default=10)
     parser.add_argument("--visualize_mode", type=str, default="none", choices=["all", "success", "failure", "none"])
@@ -282,6 +292,14 @@ def _parse_args() -> argparse.Namespace:
                         help="Diffusion Planner only: args.json written by their train_predictor.py.")
     parser.add_argument("--dp_ckpt", type=str, default=None,
                         help="Diffusion Planner only: checkpoint (.pth) from their train_predictor.py.")
+    parser.add_argument(
+        "--other_agent",
+        type=str,
+        default="log",
+        choices=["log", "idm"],
+        help="new_model: 'idm' = non-ego agents are IDM-driven during planning as well (closed loop, "
+        "simulation/idm_closed_loop.py). Independent of --sim_agents.",
+    )
     return parser.parse_args()
 
 
@@ -458,6 +476,109 @@ def _fm_default_num_steps_from_metadata(metadata: dict) -> int:
     return int(raw)
 
 
+def _is_fm_v2_checkpoint(checkpoint_path: str, metadata_path: str | None = None) -> bool:
+    """A flow-matching checkpoint of branch new_model (model/diffusion/fm_policy_v2.py): no instruction /
+    subgoal condition, so its metadata has no ``inst_dim`` (same rule as train_diffusion.utils.infer)."""
+    meta_path = Path(metadata_path) if metadata_path is not None else Path(checkpoint_path) / "metadata.json"
+    with meta_path.open("r", encoding="utf-8") as f:
+        return "inst_dim" not in json.load(f)
+
+
+def _load_fm_v2_model_for_inference(
+    checkpoint_path: str,
+    *,
+    use_ema: bool = True,
+    metadata_path: str | None = None,
+    seed: int = 0,
+    skip_checkpoint_load: bool = False,
+    goal_conditioned: bool | None = None,
+    num_denoising_steps: int | None = None,
+):
+    from data.types import PreprocessConfig
+    from model.diffusion.fm_policy_v2 import FlowMatchingPolicy
+
+    ckpt_path = Path(checkpoint_path)
+    if not ckpt_path.exists():
+        raise ValueError(f"Checkpoint path does not exist: {checkpoint_path}")
+
+    meta_path = Path(metadata_path) if metadata_path is not None else ckpt_path / "metadata.json"
+    if not meta_path.exists():
+        raise ValueError(f"Metadata file not found: {meta_path}")
+
+    with meta_path.open("r", encoding="utf-8") as f:
+        metadata = json.load(f)
+
+    preprocess_cfg_data = metadata.get("preprocess_cfg", {})
+    if not isinstance(preprocess_cfg_data, dict):
+        preprocess_cfg_data = {}
+    preprocess_cfg = PreprocessConfig(
+        model_dt=float(preprocess_cfg_data.get("model_dt", metadata.get("model_dt", 0.2))),
+        world_dt_fallback=float(preprocess_cfg_data.get("world_dt_fallback", 0.1)),
+        max_range=float(preprocess_cfg_data.get("max_range", metadata.get("max_range", 30.0))),
+        ego_range=float(preprocess_cfg_data.get("ego_range", metadata.get("ego_range", 100.0))),
+        max_velocity=float(preprocess_cfg_data.get("max_velocity", metadata.get("max_velocity", 25.0))),
+        max_width=float(preprocess_cfg_data.get("max_width", metadata.get("max_width", 10.0))),
+        max_tl_points=int(preprocess_cfg_data.get("max_tl_points", metadata.get("max_tl_points", 16))),
+        num_map_type_classes=int(preprocess_cfg_data.get("num_map_type_classes", metadata.get("num_map_type_classes", 21))),
+        predict_horizon=int(preprocess_cfg_data.get("predict_horizon", metadata.get("predict_horizon", 25))),
+        map_unknown_type_index=int(preprocess_cfg_data.get("map_unknown_type_index", 20)),
+        max_segments=int(preprocess_cfg_data.get("max_segments", metadata.get("max_num_segments", 128))),
+        max_points_per_segment=int(preprocess_cfg_data.get("max_points_per_segment", metadata.get("max_points_per_segment", 128))),
+        num_object_types=int(preprocess_cfg_data.get("num_object_types", 8)),
+        inst_dim=int(preprocess_cfg_data.get("inst_dim", metadata.get("inst_dim", 768))),
+        # new_model's checkpoints were trained on its random per-segment point sampling.
+        map_point_sampling="random",
+    )
+
+    model = FlowMatchingPolicy(
+        target_dim=int(metadata.get("target_dim", 5)),
+        hidden_dim=int(metadata.get("hidden_dim", 512)),
+        cond_dim=int(metadata.get("cond_dim", 256)),
+        map_attr_dim=int(metadata.get("map_attr_dim", 25)),
+        tl_attr_dim=int(metadata.get("tl_attr_dim", 11)),
+        ego_dim=int(metadata.get("ego_dim", 5)),
+        other_dim=int(metadata.get("other_dim", 15)),
+        predict_horizon=int(metadata.get("predict_horizon", preprocess_cfg.predict_horizon)),
+        goal_conditioned=bool(
+            metadata.get("goal_conditioned", True)
+            if goal_conditioned is None
+            else goal_conditioned
+        ),
+        num_denoising_steps=int(
+            num_denoising_steps
+            if num_denoising_steps is not None
+            else metadata.get(
+                "num_denoising_steps",
+                metadata.get("flow_num_steps", metadata.get("default_num_steps", 50)),
+            )
+        ),
+        rngs=nnx.Rngs(int(seed)),
+    )
+
+    graphdef, template_params_state, template_nonparam_state = nnx.split(model, nnx.Param, ...)
+    params_state = template_params_state
+    nonparam_state = template_nonparam_state
+
+    if not skip_checkpoint_load:
+        restored = restore_checkpoint(checkpoint_path)
+        if "params_state" not in restored or "ema_params" not in restored:
+            raise KeyError("Checkpoint is missing 'params_state' or 'ema_params'.")
+
+        raw_params_state = restored["ema_params"] if use_ema else restored["params_state"]
+        params_state = coerce_tree_like(template_params_state, raw_params_state)
+        nonparam_state = coerce_tree_like(
+            template_nonparam_state,
+            restored.get("nonparam_state", template_nonparam_state),
+        )
+
+    policy = nnx.merge(
+        graphdef,
+        params_state,
+        nonparam_state,
+    )
+    return policy, preprocess_cfg
+
+
 def _load_fm_model_for_inference(
     checkpoint_path: str,
     *,
@@ -506,7 +627,6 @@ def _load_fm_model_for_inference(
         cond_dim=int(metadata.get("cond_dim", 256)),
         map_attr_dim=int(metadata.get("map_attr_dim", 25)),
         tl_attr_dim=int(metadata.get("tl_attr_dim", 11)),
-        inst_attr_dim=int(metadata.get("inst_dim", 768)),
         ego_dim=int(metadata.get("ego_dim", 5)),
         other_dim=int(metadata.get("other_dim", 15)),
         predict_horizon=int(metadata.get("predict_horizon", preprocess_cfg.predict_horizon)),
@@ -611,6 +731,30 @@ def main(args: argparse.Namespace) -> None:
             world_model_forecaster=_load_world_model_forecaster(args),
             offroad_mode=args.offroad_mode,
         )
+    elif args.planner == "fm" and (args.fm_ckpt_path or args.diffusion_ckpt_path) and _is_fm_v2_checkpoint(
+        args.fm_ckpt_path or args.diffusion_ckpt_path
+    ):
+        # new_model's flow-matching policy (scene condition only).
+        policy, preprocess_cfg = _load_fm_v2_model_for_inference(
+            checkpoint_path=args.fm_ckpt_path or args.diffusion_ckpt_path,
+            use_ema=args.use_ema,
+            metadata_path=None,
+            seed=args.seed,
+            skip_checkpoint_load=False,
+            goal_conditioned=args.goal_conditioned,
+            num_denoising_steps=args.num_denoising_steps,
+        )
+
+        from planner.fm_planner_v2 import FMPlanner
+
+        planner = FMPlanner(
+            policy=policy,
+            preprocess_cfg=preprocess_cfg,
+            population_size=args.population_size,
+            num_worlds=args.num_worlds,
+            num_steps=args.num_denoising_steps,
+            solver="euler",
+        )
     elif args.planner == "fm":
         fm_ckpt_path = args.fm_ckpt_path or args.diffusion_ckpt_path
         if fm_ckpt_path is None:
@@ -666,6 +810,38 @@ def main(args: argparse.Namespace) -> None:
             other_agent_forecast=args.other_agent_forecast,
             world_model_forecaster=_load_world_model_forecaster(args),
             offroad_mode=args.offroad_mode,
+        )
+    elif args.planner == "fm-fd":
+        fm_ckpt_path = args.fm_ckpt_path or args.diffusion_ckpt_path
+        if fm_ckpt_path is None:
+            raise ValueError("--fm_ckpt_path is required when --planner fm-fd is selected.")
+        if args.fd_vla_ckpt_path is None:
+            raise ValueError("--fd_vla_ckpt_path is required when --planner fm-fd is selected.")
+
+        policy, preprocess_cfg = _load_fm_v2_model_for_inference(
+            checkpoint_path=fm_ckpt_path,
+            use_ema=args.use_ema,
+            metadata_path=None,
+            seed=args.seed,
+            skip_checkpoint_load=False,
+            goal_conditioned=args.goal_conditioned,
+            num_denoising_steps=args.num_denoising_steps,
+        )
+
+        from planner.fm_fd_planner import FMFDPlanner
+
+        planner = FMFDPlanner(
+            policy=policy,
+            fd_vla=args.fd_vla_ckpt_path,
+            preprocess_cfg=preprocess_cfg,
+            population_size=1,
+            num_worlds=args.num_worlds,
+            num_steps=args.num_denoising_steps,
+            solver="euler",
+            guidance_scale=args.guidance_scale,
+            cfg_t_start=args.cfg_t_start,
+            correction_mode=args.cfg_correction_mode,
+            torch_device=args.fd_torch_device,
         )
     elif args.planner == "vla":
         inference = load_model_for_inference(

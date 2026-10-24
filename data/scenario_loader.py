@@ -94,8 +94,13 @@ def load_scenario_state_batch_fast(
     scenario_indices: Iterable[int],
     *,
     return_scenario_ids: bool = False,
+    allow_missing: bool = False,
 ):
     """Loads a batch of scenarios from one TFRecord in a single dataset scan.
+
+    The batch is ordered by ascending scenario index; the returned mapping lists the
+    loaded scenarios in batch order. With ``allow_missing``, out-of-range indices are
+    skipped instead of raising (it still raises if none of them exist).
 
     Returns (state_batch, scenario_to_batch_idx), plus a list of WOMD
     ``scenario/id`` strings in batch order when ``return_scenario_ids`` is set
@@ -121,7 +126,7 @@ def load_scenario_state_batch_fast(
                 break
 
     missing = sorted(needed.difference(selected_indices))
-    if missing:
+    if missing and (not allow_missing or not selected):
         raise ScenarioIndexOutOfRange(
             f"scenario_index values {missing} are out of range for tfrecord '{cfg.path}'."
         )

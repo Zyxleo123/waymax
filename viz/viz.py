@@ -421,6 +421,7 @@ def plot_simulator_state(
     world_rotation_rad: float = 0.0,
     goal_xy: Optional[np.ndarray] = None,
     goal_radius_m: float = 2.0,
+    reference_xy: Optional[np.ndarray] = None,
 ) -> np.ndarray:
   """Plots np array image for SimulatorState.
 
@@ -508,6 +509,20 @@ def plot_simulator_state(
         markersize=4,
         color='gold',
         zorder=13,
+    )
+
+  if reference_xy is not None:
+    # Reference path (e.g. ego ground-truth log), [T, 2]; NaN rows break the line.
+    ref_xy = np.asarray(reference_xy, dtype=np.float32).reshape(-1, 2)
+    if abs(float(world_rotation_rad)) > 1e-12:
+      ref_xy = _rotate_xy_array(ref_xy, float(world_rotation_rad))
+    ax.plot(
+        ref_xy[:, 0],
+        ref_xy[:, 1],
+        color='lightskyblue',
+        linewidth=2.0,
+        alpha=0.9,
+        zorder=3.8,  # above road lines (3.5), below agent boxes (4)
     )
 
   # 3. Gets np img, centered on selected agent's current location.

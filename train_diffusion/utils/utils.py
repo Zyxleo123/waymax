@@ -40,8 +40,8 @@ def build_training_components(args):
         predict_horizon=args.predict_horizon,
         max_segments=args.max_num_segments,
         max_points_per_segment=args.max_points_per_segment,
-        num_object_types=args.num_object_types,
-        inst_dim=args.inst_dim,
+        num_object_types=getattr(args, "num_object_types", 8),
+        inst_dim=getattr(args, "inst_dim", 768),
     )
     model = DiffusionPolicy(
         target_dim=args.target_dim,
@@ -51,6 +51,8 @@ def build_training_components(args):
         tl_attr_dim=args.tl_attr_dim,
         predict_horizon=args.predict_horizon,
         predict_type=args.predict_type,
+        goal_conditioned=bool(getattr(args, "goal_conditioned", True)),
+        num_denoising_steps=int(getattr(args, "num_denoising_steps", 100)),
         rngs=nnx.Rngs(args.seed),
     )
     total_steps = max(1, args.epochs * args.steps_per_epoch)
@@ -150,6 +152,238 @@ def coerce_tree_like(template, raw):
     )
 
 
+def _path_to_string(path) -> str:
+    parts: list[str] = []
+    for item in path:
+        if hasattr(item, "key"):
+            parts.append(str(item.key))
+        elif hasattr(item, "name"):
+            parts.append(str(item.name))
+        elif hasattr(item, "idx"):
+            parts.append(str(item.idx))
+        else:
+            parts.append(str(item))
+    return "/".join(parts)
+
+
+def _path_lookup_keys(path) -> list[Any]:
+    keys: list[Any] = []
+    for item in path:
+        if hasattr(item, "key"):
+            keys.append(item.key)
+        elif hasattr(item, "name"):
+            keys.append(item.name)
+        elif hasattr(item, "idx"):
+            keys.append(item.idx)
+        else:
+            keys.append(item)
+    return keys
+
+
+def _lookup_raw_child(current: Any, key: Any) -> Any:
+    if isinstance(current, Mapping):
+        if key in current:
+            return current[key]
+        if str(key) in current:
+            return current[str(key)]
+        if isinstance(key, str) and key.isdigit() and int(key) in current:
+            return current[int(key)]
+        if isinstance(key, int) and str(key) in current:
+            return current[str(key)]
+    if hasattr(current, "__getitem__"):
+        try:
+            return current[key]
+        except Exception:
+            pass
+        try:
+            return current[str(key)]
+        except Exception:
+            pass
+    if isinstance(key, str) and hasattr(current, key):
+        return getattr(current, key)
+    raise KeyError(key)
+
+
+def _unwrap_checkpoint_leaf(raw_leaf: Any) -> Any:
+    if isinstance(raw_leaf, Mapping) and "value" in raw_leaf:
+        return raw_leaf["value"]
+    if hasattr(raw_leaf, "value"):
+        return raw_leaf.value
+    return raw_leaf
+
+
+def _normalize_param_path(path_str: str) -> str:
+    parts = [
+        part
+        for part in str(path_str).replace(".", "/").strip("/").split("/")
+        if part and part not in {"value", "Param"}
+    ]
+    return "/".join(parts)
+
+
+def _is_array_like(value: Any) -> bool:
+    return hasattr(value, "shape") and hasattr(value, "dtype")
+
+
+def _flatten_checkpoint_leaves(tree: Any, prefix: str = "") -> dict[str, Any]:
+    """Flatten a restored Orbax/NNX tree to ``normalized/path -> array``."""
+    leaves: dict[str, Any] = {}
+    if isinstance(tree, Mapping):
+        mapping_keys = list(tree.keys())
+        if "value" in tree and all(key in {"value", "metadata"} for key in mapping_keys):
+            if prefix:
+                leaves[_normalize_param_path(prefix)] = tree["value"]
+            return leaves
+        for key, child in tree.items():
+            child_prefix = f"{prefix}/{key}" if prefix else str(key)
+            leaves.update(_flatten_checkpoint_leaves(child, child_prefix))
+        return leaves
+
+    if hasattr(tree, "items") and not _is_array_like(tree):
+        try:
+            return _flatten_checkpoint_leaves(dict(tree.items()), prefix)
+        except Exception:
+            pass
+
+    if prefix:
+        leaves[_normalize_param_path(prefix)] = _unwrap_checkpoint_leaf(tree)
+    return leaves
+
+
+def _copy_matching_leaf(template_leaf, raw_value, path_str: str):
+    raw_value = _unwrap_checkpoint_leaf(raw_value)
+    template_value = template_leaf.value if hasattr(template_leaf, "value") else template_leaf
+    raw_shape = getattr(raw_value, "shape", None)
+    template_shape = getattr(template_value, "shape", None)
+    if _is_array_like(template_value) and not _is_array_like(raw_value):
+        return None, f"{path_str} ckpt is not an array"
+    if raw_shape is not None and template_shape is not None and tuple(raw_shape) != tuple(template_shape):
+        return None, (
+            f"{path_str} ckpt={tuple(raw_shape)} model={tuple(template_shape)}"
+        )
+
+    if _is_array_like(raw_value) and _is_array_like(template_value):
+        if getattr(raw_value, "dtype", None) != getattr(template_value, "dtype", None):
+            raw_value = jnp.asarray(raw_value, dtype=template_value.dtype)
+
+    if isinstance(template_leaf, nnx.Param):
+        return template_leaf.replace(raw_value), None
+    return raw_value, None
+
+
+def coerce_overlapping_tree(template, raw, *, name: str = "params") -> tuple[Any, dict[str, Any]]:
+    """Copy matching checkpoint leaves into ``template``; keep init for the rest.
+
+    Unlike ``coerce_tree_like``, missing paths, extra checkpoint modules, and
+    shape mismatches do not raise. This is required when loading a pretrained
+    FlowMatchingPolicy that still has ``instruction_encoder`` into a model that
+    instead has gold-id encoders.
+
+    Nested Orbax key lookup is tried first. Remaining misses fall back to a
+    flattened string-path match so GetAttrKey / integer-list / ``value``
+    wrapping differences do not drop the whole pretrained trunk.
+    """
+
+    def lookup_raw(tree, path):
+        current = tree
+        for key in _path_lookup_keys(path):
+            current = _lookup_raw_child(current, key)
+        return current
+
+    copied: list[str] = []
+    missing: list[str] = []
+    shape_mismatch: list[str] = []
+    restored_flat = []
+    unresolved: list[tuple[Any, Any, str]] = []
+
+    for path, template_leaf in nnx.to_flat_state(template):
+        path_str = _path_to_string(path)
+        try:
+            raw_leaf = lookup_raw(raw, path)
+        except KeyError:
+            unresolved.append((path, template_leaf, path_str))
+            continue
+
+        restored_leaf, mismatch = _copy_matching_leaf(template_leaf, raw_leaf, path_str)
+        if mismatch is not None:
+            restored_flat.append((path, template_leaf))
+            shape_mismatch.append(mismatch)
+            continue
+        restored_flat.append((path, restored_leaf))
+        copied.append(path_str)
+
+    if unresolved:
+        flat_raw = _flatten_checkpoint_leaves(raw)
+        for path, template_leaf, path_str in unresolved:
+            raw_value = flat_raw.get(_normalize_param_path(path_str))
+            if raw_value is None:
+                restored_flat.append((path, template_leaf))
+                missing.append(path_str)
+                continue
+            restored_leaf, mismatch = _copy_matching_leaf(template_leaf, raw_value, path_str)
+            if mismatch is not None:
+                restored_flat.append((path, template_leaf))
+                shape_mismatch.append(mismatch)
+                continue
+            restored_flat.append((path, restored_leaf))
+            copied.append(path_str)
+
+    extra_top_level: list[str] = []
+    if isinstance(raw, Mapping):
+        template_top = {
+            _path_lookup_keys(path)[0]
+            for path, _ in nnx.to_flat_state(template)
+            if _path_lookup_keys(path)
+        }
+        template_top_str = {str(key) for key in template_top}
+        extra_top_level = sorted(
+            str(key)
+            for key in raw.keys()
+            if str(key) not in template_top_str and key not in template_top
+        )
+
+    report = {
+        "name": name,
+        "copied": copied,
+        "missing": missing,
+        "shape_mismatch": shape_mismatch,
+        "extra_top_level": extra_top_level,
+    }
+    return nnx.from_flat_state(restored_flat), report
+
+
+def log_overlapping_restore_report(report: dict[str, Any], *, max_list: int = 24) -> None:
+    name = report.get("name", "params")
+    copied = report.get("copied", [])
+    missing = report.get("missing", [])
+    shape_mismatch = report.get("shape_mismatch", [])
+    extra_top_level = report.get("extra_top_level", [])
+    print(
+        f"[checkpoint] {name}: copied {len(copied)} tensors, "
+        f"initialized {len(missing)} missing tensors, "
+        f"{len(shape_mismatch)} shape mismatches kept at init."
+    )
+    if extra_top_level:
+        print(
+            f"[checkpoint] {name}: unused top-level modules in ckpt: "
+            + ", ".join(extra_top_level)
+        )
+    if missing:
+        shown = missing[:max_list]
+        print(f"[checkpoint] {name}: missing (kept random init):")
+        for path_str in shown:
+            print(f"  {path_str}")
+        if len(missing) > max_list:
+            print(f"  ... ({len(missing) - max_list} more)")
+    if shape_mismatch:
+        shown = shape_mismatch[:max_list]
+        print(f"[checkpoint] {name}: shape mismatch (kept random init):")
+        for path_str in shown:
+            print(f"  {path_str}")
+        if len(shape_mismatch) > max_list:
+            print(f"  ... ({len(shape_mismatch) - max_list} more)")
+
+
 def make_dataset_config(args, waymax_config, global_batch_size: int):
     num_gpus = len([d for d in jax.devices() if d.platform == "gpu"])
     use_distributed = bool(args.data_parallel and num_gpus > 1)
@@ -239,7 +473,12 @@ def run_data_parallel_warmup_if_needed(model: DiffusionPolicy, args) -> None:
         sharded = jax.tree_util.tree_map(lambda x: jnp.reshape(x, (x.shape[0] * x.shape[1],) + x.shape[2:]), sharded)
         cond = model.compute_condition(sharded)
         target = sharded["ego_trajectory"][:, : model.predict_horizon, :]
-        _ = model.loss_from_condition(target, cond, rng=jax.random.PRNGKey(args.seed), data_parallel=False)
+        _ = model.loss_from_condition(
+            target,
+            cond,
+            rng=jax.random.PRNGKey(args.seed),
+            data_parallel=False,
+        )
 
 
 def iter_with_prefetch(base_iter, prefetch_size: int):

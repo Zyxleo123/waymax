@@ -314,7 +314,7 @@ def resample_trajectory_timebase_numpy(
 	return np.stack(outputs, axis=0)
 
 
-def _build_map_features(
+def _build_map_features_nearest(
 	state: Mapping[str, np.ndarray],
 	origin_xy_b2: np.ndarray,
 	heading_b: np.ndarray,
@@ -411,6 +411,124 @@ def _build_map_features(
 			ids[batch_idx, seg_idx] = seg_id
 
 	return feats, valids, ids
+
+
+def _build_map_features_random(
+	state: Mapping[str, np.ndarray],
+	origin_xy_b2: np.ndarray,
+	heading_b: np.ndarray,
+	cfg: PreprocessConfig,
+	rng: np.random.Generator,
+	allowed_types: tuple[int, ...] | None = None,
+	max_segments: int | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+	x_bm = np.asarray(state["roadgraph_points_x"])
+	y_bm = np.asarray(state["roadgraph_points_y"])
+	dir_x_bm = np.asarray(state["roadgraph_points_dir_x"])
+	dir_y_bm = np.asarray(state["roadgraph_points_dir_y"])
+	types_bm = np.asarray(state["roadgraph_points_types"]).astype(np.int32)
+	valid_bm = np.asarray(state["roadgraph_points_valid"]).astype(bool)
+	ids_bm = np.asarray(state["roadgraph_points_ids"]).astype(np.int32)
+
+	max_segments = int(cfg.max_segments) if max_segments is None else int(max_segments)
+	max_points_per_segment = int(cfg.max_points_per_segment)
+	feat_dim = 2 + 2 + int(cfg.num_map_type_classes)
+
+	feats = np.zeros((x_bm.shape[0], max_segments, max_points_per_segment, feat_dim), dtype=np.float32)
+	valids = np.zeros((x_bm.shape[0], max_segments, max_points_per_segment), dtype=bool)
+	ids = np.zeros((x_bm.shape[0], max_segments), dtype=np.int32)
+
+	for batch_idx in range(x_bm.shape[0]):
+		xy = np.stack([x_bm[batch_idx], y_bm[batch_idx]], axis=-1)
+		dirs = np.stack([dir_x_bm[batch_idx], dir_y_bm[batch_idx]], axis=-1)
+		types = types_bm[batch_idx]
+		point_ids = ids_bm[batch_idx]
+		valid = valid_bm[batch_idx]
+
+		centered = xy - origin_xy_b2[batch_idx][None, :]
+		dist = np.linalg.norm(centered, axis=-1)
+		valid_and_range = valid & (dist < float(cfg.max_range))
+		if allowed_types is not None:
+			valid_and_range = valid_and_range & np.isin(types, np.asarray(allowed_types, dtype=np.int32))
+		if not np.any(valid_and_range):
+			continue
+
+		cand_ids = point_ids[valid_and_range]
+		cand_dist = dist[valid_and_range]
+		cand_xy = xy[valid_and_range]
+		cand_dirs = dirs[valid_and_range]
+		cand_types = types[valid_and_range]
+
+		id_order = np.argsort(cand_ids, kind="stable")
+		sorted_ids = cand_ids[id_order]
+		sorted_dist = cand_dist[id_order]
+		unique_ids, starts, counts = np.unique(sorted_ids, return_index=True, return_counts=True)
+		mean_dist = np.add.reduceat(sorted_dist, starts) / np.maximum(counts.astype(np.float32), 1.0)
+		segment_rank = np.lexsort((unique_ids, mean_dist))
+		selected_ids = unique_ids[segment_rank[:max_segments]]
+
+		for seg_idx, seg_id in enumerate(selected_ids):
+			seg_local = np.flatnonzero(cand_ids == seg_id)
+			num_seg_points = int(seg_local.shape[0])
+			if num_seg_points <= 0:
+				continue
+			if num_seg_points > max_points_per_segment:
+				pick = rng.choice(seg_local, size=max_points_per_segment, replace=False)
+			else:
+				pick = rng.permutation(seg_local)
+
+			n_pick = int(pick.shape[0])
+			seg_xy = np.zeros((max_points_per_segment, 2), dtype=np.float32)
+			seg_dirs = np.zeros((max_points_per_segment, 2), dtype=np.float32)
+			seg_types = np.zeros((max_points_per_segment,), dtype=np.int32)
+			seg_valid = np.zeros((max_points_per_segment,), dtype=bool)
+			seg_xy[:n_pick] = cand_xy[pick]
+			seg_dirs[:n_pick] = cand_dirs[pick]
+			seg_types[:n_pick] = cand_types[pick]
+			seg_valid[:n_pick] = True
+
+			xy_rel = _rotate_xy(seg_xy - origin_xy_b2[batch_idx][None, :], heading_b[batch_idx]) / float(cfg.max_range)
+			dir_rel = _rotate_xy(seg_dirs, heading_b[batch_idx])
+			dir_norm = np.linalg.norm(dir_rel, axis=-1, keepdims=True)
+			dir_rel = dir_rel / np.maximum(dir_norm, 1e-6)
+
+			ty_safe = np.where(
+				(seg_types >= 0) & (seg_types < int(cfg.num_map_type_classes)),
+				seg_types,
+				np.full_like(seg_types, int(cfg.map_unknown_type_index)),
+			)
+			type_oh = np.eye(int(cfg.num_map_type_classes), dtype=np.float32)[ty_safe]
+			seg_feat = np.concatenate([xy_rel.astype(np.float32), dir_rel.astype(np.float32), type_oh], axis=-1)
+			seg_feat = np.where(seg_valid[:, None], seg_feat, 0.0)
+
+			feats[batch_idx, seg_idx] = seg_feat
+			valids[batch_idx, seg_idx] = seg_valid
+			ids[batch_idx, seg_idx] = seg_id
+
+	return feats, valids, ids
+
+
+def _build_map_features(
+	state: Mapping[str, np.ndarray],
+	origin_xy_b2: np.ndarray,
+	heading_b: np.ndarray,
+	cfg: PreprocessConfig,
+	rng: np.random.Generator,
+	allowed_types: tuple[int, ...] | None = None,
+	max_segments: int | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+	"""Map segments around the anchor, ``cfg.map_point_sampling`` picking them (mirrors data.preprocess):
+
+	* ``"nearest"`` (default) -- the first ``max_segments`` ids in id order, each with its points nearest the
+	  anchor. Draws nothing from ``rng``.
+	* ``"random"`` -- branch new_model's sampling: the ``max_segments`` segments nearest the anchor (mean point
+	  distance), each with a random subset of its in-range points.
+	"""
+	if cfg.map_point_sampling == "random":
+		return _build_map_features_random(state, origin_xy_b2, heading_b, cfg, rng, allowed_types, max_segments)
+	if cfg.map_point_sampling != "nearest":
+		raise ValueError(f"map_point_sampling must be 'nearest' or 'random', got {cfg.map_point_sampling!r}")
+	return _build_map_features_nearest(state, origin_xy_b2, heading_b, cfg, allowed_types, max_segments)
 
 
 def _build_tl_features(
@@ -582,12 +700,13 @@ def _preprocess_single_cached_scenario(
 	subgoal_valid = np.ones_like(subgoal_xy[..., 0], dtype=bool)
 	remaining_timesteps = (goal_step_b - anchor_step_b) / 100.0
 
-	map_features, map_valid, map_ids = _build_map_features(state, origin_xy, anchor_yaw, cfg)
+	map_features, map_valid, map_ids = _build_map_features(state, origin_xy, anchor_yaw, cfg, rng)
 	lane_features, lane_valid, lane_ids = _build_map_features(
 		state,
 		origin_xy,
 		anchor_yaw,
 		cfg,
+		rng,
 		allowed_types=LANE_MAP_ELEMENT_TYPES,
 		max_segments=64
 	)
@@ -716,12 +835,13 @@ def _preprocess_single_cached_scenario_with_history(
 	subgoal_valid = np.ones_like(subgoal_xy[..., 0], dtype=bool)
 	remaining_timesteps = (goal_step_b - anchor_step_b) / 100.0
 
-	map_features, map_valid, map_ids = _build_map_features(state, origin_xy, anchor_yaw, cfg)
+	map_features, map_valid, map_ids = _build_map_features(state, origin_xy, anchor_yaw, cfg, rng)
 	lane_features, lane_valid, lane_ids = _build_map_features(
 		state,
 		origin_xy,
 		anchor_yaw,
 		cfg,
+		rng,
 		allowed_types=LANE_MAP_ELEMENT_TYPES,
 		max_segments=64
 	)

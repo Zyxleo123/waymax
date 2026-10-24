@@ -38,6 +38,7 @@ from simulation.evaluation_utils import (
     episode_failure_flags,
     episode_failure_step,
 )
+from simulation.idm_closed_loop import predict_planner_trajectories_closed_loop_idm
 from simulation.planning_utils import (
     predict_planner_trajectories_with_periodic_replan,
     get_sdc_indices_for_batched_state,
@@ -189,6 +190,13 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
         candidate_recorder.write_metadata(args)
         planner.candidate_recorder = candidate_recorder
 
+    # --other_agent idm (new_model): non-ego agents are IDM-driven during planning too (closed loop);
+    # --sim_agents idm only swaps them in for the evaluation rollout.
+    if getattr(args, "other_agent", "log") == "idm":
+        replan_fn = predict_planner_trajectories_closed_loop_idm
+    else:
+        replan_fn = predict_planner_trajectories_with_periodic_replan
+
     lane_graph_zip_path = None
     while tested_scenarios < int(args.num_scenarios):
         if target_scenarios is not None:
@@ -305,7 +313,7 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                 candidate_recorder.start_batch(
                     sim_state, os.path.basename(tfrecord_path), scenario_indices, scenario_ids, goal_xy_b2
                 )
-            pred, replaced_state, info = predict_planner_trajectories_with_periodic_replan(
+            pred, replaced_state, info = replan_fn(
                 args,
                 sim_state,
                 goal_xy_b2,
@@ -480,8 +488,9 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
             (str(tfrecord_path), int(scenario_indices[i]))
             for i in visualize_indices
         ]
-        ego_start_times = [0 for _ in visualize_indices]
-        ego_trajectories = [np.asarray(pred_traj[i]) for i in visualize_indices]
+        # Render the evaluated state itself (ego plan and, with --other_agent idm, the simulated agents)
+        # instead of reloading the logged scenario, so the video matches the metrics (new_model).
+        render_states = [(replaced_state, int(i)) for i in visualize_indices]
         goal_xys = [np.asarray(goal_xy_b2[i]) for i in visualize_indices]
 
         # Map every scenario position to its rendered video path (None when
@@ -496,9 +505,8 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                 tfrecord_scenarios=video_requests,
                 target_vehicles=[None] * len(video_requests),
                 output_dir=output_dir.as_posix(),
-                ego_start_times=ego_start_times,
-                ego_trajectories=ego_trajectories,
                 goal_xy=goal_xys,
+                states=render_states,
             )
             for pos, path in zip(visualize_indices, rendered):
                 video_path_by_pos[pos] = path

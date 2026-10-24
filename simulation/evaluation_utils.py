@@ -102,6 +102,8 @@ def rollout_predicted_trajectories_with_metrics(
         "metric_names": metric_names,
         "timestep": rollout_timestep,
         "num_log_steps": length,
+        # metric_timeseries[i] is the metric at timestep first_timestep + i (clamped at the last step).
+        "first_timestep": int(env_obj.config.init_steps) - 1,
     }
 
 

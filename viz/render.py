@@ -335,12 +335,22 @@ def render_videos_batched(
     align_ego_heading_up: bool = False,
     goal_xy: np.ndarray | None = None,
     scenariomax: bool = False,
+    reference_trajectories: list[np.ndarray | None] | None = None,
+    states: list[tuple[object, int]] | None = None,
 ) -> list[Path]:
     """
     Render multiple videos for arbitrary (tfrecord, scenario_index) pairs efficiently.
 
     Scenarios are grouped by TFRecord so each TFRecord is scanned only once, and
     requested scenarios are preprocessed in a single batch per TFRecord.
+
+    reference_trajectories: optional per-request [T, 2] world xy (NaN = invalid)
+    drawn as a light-blue line, e.g. the ego ground-truth log.
+
+    states: optional per-request (batched SimulatorState, batch_idx) rendered from
+    its log_trajectory as-is instead of reloading the scenario from the TFRecord
+    (e.g. a closed-loop rollout with reactive agents). Ego overrides and
+    max_num_objects do not apply to these; tfrecord_scenarios only names the files.
     """
     if not tfrecord_scenarios:
         return []
@@ -393,36 +403,46 @@ def render_videos_batched(
         "px_per_meter": float(px_per_meter),
     }
 
+    if states is not None and len(states) != len(tfrecord_scenarios):
+        raise ValueError(
+            f"states length mismatch: expected {len(tfrecord_scenarios)}, got {len(states)}."
+        )
+
     for tfrecord, requests in grouped.items():
-        unique_scenarios = sorted({scenario_index for _, scenario_index in requests})
-        ds_cfg = build_dataset_config(
-            tfrecord,
-            batch_dims=(len(unique_scenarios),),
-            max_num_objects=int(max_num_objects),
-            scenariomax=scenariomax,
-        )
-        state_batch, scenario_to_batch_idx = _load_scenario_state_batch_fast(
-            ds_cfg, unique_scenarios
-        )
-        total_steps = int(state_batch.log_trajectory.x.shape[-1])
-        steps = min(int(num_frames), total_steps)
-        batch_size = len(unique_scenarios)
+        if states is None:
+            unique_scenarios = sorted({scenario_index for _, scenario_index in requests})
+            ds_cfg = build_dataset_config(
+                tfrecord,
+                batch_dims=(len(unique_scenarios),),
+                max_num_objects=int(max_num_objects),
+                scenariomax=scenariomax,
+            )
+            state_batch, scenario_to_batch_idx = _load_scenario_state_batch_fast(
+                ds_cfg, unique_scenarios
+            )
 
         for req_idx, scenario_index in requests:
-            batch_idx = scenario_to_batch_idx[scenario_index]
-            start_t, ego_traj = overrides[req_idx]
             req_goal_xy = goals_per_request[req_idx]
-
-            state_for_render = state_batch
-            request_use_log_traj = bool(use_log_traj)
-            if start_t is not None and ego_traj is not None:
-                state_for_render = _apply_ego_override_to_state_batch(
-                    state_batch,
-                    batch_idx=batch_idx,
-                    start_t=int(start_t),
-                    ego_traj_l5=ego_traj,
-                )
+            if states is not None:
+                state_for_render, batch_idx = states[req_idx]
+                batch_idx = int(batch_idx)
                 request_use_log_traj = True
+            else:
+                batch_idx = scenario_to_batch_idx[scenario_index]
+                start_t, ego_traj = overrides[req_idx]
+                state_for_render = state_batch
+                request_use_log_traj = bool(use_log_traj)
+                if start_t is not None and ego_traj is not None:
+                    state_for_render = _apply_ego_override_to_state_batch(
+                        state_batch,
+                        batch_idx=batch_idx,
+                        start_t=int(start_t),
+                        ego_traj_l5=ego_traj,
+                    )
+                    request_use_log_traj = True
+            total_steps = int(state_for_render.log_trajectory.x.shape[-1])
+            steps = min(int(num_frames), total_steps)
+            batch_size = int(state_for_render.log_trajectory.x.shape[0])
 
             output_path = output_root / (
                 f"{Path(tfrecord).name}.scenario_{scenario_index:03d}.mp4"
@@ -446,6 +466,11 @@ def render_videos_batched(
                     world_rotation_rad=world_rotation_rad,
                     goal_xy=req_goal_xy,
                     goal_radius_m=2.0,
+                    reference_xy=(
+                        reference_trajectories[req_idx]
+                        if reference_trajectories is not None
+                        else None
+                    ),
                 )
                 frame = cv2.resize(
                     frame, (int(width), int(height)), interpolation=cv2.INTER_AREA
