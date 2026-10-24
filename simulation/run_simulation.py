@@ -79,8 +79,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--use_ema", action="store_true", default=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max_num_objects", type=int, default=128)
-    parser.add_argument("--num_worlds", type=int, default=10)
-    parser.add_argument("--num_scenarios", type=int, default=10000000)
+    parser.add_argument("--num_worlds", type=int, default=5)
+    parser.add_argument("--num_scenarios", type=int, default=100000000)
     parser.add_argument("--num_shards", type=int, default=None,
                         help="Use only the first N tfrecord shards (sorted, from index 0). Default: all.")
     parser.add_argument("--replan_interval_steps", type=int, default=10)
@@ -629,6 +629,7 @@ def _load_fm_model_for_inference(
         tl_attr_dim=int(metadata.get("tl_attr_dim", 11)),
         ego_dim=int(metadata.get("ego_dim", 5)),
         other_dim=int(metadata.get("other_dim", 15)),
+        inst_attr_dim=int(metadata.get("inst_dim", 768)),
         predict_horizon=int(metadata.get("predict_horizon", preprocess_cfg.predict_horizon)),
         subgoal_conditioned=bool(metadata.get("subgoal_conditioned", False)),
         # Prefer metadata default_num_steps when present. Never use flow_num_steps

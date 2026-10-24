@@ -149,6 +149,8 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
     reached_all, success_all = 0, 0
     results: list[dict[str, Any]] = []
     tfrecord_paths = _list_tfrecord_paths(args.tfrecord_dir)
+    if getattr(args, "num_shards", None) is not None:  # new_model: evaluate only the first N shards
+        tfrecord_paths = tfrecord_paths[: int(args.num_shards)]
 
     def _advance_tfrecord() -> bool:
         """Move to next shard. Returns False when this split is exhausted (do not pop empty)."""
@@ -276,6 +278,12 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
             continue
 
         print(f"Testing scenarios {scenario_indices} from {os.path.basename(tfrecord_path)}...")
+        if hasattr(planner, "set_episode_context"):  # FM-FD planner: where to write its per-episode images
+            planner.set_episode_context(
+                output_dir=output_dir,
+                tfrecord_path=tfrecord_path,
+                scenario_indices=scenario_indices,
+            )
 
         # lane_graphs = lane_graph_loader.get_lane_graph_for_scenarios(tfrecord_path, scenario_indices)
         rng_key = jax.random.PRNGKey(int(args.seed))
@@ -532,6 +540,7 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
             }
             result_path = output_dir / f"{os.path.basename(tfrecord_path)}.scenario_{scenario_idx:03d}.json"
             _save_json(result_path, result)
+            completed_scenarios.add((os.path.basename(tfrecord_path), int(scenario_idx)))
             results.append(result)
         tested_scenarios += len(scenario_indices)
         print(f"Finished testing scenarios {scenario_indices} from {os.path.basename(tfrecord_path)}.")

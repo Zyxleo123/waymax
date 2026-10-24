@@ -134,7 +134,7 @@ def parse_args() -> DiffusionTrainConfig:
 	parser.add_argument("--eval_visualize_mode", type=str, default="none",
 		choices=["all", "success", "failure", "none"])
 
-	parser.add_argument("--save_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/vla/train_diffusion")
+	parser.add_argument("--save_dir", type=str, default="/zfsauton/scratch/mineuih/waymax_rs/checkpoints/train_diffusion")
 	parser.add_argument("--epochs", type=int, default=500)
 	parser.add_argument("--steps_per_epoch", type=int, default=1000)
 	parser.add_argument("--save_every", type=int, default=10)
