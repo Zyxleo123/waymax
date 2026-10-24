@@ -119,18 +119,23 @@ def _dataset_config_for(tfrecord_path: str, args) -> waymax_config.DatasetConfig
 
     The route dims are read off the file rather than inherited from
     WOD_1_3_1_TRAINING's 45x800, so eval sets exported with a different budget
-    (failures.tfrecord is 10x300) parse instead of dying at ParseExampleV2.
+    (failures.tfrecord is 10x300) parse instead of dying at ParseExampleV2. Files without SDC routes (e.g. the
+    womd_compact copies) keep WOD_1_3_1_TRAINING's defaults, as before.
     """
-    num_paths, num_points_per_path = infer_route_dims(tfrecord_path)
-    return dataclasses.replace(
+    cfg = dataclasses.replace(
         waymax_config.WOD_1_3_1_TRAINING,
         path=str(tfrecord_path),
         max_num_objects=int(args.max_num_objects),
         batch_dims=(args.num_worlds,),
         shuffle_seed=0,
-        num_paths=num_paths,
-        num_points_per_path=num_points_per_path,
     )
+    try:
+        num_paths, num_points_per_path = infer_route_dims(tfrecord_path)
+    except ValueError as exc:
+        if "does not carry SDC routes" not in str(exc):
+            raise
+        return cfg
+    return dataclasses.replace(cfg, num_paths=num_paths, num_points_per_path=num_points_per_path)
 
 
 def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]]:
