@@ -89,15 +89,19 @@ class VLAPlanner(AbstractPlanner):
         mask_goal: bool = False,
         instruction_texts: list[str] | None = None,
         use_subgoal: bool = False,
+        goal_timestep: Any = None,
         **kwargs: Any,
     ) -> VLAPlannerResult:
         rng, key_pre, key_sample = jax.random.split(rng, 3)
+        # Real per-scene goal timestep (see DiffusionPlanner for rationale); the
+        # hard-coded 90 mis-conditioned `remaining_timesteps` for every scene.
         pre_batch, _ = preprocess_simulator_state(
             sim_state,
             key_pre,
             self.preprocess_cfg,
             anchor_step_override=timestep,
-            goal_step_override=90,
+            # Real per-scene goal step when the runner threads it in (posthoc-opt-es); 90 otherwise, as before.
+            goal_step_override=90 if goal_timestep is None else goal_timestep,
             goal_xy_override=goal,
             world_dt_method="median",
         )

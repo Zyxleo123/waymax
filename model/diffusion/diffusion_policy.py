@@ -83,11 +83,25 @@ class DiffusionPolicy(nnx.Module):
         predict_type: str = "v",
         predict_horizon: int = 25,
         subgoal_conditioned: bool = False,
+        self_cond: bool = False,
+        sc_train_prob: float = 0.5,
+        distort_p: float = 0.0,
+        distort_sigma: float = 0.0,
+        distort_mode: str = "relative",
+        distort_t_max: int = -1,
+        distort_t_min: int = 0,
+        distort_channels: int = 2,
         **kwargs: Any,
     ) -> None:
         del kwargs
         self.target_dim = target_dim
         self.predict_horizon = predict_horizon
+        # Whether the subgoal encoder is part of the graph. The base pretrain is
+        # "without_subgoal" (subgoal_conditioned=False) and was saved WITHOUT the
+        # subgoal_encoder's 12 param leaves; always building it here makes the
+        # module incompatible with that checkpoint. Gate it so both the with- and
+        # without-subgoal checkpoints load. (Ported from the es_baseline vendored
+        # copy, which is byte-identical to the checkpoint's training code.)
         self.subgoal_conditioned = subgoal_conditioned
 
         self.scene_tokenizer = SceneTokenizer(
@@ -101,9 +115,17 @@ class DiffusionPolicy(nnx.Module):
             rngs=rngs,
         )
         self.instruction_encoder = MLP([inst_attr_dim, hidden_dim, hidden_dim, cond_dim], rngs=rngs)
-        if subgoal_conditioned:
+        if self.subgoal_conditioned:
             self.subgoal_encoder = MLP([2, hidden_dim, hidden_dim, cond_dim], rngs=rngs)
 
+        # FlowMol3 inference-OOD options (arXiv 2508.12629). All default off, and
+        # off they leave both the parameter tree and the traced programs exactly as
+        # they were -- a checkpoint trained without them still loads and samples
+        # bit-identically. `self_cond` is the one that changes the parameter tree
+        # (the stem's fan-in doubles); see
+        # `rl.diffusion_ft.self_cond_init` for the zero-initialized expansion that
+        # turns a base checkpoint into a self-cond one without changing its outputs.
+        self.self_cond = bool(self_cond)
         denoise_fn = UNet1DConditioned(
             in_ch=target_dim,
             cond_dim=cond_dim,
@@ -111,12 +133,21 @@ class DiffusionPolicy(nnx.Module):
             time_emb_dim=cond_dim,
             horizon=predict_horizon,
             hidden_dim=hidden_dim,
+            self_cond=self_cond,
             rngs=rngs,
         )
         self.diffusion = GaussianDiffusion(
             denoise_fn=denoise_fn,
             timesteps=100,
             predict_type=predict_type,
+            self_cond=self_cond,
+            sc_train_prob=sc_train_prob,
+            distort_p=distort_p,
+            distort_sigma=distort_sigma,
+            distort_mode=distort_mode,
+            distort_t_max=distort_t_max,
+            distort_t_min=distort_t_min,
+            distort_channels=distort_channels,
         )
 
         self._mesh: Optional[Mesh] = None
@@ -190,6 +221,53 @@ class DiffusionPolicy(nnx.Module):
 
     def _loss_from_condition_impl(self, target_btd: jnp.ndarray, cond: jnp.ndarray, inst_cond: jnp.ndarray, inst_cond_mask: jnp.ndarray, rng: jax.Array) -> jnp.ndarray:
         return self.diffusion.loss(jnp.transpose(target_btd, (0, 2, 1)), cond1=cond, cond2=inst_cond, cond2_mask=inst_cond_mask, rng=rng)
+
+    # -- RL / DPPO condition-space wrappers (transpose [B,T,D] <-> [B,D,T]) --- #
+    def loss_per_example_from_condition(self, target_btd: jnp.ndarray, cond: jnp.ndarray, inst_cond: jnp.ndarray, inst_cond_mask: jnp.ndarray, *, rng: jax.Array) -> jnp.ndarray:
+        """Per-example diffusion loss ``[B]`` given a precomputed condition."""
+        return self.diffusion.loss_per_example(
+            jnp.transpose(target_btd, (0, 2, 1)), cond1=cond, cond2=inst_cond, cond2_mask=inst_cond_mask, rng=rng,
+        )
+
+    def sample_with_trace_from_condition(
+        self, cond: jnp.ndarray, inst_cond: jnp.ndarray, inst_cond_mask: jnp.ndarray, *, rng: jax.Array,
+        k_trainable: int, trainable_denoise_fn=None, rl_mode: bool = False,
+        sigma_sample_floor: float = 0.0, sigma_logprob_floor: float = 0.1, prefix_len: int | None = None,
+        eta: float = 1.0, sampling_temp: float = 1.0, temp_mode: str = "uniform",
+    ):
+        """Sample + record last ``k_trainable`` transitions.
+
+        Returns ``(trajectory_btd, trace)``: the trajectory is ``[B, T, D]`` (like
+        :meth:`sample_from_condition`); the trace arrays (``x_t``/``x_prev``/
+        ``mean``/``std``) stay in the diffusion's native ``[K, B, D, T]`` layout,
+        to be fed back to :meth:`transition_log_prob_from_condition` unchanged.
+        """
+        batch_size = cond.shape[0]
+        traj, trace = self.diffusion.sample_with_trace(
+            shape=(batch_size, self.target_dim, self.predict_horizon),
+            cond1=cond, cond2=inst_cond, cond2_mask=inst_cond_mask, rng=rng,
+            k_trainable=k_trainable, trainable_denoise_fn=trainable_denoise_fn, rl_mode=rl_mode,
+            sigma_sample_floor=sigma_sample_floor, sigma_logprob_floor=sigma_logprob_floor,
+            prefix_len=prefix_len, eta=eta, sampling_temp=sampling_temp, temp_mode=temp_mode,
+        )
+        return jnp.transpose(traj, (0, 2, 1)), trace
+
+    def transition_log_prob_from_condition(
+        self, x_t: jnp.ndarray, x_prev: jnp.ndarray, t: jnp.ndarray,
+        cond: jnp.ndarray, inst_cond: jnp.ndarray, inst_cond_mask: jnp.ndarray, *,
+        sigma_floor: float = 0.1, prefix_len: int | None = None, trainable_denoise_fn=None,
+        x_sc: jnp.ndarray | None = None,
+    ) -> jnp.ndarray:
+        """Recompute the transition log-prob ``[B]`` for a stored transition.
+
+        ``x_t``/``x_prev`` are in the diffusion's native ``[B, D, T]`` layout (as
+        returned in the trace), so no transpose is needed here.
+        """
+        return self.diffusion.transition_log_prob(
+            x_t, x_prev, t, cond1=cond, cond2=inst_cond, cond2_mask=inst_cond_mask,
+            sigma_floor=sigma_floor, prefix_len=prefix_len, denoise_fn=trainable_denoise_fn,
+            x_sc=x_sc,
+        )
 
     def _resample_from_condition_impl(
         self, cond: jnp.ndarray, inst_cond: jnp.ndarray, inst_cond_mask: jnp.ndarray, proposals_btd: jnp.ndarray, n_timesteps: int, rng: jax.Array, noise_scale: float = 1.0, eta: float = 1.0, sampling_temp: float = 1.0, temp_mode: str = "uniform"

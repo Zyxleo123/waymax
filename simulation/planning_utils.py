@@ -93,6 +93,7 @@ def predict_planner_trajectories_with_periodic_replan(
     start_timestep: int,
     use_subgoal: bool,
     rng_key: jax.Array,
+    goal_timestep=None,
 ):
     num_worlds = int(sim_state.log_trajectory.x.shape[0])
     episode_num_steps = int(sim_state.log_trajectory.x.shape[-1])
@@ -116,6 +117,7 @@ def predict_planner_trajectories_with_periodic_replan(
             mask_goal=cfg.mask_goal,
             instruction_texts=instruction_texts,
             use_subgoal=cfg.use_subgoal,
+            goal_timestep=goal_timestep,
         )
         instruction_t = getattr(plan_result, "instruction_texts", None)
         subgoal_t = getattr(plan_result, "subgoal_preds", None)

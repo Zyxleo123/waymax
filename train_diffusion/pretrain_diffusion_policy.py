@@ -15,6 +15,7 @@ os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 from flax import nnx
 from jax.sharding import Mesh, PartitionSpec as P
@@ -49,6 +50,12 @@ from model.diffusion.diffusion_policy import DiffusionPolicy
 from train_diffusion.configs.diffusion_pretrain_config import DiffusionPretrainConfig, config_to_dict, parse_args
 
 
+def _leaf_by_path(tree, path):
+    for k in path:
+        tree = tree[k]
+    return tree.value if hasattr(tree, "value") else tree
+
+
 def build_training_components(args: DiffusionPretrainConfig):
     preprocess_cfg = args.preprocess_cfg
     model = DiffusionPolicy(
@@ -63,6 +70,15 @@ def build_training_components(args: DiffusionPretrainConfig):
         predict_horizon=args.predict_horizon,
         predict_type=args.predict_type,
         subgoal_conditioned=args.subgoal_conditioned,
+        # FlowMol3 options; all no-ops at their defaults.
+        self_cond=bool(getattr(args, "self_cond", False)),
+        sc_train_prob=float(getattr(args, "sc_train_prob", 0.5)),
+        distort_p=float(getattr(args, "distort_p", 0.0)),
+        distort_sigma=float(getattr(args, "distort_sigma", 0.0)),
+        distort_mode=str(getattr(args, "distort_mode", "relative")),
+        distort_t_max=int(getattr(args, "distort_t_max", -1)),
+        distort_t_min=int(getattr(args, "distort_t_min", 0)),
+        distort_channels=int(getattr(args, "distort_channels", 2)),
     )
     total_steps = max(1, args.epochs * args.steps_per_epoch)
     lr_schedule = optax.warmup_cosine_decay_schedule(
@@ -265,6 +281,45 @@ def run_train_step(
     return train_step_fn(params_state, opt_state, ema_params, rng_key, global_step, sim_state)
 
 
+def _build_rl_scenario_generator(args, global_batch_size: int):
+    """Yields batched SimulatorStates from RL-policy rollouts (instead of logs).
+
+    Active when --rl_policy_path / --rl_tfrecord / --rl_failure_dir is set; the
+    diffusion model then learns the RL policy's behaviour. See
+    rl/rl_diffusion_source.py.
+    """
+    from rl.rl_diffusion_source import RLDiffusionSource
+    from rl.scenario_source import ScenarioSource
+
+    if args.rl_failure_dir:
+        source = ScenarioSource.from_failure_dir(
+            args.rl_failure_dir, max_num_objects=args.max_num_objects
+        )
+    else:
+        tfrecord = args.rl_tfrecord or args.tfrecord_path
+        if not tfrecord:
+            raise ValueError("RL source needs --rl_tfrecord/--tfrecord_path or --rl_failure_dir.")
+        if args.rl_indices:
+            indices = [int(x) for x in args.rl_indices.split(",") if x.strip() != ""]
+        elif args.rl_num_scenarios:
+            indices = list(range(int(args.rl_num_scenarios)))
+        else:
+            raise ValueError("Provide --rl_indices or --rl_num_scenarios for the RL source.")
+        source = ScenarioSource.from_tfrecord(
+            tfrecord, indices, max_num_objects=args.max_num_objects
+        )
+
+    rl_source = RLDiffusionSource(
+        source,
+        model_path=args.rl_policy_path,
+        deterministic=args.rl_deterministic,
+        max_episode_steps=args.rl_max_episode_steps,
+        action_space_type=args.rl_action_space,
+        seed=args.seed,
+    )
+    return rl_source.generator(global_batch_size)
+
+
 def main():
     args = parse_args()
     configure_jax_compilation_cache(args.jax_compilation_cache_dir)
@@ -299,6 +354,50 @@ def main():
     start_epoch = 1
     global_step = jnp.array(0, dtype=jnp.int32)
     global_step_host: int = 0
+
+    init_from = getattr(args, "init_from", None)
+    if init_from and args.resume_path:
+        raise ValueError(
+            "--init_from and --resume_path are different things and cannot be combined: "
+            "--init_from starts a NEW run from another checkpoint's weights, "
+            "--resume_path continues THIS run. Pick one.")
+    if init_from:
+        # Fine-tune entry: parameters only. Optimizer state, lr schedule, epoch and
+        # step counters all start fresh, which is the point -- an Adam state and a
+        # cosine schedule from a 500-epoch pretrain are meaningless for a short
+        # fine-tune, and under --self_cond the optimizer state is not even the
+        # right shape.
+        import orbax.checkpoint as ocp
+
+        from rl.diffusion_ft.checkpoint import _apply_orbax_sharding_patch
+        from rl.diffusion_ft.self_cond_init import (
+            expand_params_for_self_cond,
+            find_stem_kernel_paths,
+        )
+
+        _apply_orbax_sharding_patch()
+        loaded = ocp.PyTreeCheckpointer().restore(init_from)
+        src_params = loaded["params_state"]
+        src_ema = loaded.get("ema_params")
+        if bool(getattr(args, "self_cond", False)):
+            stem = _leaf_by_path(src_params, ("diffusion", "denoise_fn", "stem", "kernel"))
+            already = int(np.asarray(stem).shape[1]) == 2 * int(args.target_dim)
+            if not already:
+                src_params = expand_params_for_self_cond(src_params, int(args.target_dim))
+                if src_ema is not None and find_stem_kernel_paths(src_ema):
+                    src_ema = expand_params_for_self_cond(src_ema, int(args.target_dim))
+                print(f"[init_from] zero-expanded stem for self-conditioning: "
+                      f"{np.asarray(stem).shape} -> "
+                      f"{np.asarray(_leaf_by_path(src_params, ('diffusion','denoise_fn','stem','kernel'))).shape}",
+                      flush=True)
+            else:
+                print("[init_from] checkpoint is already self-conditioned; no expansion", flush=True)
+        params_state = coerce_tree_like(params_state, src_params)
+        nonparam_state = coerce_tree_like(nonparam_state, loaded.get("nonparam_state", nonparam_state))
+        opt_state = tx.init(params_state)
+        ema_params = jax.tree_util.tree_map(
+            lambda x: x.copy(), coerce_tree_like(params_state, src_ema) if src_ema is not None else params_state)
+        print(f"[init_from] loaded parameters from {init_from}; optimizer and counters are fresh", flush=True)
 
     if args.resume_path:
         (

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 from typing import Any
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from flax import nnx
 
 from scores.scorer import Scorer
 from data.postprocess import postprocess_predictions
@@ -14,6 +16,43 @@ from data.types import PreprocessBatch, PreprocessConfig
 
 from model.diffusion.diffusion_policy import DiffusionPolicy
 from planner.abstract_planner import AbstractPlanner, PlannerResult
+
+
+# The policy's weights are passed to these as a *traced argument* (`state`), not
+# captured from `self`. Jitting a bound method (`jax.jit(self.policy.compute_condition)`)
+# bakes whatever arrays the module held at trace time into the executable as
+# constants, so a planner rebuilt around updated weights can silently keep
+# driving with the old ones -- which is exactly what happened to the in-training
+# closed-loop eval: epochs 5/10/15 of a run produced byte-identical rollouts.
+# `graphdef` is static (pure structure, no arrays), so the compilation cache is
+# still shared across planner instances instead of retracing per eval.
+@functools.partial(jax.jit, static_argnums=(0,))
+def _compute_condition_jit(graphdef, state, features):
+    return nnx.merge(graphdef, state).compute_condition(features)
+
+
+@functools.partial(jax.jit, static_argnums=(0, 1))
+def _sample_population_jit(
+    graphdef,
+    population_size: int,
+    state,
+    cond_bf: jax.Array,
+    inst_cond_bf: jax.Array | None,
+    inst_cond_mask_bf: jax.Array | None,
+    rng: jax.Array,
+) -> jax.Array:
+    policy = nnx.merge(graphdef, state)
+    batch_size = int(cond_bf.shape[0])
+    cond_bkf = jnp.repeat(cond_bf, repeats=population_size, axis=0)
+    if inst_cond_bf is None:  # diffusion_policy_v2: scene condition only
+        samples_btd = policy.sample_from_condition(cond_bkf, rng=rng)
+    else:
+        inst_cond_bf = jnp.repeat(inst_cond_bf, repeats=population_size, axis=0)
+        inst_cond_mask_bf = jnp.repeat(inst_cond_mask_bf, repeats=population_size, axis=0)
+        samples_btd = policy.sample_from_condition(cond_bkf, inst_cond_bf, inst_cond_mask_bf, rng=rng)
+    horizon = int(samples_btd.shape[1])
+    target_dim = int(samples_btd.shape[2])
+    return samples_btd.reshape(batch_size, population_size, horizon, target_dim)
 
 
 class DiffusionPlanner(AbstractPlanner):
@@ -32,15 +71,10 @@ class DiffusionPlanner(AbstractPlanner):
         # The policies of branch new_model (diffusion_policy_v2) take the scene condition only; the earlier ones
         # also an instruction / subgoal condition, which is fed zeros here.
         self._instruction_conditioned = hasattr(policy, "instruction_encoder")
-        self._compute_condition_jit = jax.jit(self.policy.compute_condition)
-        self._sample_population_jit = jax.jit(
-            lambda *, cond_bf, inst_cond_bf, inst_cond_mask_bf, rng: self._sample_population(
-                cond_bf=cond_bf,
-                inst_cond_bf=inst_cond_bf,
-                inst_cond_mask_bf=inst_cond_mask_bf,
-                rng=rng,
-            ),
-        )
+        # Split once: `_policy_state` carries the arrays that the jitted helpers
+        # take as an argument, so this planner always drives with the weights it
+        # was handed rather than with whatever was traced first.
+        self._policy_graphdef, self._policy_state = nnx.split(policy)
 
     def plan_trajectory(
         self,
@@ -52,15 +86,22 @@ class DiffusionPlanner(AbstractPlanner):
         instruction_mask: jnp.ndarray = None,
         timestep: int = 0,
         mask_goal: bool = False,
+        goal_timestep: jnp.ndarray | int | None = None,
         **kwargs: Any,
     ) -> PlannerResult:
         rng, key_pre, key_sample = jax.random.split(rng, 3)
+        # Use each scene's real goal timestep (its last valid ego log step),
+        # threaded in as `goal_timestep`, instead of a hard-coded constant. The
+        # goal step only sets `remaining_timesteps=(goal_step-anchor)/100` in the
+        # conditioning; a fixed 90 mis-told the policy how much time remained for
+        # every scene whose horizon differed.
         pre_batch, _ = preprocess_simulator_state(
             sim_state,
             key_pre,
             self.preprocess_cfg,
             anchor_step_override=timestep,
-            goal_step_override=90,
+            # 90 when no per-scene goal step is threaded in (callers other than simulation.runner).
+            goal_step_override=90 if goal_timestep is None else goal_timestep,
             goal_xy_override=goal,
             world_dt_method="median",
         )
@@ -112,7 +153,12 @@ class DiffusionPlanner(AbstractPlanner):
         cond_bf, inst_cond_bf = self._compute_condition_jit(features)
         return cond_bf, inst_cond_bf, instruction_mask
 
-    def _sample_population(
+    # Subclasses (DiffusionESPlanner, FM-ES) and notebooks/es_debug.py call these two; both run the
+    # module-level jits on this planner's own weights (`_policy_state`), never on traced-in constants.
+    def _compute_condition_jit(self, features: dict[str, jax.Array]):
+        return _compute_condition_jit(self._policy_graphdef, self._policy_state, features)
+
+    def _sample_population_jit(
         self,
         *,
         cond_bf: jax.Array,
@@ -120,17 +166,15 @@ class DiffusionPlanner(AbstractPlanner):
         inst_cond_mask_bf: jax.Array | None,
         rng: jax.Array,
     ) -> jax.Array:
-        batch_size = int(cond_bf.shape[0])
-        cond_bkf = jnp.repeat(cond_bf, repeats=self.population_size, axis=0)
-        if inst_cond_bf is None:
-            samples_btd = self.policy.sample_from_condition(cond_bkf, rng=rng)
-        else:
-            inst_cond_bf = jnp.repeat(inst_cond_bf, repeats=self.population_size, axis=0)
-            inst_cond_mask_bf = jnp.repeat(inst_cond_mask_bf, repeats=self.population_size, axis=0)
-            samples_btd = self.policy.sample_from_condition(cond_bkf, inst_cond_bf, inst_cond_mask_bf, rng=rng)
-        horizon = int(samples_btd.shape[1])
-        target_dim = int(samples_btd.shape[2])
-        return samples_btd.reshape(batch_size, self.population_size, horizon, target_dim)
+        return _sample_population_jit(
+            self._policy_graphdef,
+            self.population_size,
+            self._policy_state,
+            cond_bf,
+            inst_cond_bf,
+            inst_cond_mask_bf,
+            rng,
+        )
 
     def _postprocess_population(
         self,

@@ -22,8 +22,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from data.scenario_loader import load_scenario_state_batch_fast
-from lane_graph.lane_graph_utils import LaneGraphLoader, lane_graph_zip_path_for_tfrecord
+from data.scenario_loader import (
+    ScenarioIndexOutOfRange,
+    infer_route_dims,
+    load_scenario_state_batch_fast,
+)
+from lane_graph.lane_graph_utils import lane_graph_zip_path_for_tfrecord
 from scores import helpers as scorer_helpers
 from scores.scorer_lane_graph import LaneGraphShardStore
 from simulation.evaluation_utils import (
@@ -89,11 +93,50 @@ def _load_completed_scenarios(start_from: str | None) -> set[tuple[str, int]]:
     return completed
 
 
+# Sidecar files that live next to the records in some eval dirs (e.g. the
+# failure set ships excluded_overpass.json). A bare glob("*") hands these to the
+# TFRecord reader, which fails with "corrupted record at 0".
+_NON_TFRECORD_SUFFIXES = frozenset({
+    ".json", ".jsonl", ".txt", ".md", ".yaml", ".yml", ".csv",
+    ".npz", ".npy", ".pkl", ".png", ".jpg", ".mp4", ".log",
+})
+
+
+def _list_tfrecord_paths(tfrecord_dir: str) -> list[str]:
+    paths = [
+        p
+        for p in sorted(glob(str(Path(tfrecord_dir) / "*")))
+        if not os.path.isdir(p) and Path(p).suffix.lower() not in _NON_TFRECORD_SUFFIXES
+    ]
+    if not paths:
+        raise FileNotFoundError(f"no tfrecords under {tfrecord_dir}")
+    return paths
+
+
+def _dataset_config_for(tfrecord_path: str, args) -> waymax_config.DatasetConfig:
+    """Dataset config matched to *this* tfrecord's route budget.
+
+    The route dims are read off the file rather than inherited from
+    WOD_1_3_1_TRAINING's 45x800, so eval sets exported with a different budget
+    (failures.tfrecord is 10x300) parse instead of dying at ParseExampleV2.
+    """
+    num_paths, num_points_per_path = infer_route_dims(tfrecord_path)
+    return dataclasses.replace(
+        waymax_config.WOD_1_3_1_TRAINING,
+        path=str(tfrecord_path),
+        max_num_objects=int(args.max_num_objects),
+        batch_dims=(args.num_worlds,),
+        shuffle_seed=0,
+        num_paths=num_paths,
+        num_points_per_path=num_points_per_path,
+    )
+
+
 def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]]:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.target_scenario_path is not None:
+    if getattr(args, "target_scenario_path", None) is not None:
         with open(args.target_scenario_path, "r") as f:
             target_scenarios = json.load(f)
     else:
@@ -103,9 +146,8 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
     tested_scenarios, curr_scenario_index = 0, 0
     target_scenario_cursor = 0
     reached_all, success_all = 0, 0
-    tfrecord_paths = sorted(glob(str(Path(args.tfrecord_dir) / "*")))
-    if not tfrecord_paths:
-        raise FileNotFoundError(f"No tfrecords found under {args.tfrecord_dir}")
+    results: list[dict[str, Any]] = []
+    tfrecord_paths = _list_tfrecord_paths(args.tfrecord_dir)
 
     def _advance_tfrecord() -> bool:
         """Move to next shard. Returns False when this split is exhausted (do not pop empty)."""
@@ -123,24 +165,11 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
         tfrecord_path = tfrecord_paths.pop(0)
         curr_scenario_index = 0
         target_scenario_cursor = 0
-        ds_cfg = dataclasses.replace(
-            waymax_config.WOD_1_3_1_TRAINING,
-            path=str(tfrecord_path),
-            max_num_objects=int(args.max_num_objects),
-            batch_dims=(args.num_worlds,),
-            shuffle_seed=0,
-        )
+        ds_cfg = _dataset_config_for(tfrecord_path, args)
         return True
 
     tfrecord_path = tfrecord_paths.pop(0)
-    # lane_graph_loader = LaneGraphLoader(args.lane_graph_dir)
-    ds_cfg = dataclasses.replace(
-        waymax_config.WOD_1_3_1_TRAINING,
-        path=str(tfrecord_path),
-        max_num_objects=int(args.max_num_objects),
-        batch_dims=(args.num_worlds,),
-        shuffle_seed=0,
-    )
+    ds_cfg = _dataset_config_for(tfrecord_path, args)
     if args.scenario_indices is not None:
         target_scenario_indices = [int(idx) for idx in args.scenario_indices.split(",")]
     else:
@@ -230,8 +259,10 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                 )
                 scenario_indices = scenario_indices + [scenario_indices[-1]] * num_pad
                 scenario_ids = list(scenario_ids) + [scenario_ids[-1]] * num_pad
-        except Exception as e:
-            print(f"Error loading scenarios {scenario_indices} from {os.path.basename(tfrecord_path)}: {e}")
+        except ScenarioIndexOutOfRange:
+            # Only "ran off the end of this file" advances to the next tfrecord. Every other load error
+            # (unreadable file, route-dim mismatch, truncated record) is a real fault and is raised rather
+            # than laundered into a quietly skipped shard.
             if not _advance_tfrecord():
                 break
             continue
@@ -252,7 +283,7 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
             target_lane_ids = [None for _ in range(len(scenario_indices))]
             target_lane_xys = [None for _ in range(len(scenario_indices))]
         else:
-            if args.planner in ("es", "es_fm", "temporal-vla", "pdm_closed", "diffusion_planner"):
+            if getattr(args, "planner", None) in ("es", "es_fm", "temporal-vla", "pdm_closed", "diffusion_planner"):
                 if args.lane_graph_dir:
                     requested_zip_path = lane_graph_zip_path_for_tfrecord(str(tfrecord_path), args.lane_graph_dir)
                     if lane_graph_zip_path != requested_zip_path:
@@ -282,8 +313,9 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                 start_timestep=int(args.start_timestep),
                 replan_interval_steps=int(args.replan_interval_steps),
                 instruction_interval_steps=int(args.instruction_interval_steps),
-                use_subgoal=args.use_subgoal,
+                use_subgoal=getattr(args, "use_subgoal", False),
                 rng_key=rng_key,
+                goal_timestep=goal_t_b,  # real per-scene goal step (posthoc-opt-es); ES planners keep 90
             )
             pred_traj = np.asarray(pred.trajectory_world_bt5)
             start_t = np.asarray(pred.start_t_b, dtype=np.int32)
@@ -364,7 +396,7 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
         reached_all += int(np.sum(goal_eval["reached"]))
         success_all += int(np.sum(success))
 
-        if args.save_trajectory:
+        if getattr(args, "save_trajectory", False):
             for i, scenario_idx in enumerate(scenario_indices):
                 traj_data = {
                     "scenario_idx": int(scenario_idx),
@@ -423,13 +455,13 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                     np.savez_compressed(cache_path, **packed)
                 except Exception as e:
                     print(f"Failed to save sim_state cache for scenario {scenario_idx} (world {i}): {e}")
-        if args.save_instruction:
+        if getattr(args, "save_instruction", False):
             for i, scenario_idx in enumerate(scenario_indices):
                 instruction_data = {
                     "scenario_idx": int(scenario_idx),
                     "ego_idx": int(ego_idx_b[i]),
                     "instructions": instructions[i],
-                    "subgoals": subgoals[i] if args.use_subgoal else None,
+                    "subgoals": subgoals[i] if getattr(args, "use_subgoal", False) else None,
                     "reward_functions": reward_functions[i],
                     "target_lane_ids": target_lane_ids[i]
                 }
@@ -437,55 +469,42 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                 _save_json(instruction_path, instruction_data)
 
         if args.visualize_mode == "all":
-            visualize_indices = np.arange(len(scenario_indices))
-            video_requests = [
-                (str(tfrecord_path), int(idx)) for idx in scenario_indices
-            ]
+            visualize_indices = list(range(len(scenario_indices)))
         elif args.visualize_mode == "success":
-            visualize_indices = np.where(success)[0]
-            video_requests = [
-                (str(tfrecord_path), int(scenario_indices[i]))
-                for i in range(len(scenario_indices)) if success[i]
-            ]
+            visualize_indices = [i for i in range(len(scenario_indices)) if success[i]]
         elif args.visualize_mode == "failure":
-            visualize_indices = np.where(~success)[0]
-            video_requests = [
-                (str(tfrecord_path), int(scenario_indices[i]))
-                for i in range(len(scenario_indices)) if not success[i]
-            ]
-        else:
+            visualize_indices = [i for i in range(len(scenario_indices)) if not success[i]]
+        else:  # "none" (or anything else): no videos
             visualize_indices = []
         video_requests = [
             (str(tfrecord_path), int(scenario_indices[i]))
             for i in visualize_indices
         ]
-        ego_start_times = [0 for i in visualize_indices]
+        ego_start_times = [0 for _ in visualize_indices]
         ego_trajectories = [np.asarray(pred_traj[i]) for i in visualize_indices]
-        # ego_indices = get_sdc_indices_for_batched_state(replaced_state)
-        # ego_trajectories = [
-        #     np.asarray(
-        #         jnp.stack(
-        #             [
-        #                 replaced_state.log_trajectory.x[i, int(ego_indices[i]), :],
-        #                 replaced_state.log_trajectory.y[i, int(ego_indices[i]), :],
-        #                 replaced_state.log_trajectory.yaw[i, int(ego_indices[i]), :],
-        #                 replaced_state.log_trajectory.vel_x[i, int(ego_indices[i]), :],
-        #                 replaced_state.log_trajectory.vel_y[i, int(ego_indices[i]), :],
-        #             ], axis=-1
-        #         )
-        #     ) for i in visualize_indices
-        # ]
         goal_xys = [np.asarray(goal_xy_b2[i]) for i in visualize_indices]
+
+        # Map every scenario position to its rendered video path (None when
+        # visualization is disabled or this scenario was not requested).
+        # render_videos_batched returns one path per *request*, aligned to
+        # `visualize_indices` -- not one per scenario -- so indexing it directly
+        # by the scenario loop counter was wrong whenever a subset was rendered
+        # and crashed outright (NameError) when nothing was rendered.
+        video_path_by_pos: dict[int, Any] = {i: None for i in range(len(scenario_indices))}
         if video_requests:
-            video_paths = render_videos_batched(
+            rendered = render_videos_batched(
                 tfrecord_scenarios=video_requests,
-                target_vehicles=[None] * len(scenario_indices),
+                target_vehicles=[None] * len(video_requests),
                 output_dir=output_dir.as_posix(),
                 ego_start_times=ego_start_times,
                 ego_trajectories=ego_trajectories,
                 goal_xy=goal_xys,
             )
+            for pos, path in zip(visualize_indices, rendered):
+                video_path_by_pos[pos] = path
+
         for i, scenario_idx in enumerate(scenario_indices):
+            vp = video_path_by_pos.get(i)
             result = {
                 "scenario_idx": int(scenario_idx),
                 "ego_idx": int(ego_idx_b[i]),
@@ -500,11 +519,12 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
                 "overlap_timestep": int(overlap_step[i]),
                 "offroad_timestep": int(offroad_step[i]),
                 "success": bool(success[i]),
+                "video_path": vp.as_posix() if vp is not None else None,
                 "tfrecord": str(tfrecord_path),
             }
             result_path = output_dir / f"{os.path.basename(tfrecord_path)}.scenario_{scenario_idx:03d}.json"
             _save_json(result_path, result)
-            completed_scenarios.add((os.path.basename(tfrecord_path), int(scenario_idx)))
+            results.append(result)
         tested_scenarios += len(scenario_indices)
         print(f"Finished testing scenarios {scenario_indices} from {os.path.basename(tfrecord_path)}.")
         print(f"Current success rate: {success_all}/{tested_scenarios} = {success_all / tested_scenarios:.4f}")
@@ -520,3 +540,4 @@ def run(args, planner: AbstractPlanner, log_replay=False) -> list[dict[str, Any]
     _save_json(output_dir / "summary.json", summary)
 
     print(json.dumps(summary, indent=2))
+    return results

@@ -20,6 +20,12 @@ program_search_modules_design.md
 
 # tests
 tests/
+# ...but the DPPO gate tests ARE the reproducibility contract for the diffusion
+# fine-tuning pipeline (Gate 1/2/2b); keep them tracked. Un-ignore the dir first,
+# then its contents (git cannot re-include a file under an ignored directory).
+!rl/diffusion_ft/tests/
+!rl/diffusion_ft/tests/*.py
+rl/diffusion_ft/tests/__pycache__/
 
 # benchmarks
 benchmarks/
@@ -58,3 +64,27 @@ waymo-open-dataset/
 
 # Local model checkpoints
 ckpts/
+.DS_Store
+
+# Vendored V-Max: source only. These are training artifacts that live in the
+# same tree (and V-Max/runs is a STALE set -- the live runs are under
+# /data/user_data/yixiz/autonlab/zfsauton/scratch/yixiz/waymax_rs/vmax_repro). See V-Max/VENDOR_PROVENANCE.txt.
+V-Max/runs/
+V-Max/val_full/
+V-Max/vmax_smoke/
+V-Max/slurm-*.out
+
+# ScenarioMax: vendored as a clone with its own .git (nested repo), not yet
+# folded into this repo like V-Max was. Ignore until that's done deliberately.
+ScenarioMax/
+
+# hydra run dirs, RL/SAC checkpoints, generated videos and repro artifacts
+outputs/
+runs/
+pseudo_gt_videos/
+refine/
+es_baseline/repro/
+
+# stray root-level training logs and debug images
+*.log
+training_tfexample.tfrecord-*.png

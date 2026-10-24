@@ -1,0 +1,18 @@
+% Minimal standalone preview for safety_anchor_frames.tex.
+% Your real deck's main.tex already has a preamble; this just shows the
+% packages the frames need and lets you compile them on their own:
+%     pdflatex main_preview.tex   (run twice for the section TOC)
+\documentclass[aspectratio=169,10pt]{beamer}
+\usetheme{metropolis}          % or your theme; any theme works
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{tikz}
+\usepackage{xcolor}
+
+% If \operatorname is unavailable in your setup, amsmath provides it.
+
+\title{Safety \& Anchor Loss}
+\begin{document}
+\input{safety_anchor_frames}
+\end{document}
