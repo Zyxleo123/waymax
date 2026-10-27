@@ -65,15 +65,19 @@ def _inputs(model, sim_state, timestep: int) -> tuple[dict, dict]:
 
 @torch.no_grad()
 def ego_modes_world(model, sim_state, timestep: int, k: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """The model's own forecast of the ego: k modes (endpoint NMS as the planner modes), world frame at the
-    model future steps (future_dt apart, first step future_dt after now): xy [B,k,T,2], yaw [B,k,T], probs [B,k]
-    renormalized over the k."""
+    """The model's own forecast of the ego: k modes (endpoint NMS as the planner modes; k = 0: every decoded
+    anchor, in anchor order), world frame at the model future steps (future_dt apart, first step future_dt after
+    now): xy [B,k,T,2], yaw [B,k,T], probs [B,k] renormalized over the k."""
     cfg = model.config
     f, meta = _inputs(model, sim_state, timestep)
     _, dec = model(f)
     rows = torch.arange(f["ego_idx"].shape[0], device=f["ego_idx"].device)
     ego = f["ego_idx"].long()
-    sel = select_modes(dec, k, cfg.nms_dist_m, cfg.max_range)[rows, ego][:, None]           # [B,1,k]
+    if k > 0:
+        sel = select_modes(dec, k, cfg.nms_dist_m, cfg.max_range)[rows, ego][:, None]       # [B,1,k]
+    else:
+        n_modes = dec["probs"].shape[-1]
+        sel = torch.arange(n_modes, device=rows.device).expand(len(rows), 1, n_modes)
     delta = gather_k(dec["pred_xy_k"].float()[rows, ego][:, None], sel)[:, 0].cpu().numpy() * cfg.max_range
     yaw_vec = gather_k(dec["yaw_vec_k"].float()[rows, ego][:, None], sel)[:, 0].cpu().numpy()
     p = dec["probs"].float()[rows, ego].gather(-1, sel[:, 0])
@@ -342,11 +346,27 @@ class AnchorLearnedScorer:
             self._key, self._calls = key, 0
             self._context(sim_state, int(timestep), np.asarray(jax.device_get(goal)))
             self.t_context.append(time.perf_counter() - t0)
-        ctx, origin, heading, valid, ego = self._ctx
+        _, _, _, valid, ego = self._ctx
         pop = np.asarray(jax.device_get(world_bkt5), dtype=np.float64)
         if self._calls == 0:
             self._check_anchor(pop, ego, valid)
         t1 = time.perf_counter()
+        scores = self._scores(sim_state, int(timestep), world_bkt5, pop)
+        self.t_score.append(time.perf_counter() - t1)
+        self._calls += 1
+        self.pool_sizes[pop.shape[1]] += 1
+        return jnp.asarray(scores, dtype=jnp.float32)
+
+    @torch.no_grad()
+    def score_extra(self, sim_state, timestep: int, world_bkt5) -> np.ndarray:
+        """Scores [B,K] of trajectories outside the ES pools (e.g. the expert) in the replan just scored; not
+        counted as a scoring call."""
+        if self._key != (id(sim_state), int(timestep)):
+            raise RuntimeError("score_extra needs the replan's ES pools scored first")
+        return self._scores(sim_state, int(timestep), world_bkt5, np.asarray(world_bkt5, dtype=np.float64))
+
+    def _scores(self, sim_state, timestep: int, world_bkt5, pop: np.ndarray) -> np.ndarray:
+        ctx, origin, heading, valid, _ = self._ctx
         cfg = self.model.config
         idx = cfg.future_stride * np.arange(1, cfg.future_steps + 1)
         if pop.shape[2] <= idx[-1]:
@@ -358,12 +378,9 @@ class AnchorLearnedScorer:
         total, _ = self.model.scorer(ctx, to(xy), to(yaw), chunk=self.chunk, heading=to(yaw))
         scores = total.float().cpu().numpy()
         if self.rule_lambda > 0:
-            scores = scores + self.rule_lambda * self._rule_penalty(sim_state, int(timestep), world_bkt5)
+            scores = scores + self.rule_lambda * self._rule_penalty(sim_state, timestep, world_bkt5)
         scores[~valid] = 0.0
-        self.t_score.append(time.perf_counter() - t1)
-        self._calls += 1
-        self.pool_sizes[pop.shape[1]] += 1
-        return jnp.asarray(scores, dtype=jnp.float32)
+        return scores
 
     def write_stats(self) -> dict:
         ms = lambda x: {"mean": 1000 * float(np.mean(x)), "median": 1000 * float(np.median(x)),  # noqa: E731

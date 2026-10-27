@@ -1053,7 +1053,9 @@ def _attach_es_debug(args: argparse.Namespace, planner) -> None:
     if args.anchor_ego_seed > 0:
         planner.ego_seed_fn = AnchorEgoSeeder(forecaster.model, args.anchor_ego_seed)
     if args.es_debug_dir:
-        planner.debug_dump_fn = ESDebugDumper(forecaster.model, args.es_debug_dir, k=max(6, args.anchor_ego_seed))
+        scorer = getattr(planner, "learned_scorer", None)                 # scores the expert when it can
+        planner.debug_dump_fn = ESDebugDumper(forecaster.model, args.es_debug_dir, k=max(6, args.anchor_ego_seed),
+                                              scorer=scorer if hasattr(scorer, "score_extra") else None)
     print(f"[es_debug] ego seeds {args.anchor_ego_seed} from {forecaster.checkpoint}; dumps -> {args.es_debug_dir}")
 
 
